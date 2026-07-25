@@ -38,3 +38,8 @@ export async function streamChat(sessionId, formData, signal) {
   }
   return r.body.getReader()
 }
+
+/** Step 2: GET /defaults (agent package + user workspace). Same contract as spa-v2. */
+export async function fetchDefaults() {
+  return api('GET', '/defaults')
+}

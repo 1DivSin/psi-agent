@@ -24,7 +24,13 @@ export type SessionInfo = {
   id: string
   ai_id: string
   workspace: string
+  agent?: string
   channel_socket: string
+}
+
+export type GatewayDefaults = {
+  agent: string
+  workspace: string
 }
 
 export type AiInfo = {
@@ -60,8 +66,23 @@ export async function listSessions() {
   return api<SessionInfo[]>('GET', '/sessions')
 }
 
-export async function createSession(aiId: string, workspace: string) {
-  return api<SessionInfo>('POST', '/sessions', { ai_id: aiId, workspace })
+/** Step 2: GET /defaults — shared by spa v1/v2 (agent package + user workspace). */
+export async function fetchDefaults() {
+  return api<GatewayDefaults>('GET', '/defaults')
+}
+
+/** Step 2: optional ``agent`` is passed through to Gateway → Session (#472). */
+export async function createSession(
+  aiId: string,
+  workspace: string,
+  opts: { agent?: string; id?: string } = {},
+) {
+  return api<SessionInfo>('POST', '/sessions', {
+    ai_id: aiId,
+    workspace,
+    ...(opts.agent ? { agent: opts.agent } : {}),
+    ...(opts.id ? { id: opts.id } : {}),
+  })
 }
 
 export async function deleteSession(sessionId: string) {
