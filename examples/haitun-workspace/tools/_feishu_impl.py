@@ -810,6 +810,75 @@ async def list_chat_members_impl(
     }
 
 
+def _build_create_chat_request(
+    name: str,
+    description: str,
+    user_id_list: list[str],
+    owner_id: str,
+    user_id_type: str,
+    set_bot_manager: bool,
+) -> BaseRequest:
+    req = BaseRequest()
+    req.http_method = HttpMethod.POST
+    req.uri = "/open-apis/im/v1/chats"
+    req.add_query("user_id_type", user_id_type)
+    if set_bot_manager:
+        req.add_query("set_bot_manager", "true")
+    body: dict[str, Any] = {"name": name}
+    if description:
+        body["description"] = description
+    if user_id_list:
+        body["user_id_list"] = user_id_list
+    if owner_id:
+        body["owner_id"] = owner_id
+    req.body = body
+    req.token_types = {AccessTokenType.TENANT, AccessTokenType.USER}
+    return req
+
+
+async def create_chat_impl(
+    name: str,
+    user_ids: list[str] | None = None,
+    description: str = "",
+    owner_id: str = "",
+    user_id_type: str = "open_id",
+) -> dict[str, Any]:
+    """Create a new group chat and pull the given people in. Returns the new chat_id.
+
+    Created with the bot's tenant token. ``owner_id`` should be the **requester**
+    (the person who asked for the group — their ``sender_open_id``): the group is
+    handed to them, and the bot stays on as an admin (``set_bot_manager``) so it can
+    still post with ``feishu_message_send``. When ``owner_id`` is empty the bot itself
+    owns the group (fallback for bot-authored groups with no human requester).
+    ``user_ids`` are the members to invite (max 50, resolve names via
+    ``feishu_chat_find_member`` / ``feishu_department_members``).
+    """
+    if not name.strip():
+        return _error("name is required to create a group chat.")
+    ids = [u.strip() for u in (user_ids or []) if u and u.strip()]
+    if len(ids) > 50:
+        return _error("Feishu allows at most 50 members per create-chat call; invite the rest afterwards.")
+    # Hand the group to the requester (owner_id) but keep the bot as an admin so it
+    # can still post afterwards; only when no owner is given does the bot own it.
+    set_bot_manager = bool(owner_id.strip())
+    req = _build_create_chat_request(
+        name.strip(), description.strip(), ids, owner_id.strip(), user_id_type, set_bot_manager
+    )
+    res = await _invoke(req)
+    if not res["ok"]:
+        return res
+    data = res["data"] if isinstance(res["data"], dict) else {}
+    return {
+        "ok": True,
+        "chat_id": data.get("chat_id", ""),
+        "name": data.get("name", name),
+        "invited": ids,
+        "invited_count": len(ids),
+        "invalid_user_ids": data.get("invalid_user_id_list") or [],
+        "owner_id": data.get("owner_id", ""),
+    }
+
+
 # ── Approval (审批) — list pending tasks, read instance, approve/reject ────────
 #
 # Lets the agent read an approval application's form content and decide whether
