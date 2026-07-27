@@ -17,6 +17,7 @@ import pathlib
 import re
 from typing import Any
 
+import _runtime_paths as _paths
 import anyio
 from lark_channel.api.drive import comment as _comment
 from lark_channel.api.wiki import node as _wiki_node
@@ -1576,8 +1577,7 @@ def _norm_user_key(user_key: str = "") -> str:
 
 
 def _uat_store_path() -> str:
-    workspace = os.environ.get("WORKSPACE_DIR", "")
-    base = pathlib.Path(workspace) if workspace else pathlib.Path(__file__).resolve().parents[1]
+    base = pathlib.Path(_paths.workspace_dir())
     d = base / ".psi" / "feishu"
     d.mkdir(parents=True, exist_ok=True)
     return str(d / "uat.json")
