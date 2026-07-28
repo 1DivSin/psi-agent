@@ -14,6 +14,7 @@ from psi_agent.session.ai_client import AiClient
 from psi_agent.session.channel_adapter import ChannelAdapter
 from psi_agent.session.conversation import Conversation
 from psi_agent.session.history_display import (
+    KIND_COMPACTED,
     message_kind,
     messages_for_ai,
     with_kind,
@@ -247,6 +248,7 @@ class SessionAgent:
                     accumulated_tool_calls: dict[int, dict[str, Any]] = {}
                     accumulated_content: str = ""
                     accumulated_reasoning: str = ""
+                    _compaction_needed = False
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -261,6 +263,9 @@ class SessionAgent:
                             if delta.reasoning:
                                 yield AgentChunk(reasoning=delta.reasoning)
                                 accumulated_reasoning += delta.reasoning
+
+                            if delta.compaction_needed:
+                                _compaction_needed = True
 
                             if delta.finish_reason and not finish_reason:
                                 finish_reason = delta.finish_reason
@@ -286,23 +291,6 @@ class SessionAgent:
                             if finish_reason == "error":
                                 logger.warning("AI returned error, stopping without saving to history")
                                 raise AgentError(accumulated_content or accumulated_reasoning or "Unknown AI error")
-
-                            if finish_reason == "stop":
-                                logger.debug("AI finished with stop")
-                                logger.debug(
-                                    f"Stop: content={len(accumulated_content)} chars, "
-                                    f"reasoning={len(accumulated_reasoning)} chars"
-                                )
-                                if accumulated_content or accumulated_reasoning:
-                                    assistant_msg: dict[str, Any] = {"role": "assistant"}
-                                    if accumulated_content:
-                                        assistant_msg["content"] = accumulated_content
-                                    if accumulated_reasoning:
-                                        assistant_msg["reasoning"] = accumulated_reasoning
-                                    self._conversation.add(with_kind(assistant_msg, turn_response_kind))
-                                await self._conversation.commit()
-                                await self._schedule_registry.refresh()
-                                return
 
                             if finish_reason == "tool_calls":
                                 logger.info("AI requested tool calls, processing...")
@@ -380,7 +368,26 @@ class SessionAgent:
 
                                 break
 
-                    if finish_reason not in ("error", "stop", "tool_calls"):
+                    if finish_reason == "stop":
+                        logger.debug("AI finished with stop")
+                        logger.debug(
+                            f"Stop: content={len(accumulated_content)} chars, "
+                            f"reasoning={len(accumulated_reasoning)} chars"
+                        )
+                        if accumulated_content or accumulated_reasoning:
+                            assistant_msg: dict[str, Any] = {"role": "assistant"}
+                            if accumulated_content:
+                                assistant_msg["content"] = accumulated_content
+                            if accumulated_reasoning:
+                                assistant_msg["reasoning"] = accumulated_reasoning
+                            self._conversation.add(with_kind(assistant_msg, turn_response_kind))
+                        await self._conversation.commit()
+                        await self._schedule_registry.refresh()
+                        if _compaction_needed:
+                            await self._maybe_compact()
+                        return
+
+                    if finish_reason not in ("error", "stop", "tool_calls", "compaction_needed"):
                         logger.warning(
                             f"Unexpected finish_reason={finish_reason!r}, "
                             f"saving {len(accumulated_content)} chars of content and stopping"
@@ -405,3 +412,36 @@ class SessionAgent:
                     )
                     await self._conversation.commit()
                     yield AgentChunk(content="[Max tool rounds reached]")
+
+    async def _maybe_compact(self) -> None:
+        """Invoke compact_history from system.py, insert compaction message
+        into conversation.  system prompt merge + old-message trimming is
+        deferred to ``messages_for_ai()``."""
+        compaction_fn = self._system_prompt.compaction_fn
+        if compaction_fn is None:
+            logger.warning("No compact_history function in system.py, skipping compaction")
+            return
+
+        async def complete_fn(messages: list[dict[str, Any]]) -> str:
+            body: dict[str, Any] = {"messages": messages, "stream": True}
+            parts: list[str] = []
+            async with aclosing(self._ai_client.stream(body)) as stream:
+                async for delta in stream:
+                    if delta.content:
+                        parts.append(delta.content)
+                    if delta.finish_reason == "error":
+                        raise AgentError(delta.content or "Compaction AI call failed")
+            return "".join(parts)
+
+        try:
+            summary = await compaction_fn(self._conversation.messages, complete_fn)
+            if not summary:
+                logger.debug("Compaction returned empty summary, skipping")
+                return
+            logger.info(f"Compaction summary generated ({len(summary)} chars)")
+
+            self._conversation.add({"role": "compacted", "content": summary, "kind": KIND_COMPACTED})
+            await self._conversation.commit()
+            logger.info("Compaction completed")
+        except Exception as e:
+            logger.error(f"Compaction failed: {e!r}")

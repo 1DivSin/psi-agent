@@ -65,7 +65,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
    - reasoning → `yield AgentChunk(reasoning=...)` 给 ChannelAdapter
    - tool_calls → 累积（按 index 拼接 partial JSON）
     - `finish_reason="tool_calls"` → 执行 tool → 结果追加到 history → 回到步骤 4
-    - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry（本轮 tool 可能修改了 schedule 文件）→ 释放锁
+    - finish_reason="stop" → 最终 content 追加到 history + `commit()` + 刷新 schedule registry + 若收到 compaction 信号则调用 `_maybe_compact()` → 释放锁
    - finish_reason="error" → 回滚到快照 → `raise AgentError(message)`
    - 任何未捕获异常 → 回滚到快照 → 向上传播
 6. 最多 `max_tool_rounds` 轮 tool call，达到上限时追加关闭 assistant 消息 + commit
@@ -228,13 +228,41 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 - 加载：`SessionAgent.create()` → `Conversation.from_workspace(..., appdata_root=…)` 双读
 - **Turn 级别原子性**：`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器，首次 `add()` / `replace_system()` 自动建立快照。user message 追加后立即 `commit()`（早期落盘，崩溃恢复基线），后续仅在对 AI 响应成功的检查点再次 `commit()` 更新；任何异常（AI error、连接断开、cancellation）都会通过 ``__aexit__`` 自动触发 `Conversation.rollback()` 恢复到快照，保证内存和磁盘始终同步于最近一个成功阶段。
 - 保存时机（一致性检查点）：
-  - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）
+  - `finish_reason="stop"` — assistant 响应追加后立即 `commit()`，随后刷新 schedule registry（完整回合）；若收到 compaction 信号则 `_maybe_compact()` 插入 `compacted` 消息并 `commit()`
   - `finish_reason="tool_calls"` — 所有 tool 结果追加后立即 `commit()`（子回合）
   - unexpected `finish_reason` — 累积 content 追加后 `commit()`
   - 达到 `max_tool_rounds` — 追加 `[Max tool rounds reached]` assistant 消息后 `commit()`
 - `Conversation.save()` 使用 tempfile + `os.replace()` 实现原子写入；`commit()` 封装 save + 清除快照
 - **部分保存**的场景：`finish_reason="error"`、AI 连接断开、channel 断开、schedule runner 异常——user message 已通过早期 `commit()` 落盘，AI 响应部分通过 `rollback()` 回滚，不写入磁盘
 - 首次使用时自动创建 AppData `histories/` 目录 + `.gitignore`（忽略全部文件）
+
+## Context Compaction
+
+当 AI 层返回 `psi_compaction` 信号时，Session 触发上下文压缩。流程：
+
+1. `AiClient.stream()` 解析 `psi_compaction` → `AiDelta.compaction_needed=True`
+2. Agent loop 在 `finish_reason="stop"` 后调用 `_maybe_compact()`
+3. 从 `{agent}/systems/system.py` 提取 `compact_history()` 函数
+4. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
+5. `summary = await compact_history(conversation.messages, complete_fn)`
+6. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+7. `commit()` 落盘——历史消息**保留**，不删除
+8. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
+
+JSONL 留存：``system, u1, a1, u2, a2, compacted(summary), u3, a3, ...``
+发给 AI：``[system+summary, u3, a3, ...]``
+
+`compact_history` 约定签名：
+
+```python
+async def compact_history(
+    history: list[dict[str, Any]],
+    complete_fn: Callable[[list[dict[str, Any]]], Awaitable[str]],
+) -> str:
+```
+
+未定义时 → 记录 warning，跳过压缩，history 持续增长。
+多次 compaction → 每次插入独立的 `compacted` 消息；`messages_for_ai()` 仅取最后一条合并到 system prompt。
 
 ### peek_pending / clear_pending 安全机制
 
