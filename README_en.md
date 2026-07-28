@@ -115,7 +115,7 @@ Open the printed address to see a Material Design 3 Web Console. From the UI you
 - **Manage**: Sidebar session switching, double-click rename, delete with confirmation
 - **Automatic titles**: AI generates session titles after first conversation
 
-The `--listen` value must include the `http://` prefix; bare `IP:PORT` is interpreted as a Unix socket path.
+The `--listen` value must include the `http://` prefix. A bare `IP:PORT` matches no prefix and falls through to the bare-path branch: on POSIX it is interpreted as a Unix socket path, while on Windows it raises `ValueError` outright (see "Transport Abstraction" below).
 
 Gateway also supports system tray icon (`--tray --icon icon.png`), auto browser open (`--browser`), native webview window (`--webview`), and custom socket path prefix (`--socket-path psi`, controlling the `/tmp/{prefix}/ais/...` and `/tmp/{prefix}/channels/...` layout for AI/Session Unix sockets).
 
@@ -157,11 +157,15 @@ All components auto-detect transport type via address prefix:
 
 | Address Format | Transport |
 |----------------|-----------|
-| `./ai.sock` (bare filesystem path, relative or absolute) | Unix socket |
+| `./ai.sock` (bare filesystem path, relative or absolute) | Unix socket (POSIX only) |
 | `http://127.0.0.1:8080` | TCP |
-| `\\.\pipe\name` (Windows) | Named Pipe |
+| `\\.\pipe\name` (Windows) | Named Pipe (Windows only) |
 
 AI and Session components are transport-agnostic — handled uniformly by `_sockets.py`.
+
+> **Windows note**: Windows has no Unix sockets (asyncio lacks `create_unix_connection`), so a bare filesystem path is **rejected outright with a clear `ValueError`** rather than falling through to a Unix socket and crashing with a context-free `NotImplementedError` deep inside aiohttp. On Windows use a named-pipe address `\\.\pipe\name`; when passing it through a POSIX shell (e.g. bash single-quotes) the backslashes must survive — a single-backslash `\.\pipe\...` fails the named-pipe prefix check, is treated as a bare path, and triggers the same `ValueError`.
+
+> **POSIX note**: Conversely, named pipes only work on Windows (they need asyncio's `ProactorEventLoop`, a class that does not exist off Windows), so a `\\.\pipe\name` address on Linux/macOS is likewise **rejected outright with a clear `ValueError`** instead of letting aiohttp's internal platform check fail with a context-free `AttributeError`. On POSIX use a bare filesystem path or a TCP address.
 
 Protocol errors between components take two forms:
 
