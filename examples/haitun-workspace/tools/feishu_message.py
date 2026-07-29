@@ -78,7 +78,12 @@ async def feishu_message_send(
 
 
 async def feishu_message_send_card(
-    receive_id: str, card_json: str, receive_id_type: str = "chat_id", user_key: str = ""
+    receive_id: str,
+    card_json: str,
+    receive_id_type: str = "chat_id",
+    user_key: str = "",
+    business_context_json: str = "{}",
+    action_handlers_json: str = "{}",
 ) -> str:
     """Send an **interactive card** message — buttons, forms, inputs, selectors, date pickers.
 
@@ -89,31 +94,69 @@ async def feishu_message_send_card(
     rather than just read.
 
     You build the card yourself and pass it as a JSON string in ``card_json``. Both
-    Feishu card formats are accepted and sent verbatim:
+    Feishu card formats are accepted and sent verbatim. For interactive button
+    groups and forms, the legacy format is the safest default::
 
-    - Card 2.0 (recommended)::
-
-        {"schema": "2.0",
+        {"config": {"wide_screen_mode": true},
          "header": {"title": {"tag": "plain_text", "content": "请假审批"}, "template": "blue"},
-         "body": {"elements": [
+         "elements": [
            {"tag": "markdown", "content": "**张三** 申请年假 2 天"},
            {"tag": "action", "actions": [
              {"tag": "button", "text": {"tag": "plain_text", "content": "同意"},
               "type": "primary", "value": {"action": "approve", "id": "req_1"}},
              {"tag": "button", "text": {"tag": "plain_text", "content": "驳回"},
-              "type": "danger", "value": {"action": "reject", "id": "req_1"}}]}]}}
+              "type": "danger", "value": {"action": "reject", "id": "req_1"}}]}]}
 
-    - Legacy ``{"config": {...}, "header": {...}, "elements": [...]}`` is also accepted.
+    Card 2.0 (``{"schema": "2.0", ...}``) is also accepted, but it does **not**
+    support the legacy ``{"tag": "action"}`` container. Put Card 2.0-supported
+    controls directly under ``body.elements`` instead of copying the legacy layout.
 
     Selectors / date pickers go inside an ``action`` element (``select_static`` with
-    ``options``, ``date_picker``, ``picker_time``, …); grouped inputs that submit together
-    go inside a ``form`` element. Anything the Feishu 消息卡片 spec supports works — the
-    card is validated only to be a JSON object, then posted as-is.
+    ``options``, ``date_picker``, ``picker_time``, …). When their selected value must reach
+    the agent reliably, put them inside a ``form`` and use a submit action so Feishu returns
+    the result in ``form_value``. The SDK's standalone selector/date callback deduplication
+    does not distinguish every changed selection. Anything the Feishu 消息卡片 spec supports
+    is still sent as-is.
 
-    Note: button/form **clicks fire a card action callback** to the app. Delivering that
-    callback back into the conversation is a channel-side concern and may not yet be wired;
-    the card renders and is interactive regardless. Prefer buttons whose ``value`` also
-    encodes the choice, and/or a URL button, so intent is captured even without the callback.
+    Button/form actions are delivered back to the operator's agent session as the next
+    structured user turn, encoded as JSON inside ``<feishu_card_action>``. When sending to
+    another person, provide both ``business_context_json`` and ``action_handlers_json`` so
+    their agent receives the full original card, source Session/user, business facts, and a
+    deterministic dispatch result. The Channel selects the handler but does not execute it or
+    bypass the LLM. Handler-map keys, handler identifiers, and callback action IDs must be
+    canonical strings without surrounding whitespace and are matched exactly. With a non-empty
+    handler map, an unknown action produces
+    ``matched=false`` and ``handler=null``; the recipient agent must not invent or execute an
+    unmatched handler. Only a successfully loaded v1/v2 snapshot that confirms there was no
+    handler map may fall back to using ``value.action`` / ``action_id`` as the handler for
+    compatibility. Missing or invalid snapshots fail closed. The first callback leaves a durable
+    consumed tombstone, so later callbacks are ignored across Channel processes and restarts.
+
+    When handling the resulting ``<feishu_card_action>``, the updated original card already
+    acknowledges the selected option. Do not narrate the click or announce a planned action before
+    calling the matched handler. After the handler succeeds, finish with zero assistant content:
+    do not emit ``NO_REPLY`` or a success confirmation. Reply only when the operator still needs a
+    warning, partial-failure detail, permission problem, or required next step. An unmatched or
+    failed handler must never be reported as successful.
+
+    Every actionable element's ``value`` must include an explicit action name and a stable
+    business identifier such as ``request_id``; different buttons need different values.
+    Before a consequential operation, re-check authorization and current business state;
+    keep the underlying operation idempotent because delivery is at-least-once. A card is
+    single-use: the first accepted button/form action preserves its original content, replaces
+    its interactive region with a read-only selected-value note, and ignores later actions from
+    the same card. Send a new card when the user must submit another response.
+
+    After a successful call, the card is already visible to the recipient. If it carries all
+    necessary user-facing information, finish with zero assistant content: do not emit ``NO_REPLY``,
+    confirm delivery, or repeat its content and button labels. If necessary information is not
+    already conveyed by the card, such as a warning, partial failure, or required next step, reply
+    with only that information; never suppress it.
+
+    If the card is sent but its callback snapshot cannot be saved, the result is
+    ``ok=false, sent=true, callback_context_saved=false``. Report that necessary partial failure,
+    but do not retry the send and create a duplicate card. A custom Feishu Channel AppData root
+    must match the Gateway/workspace-tool root; prefer setting ``PSI_APPDATA`` for both processes.
 
     Args:
         receive_id: Target id — a chat_id (oc_...), open_id (ou_...), user_id, union_id, or email.
@@ -123,8 +166,28 @@ async def feishu_message_send_card(
             explicitly for a bare user_id.
         user_key: The sender's open_id (from ``<feishu_context>``) as a fallback identity;
             harmless to pass, leave empty in single-user scenarios.
+        business_context_json: JSON object with the business facts the recipient's agent needs
+            when handling a click, such as request type, request ID, requester, authorization
+            facts, and current state. Do not rely on the recipient having the sender's history.
+            Must be a JSON object string; falsey non-string values are rejected.
+        action_handlers_json: JSON object mapping each ``value.action`` to a deterministic handler
+            identifier, for example ``{"approve":"approval_decide","reject":"approval_decide"}``.
+            Include every allowed action; unmatched configured actions are deliberately not
+            dispatched. Keys and values must be non-empty canonical strings without surrounding
+            whitespace.
     """
-    return _f.dumps_result(await _f.send_card_impl(receive_id, card_json, receive_id_type, user_key or None))
+    if business_context_json == "{}" and action_handlers_json == "{}":
+        result = await _f.send_card_impl(receive_id, card_json, receive_id_type, user_key or None)
+    else:
+        result = await _f.send_card_impl(
+            receive_id,
+            card_json,
+            receive_id_type,
+            user_key or None,
+            business_context_json,
+            action_handlers_json,
+        )
+    return _f.dumps_result(result)
 
 
 async def feishu_message_reply(message_id: str, text: str, reply_in_thread: bool = True) -> str:

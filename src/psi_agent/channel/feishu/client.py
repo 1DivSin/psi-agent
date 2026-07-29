@@ -26,10 +26,13 @@ from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
-from psi_agent.channel._types import FileChunk, InputChunk, TextChunk
+from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
+
+from ._card_action import handle_card_action
 
 _EMOJI_PROCESSING = "Typing"
 _EMOJI_FAILED = "CrossMark"
+_SILENT_REPLY_TOKEN = "NO_REPLY"
 
 
 def _allowed(sender_id: str | None, allowed_ids: list[str] | None) -> bool:
@@ -267,6 +270,66 @@ async def _build_chunks(channel: Any, ctx: Any) -> list[InputChunk]:
     return chunks
 
 
+async def _stream_reply(
+    channel: Any,
+    core: ChannelCore,
+    chat_id: str,
+    chunks: list[InputChunk],
+    *,
+    reply_to: str | None,
+    suppress_silent_reply: bool = False,
+) -> None:
+    """Stream agent text and files into one Feishu chat."""
+
+    async def _produce(stream: Any) -> None:
+        silent_candidate = ""
+        checking_silent_reply = suppress_silent_reply
+
+        async def flush_silent_candidate() -> None:
+            nonlocal silent_candidate
+            if not silent_candidate:
+                return
+            candidate = silent_candidate
+            silent_candidate = ""
+            normalized = candidate.strip()
+            if not normalized:
+                logger.debug("suppressed whitespace-only Feishu card action reply")
+            elif normalized == _SILENT_REPLY_TOKEN:
+                logger.debug("suppressed standalone NO_REPLY from Feishu card action")
+            else:
+                await stream.append(candidate)
+                logger.debug(f"stream.append ({len(candidate)} chars)")
+
+        try:
+            async with aclosing(core.post(chunks)) as gen:
+                async for chunk in gen:
+                    if isinstance(chunk, TextChunk):
+                        if checking_silent_reply:
+                            silent_candidate += chunk.text
+                            normalized = silent_candidate.strip()
+                            if not normalized or _SILENT_REPLY_TOKEN.startswith(normalized):
+                                continue
+                            await flush_silent_candidate()
+                            checking_silent_reply = False
+                        else:
+                            await stream.append(chunk.text)
+                            logger.debug(f"stream.append ({len(chunk.text)} chars)")
+                    elif isinstance(chunk, ReasoningChunk):
+                        if suppress_silent_reply and chunk.kind == "tool_result":
+                            await flush_silent_candidate()
+                            checking_silent_reply = True
+                    elif isinstance(chunk, FileChunk):
+                        logger.debug(f"received FileChunk ({chunk.path})")
+                        await _send_file(channel, chat_id, chunk.path)
+        except Exception:
+            await flush_silent_candidate()
+            raise
+        await flush_silent_candidate()
+
+    options = {"reply_to": reply_to} if reply_to else {}
+    await channel.stream(chat_id, {"markdown": _produce}, options)
+
+
 async def _handle_and_stream(
     channel: Any,
     resolve_core: Callable[[str | None], Awaitable[ChannelCore]],
@@ -301,22 +364,8 @@ async def _handle_and_stream(
 
             logger.debug(f"posting {len(chunks)} chunk(s) to ChannelCore")
 
-            async def _produce(stream: Any) -> None:
-                async with aclosing(core.post(chunks)) as gen:
-                    async for chunk in gen:
-                        if isinstance(chunk, TextChunk):
-                            await stream.append(chunk.text)
-                            logger.debug(f"stream.append ({len(chunk.text)} chars)")
-                        elif isinstance(chunk, FileChunk):
-                            logger.debug(f"received FileChunk ({chunk.path})")
-                            await _send_file(channel, ctx.chat_id, chunk.path)
-
             try:
-                await channel.stream(
-                    ctx.chat_id,
-                    {"markdown": _produce},
-                    {"reply_to": ctx.message_id},
-                )
+                await _stream_reply(channel, core, ctx.chat_id, chunks, reply_to=ctx.message_id)
                 logger.debug("stream completed")
             except Exception as e:
                 logger.error(f"Message handling error — {e!r}")
@@ -453,7 +502,7 @@ _APPROVAL_STATUS_LABELS = {
 
 
 class _SeenEvents:
-    """有界去重集 — 飞书会重推同一事件, 用 (instance_code, status) 键去重。
+    """有界去重集 — 卡片按 message_id、审批按 (instance_code, status) 去重。
 
     ``OrderedDict`` 当 FIFO: 超过 ``maxlen`` 淘汰最旧键, 内存有界。非线程安全,
     只在 portal 的事件循环里单线程访问, 无需加锁。"""
@@ -683,6 +732,7 @@ async def run_feishu(
     respond_to_mention_all: bool = False,
     respond_to_comments: bool = True,
     gateway_url: str | None = None,
+    appdata: str = "",
 ) -> None:
     policy = PolicyConfig(
         require_mention=require_mention,
@@ -721,9 +771,22 @@ async def run_feishu(
         async def _on_message(ctx: Any) -> None:
             portal.start_task_soon(_handle_and_stream, channel, resolve_core, allowed_user_ids, ctx)
 
+        async def _on_card_action(event: Any) -> None:
+            portal.start_task_soon(
+                handle_card_action,
+                channel,
+                resolve_core,
+                allowed_user_ids,
+                card_action_seen.add_if_new,
+                _stream_reply,
+                event,
+                appdata,
+            )
+
         async def _on_comment(event: Any) -> None:
             portal.start_task_soon(_handle_comment, channel, resolve_core, allowed_user_ids, event)
 
+        card_action_seen = _SeenEvents(maxlen=10_000)
         approval_seen = _SeenEvents()
 
         def _on_approval(event: Any) -> None:
@@ -736,6 +799,7 @@ async def run_feishu(
                 logger.warning(f"approval event schedule failed — {e!r}")
 
         channel.on("message", _on_message)
+        channel.on("cardAction", _on_card_action)
         channel.on("reject", _log_reject)
         if respond_to_comments:
             channel.on("comment", _on_comment)
