@@ -70,13 +70,14 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - AppData 路径助手在 ``psi_agent._appdata``（与 Gateway 共享；**禁止**经 ContextVar 传递 AppData 根）
 - System prompt 在首次 `run()` 调用时惰性构建（通过 `system_prompt_builder`）
 - 后续请求可调用 `system_prompt_rebuild_checker()`（如果定义），返回 True 则重建 system prompt
+- 未整段重建时，提示词一字不改；若 agent 包定义了 `turn_context_builder()`，则每回合把易变块挂到**本回合 user 消息**上（见下方「每回合易变上下文」）
 
 ## Agent Loop 逻辑
 
 1. 收到 channel 请求 → `ChannelAdapter.handle()` 解析请求，提取 user_message + extra_params
 2. `SessionAgent.run()` 入口：
    - add() / replace_system() 在首次变更时自动建立快照（implicit snapshot）
-   - 惰性构建或重建 system prompt（首次 run 或 rebuild checker 返回 True 时）
+   - 惰性构建或重建 system prompt（首次 run 或 rebuild checker 返回 True 时）；随后把本回合的易变块挂到 user 消息上（见「每回合易变上下文」）
    - 检查暂存的 schedule 响应 → peek + yield → yield 全部成功后 `clear_pending()`
    - User message 追加到 history 后立即 ``commit()`` 落盘
 3. 获取 `anyio.Lock`（忙则 FIFO 排队等待）—— `handle_request()` 在调用 `run()` 前持有
@@ -101,6 +102,52 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 - Channel 请求中除 `messages` 外的不认识参数全部透传到 AI 层（`extra_params`）。
 - AI 返回多 choice 时报错（`finish_reason="error"`），0 choice 作为心跳跳过。
 - AI 返回非 200 或 `finish_reason="error"` 时，错误信息不写入 conversation history，且通过 turn 快照回滚机制保证本轮用户消息也不落盘。
+
+## System prompt 生命周期
+
+`SystemPrompt.ensure()` 在**每个回合入口**调用，按优先级走两条路径中的一条：
+
+| 触发条件 | 行为 | 日志 |
+|---|---|---|
+| history 为空（首个回合） | 调 `system_prompt_builder()` 整段构建 | `System prompt loaded (N chars)` |
+| `system_prompt_rebuild_checker()` 返回 True | 整段重建 | `System prompt rebuilt (N chars)` |
+
+两条都不触发时，提示词**一字不改**沿用。所以**易变内容一律不放提示词里**——放进去就会冻结在首次构建那一刻，改由每回合的 turn context 承载（下一节）。
+
+## 每回合易变上下文（turn context）
+
+`SystemPrompt.turn_context()` 在 `ensure()` 之后调用，渲染「本回合的现在」——时钟、可能随重新挂载而变的 runtime 行。产物**不进 system prompt**，而是挂在本回合 user 消息的 `turn_context` 键上（`history_display.TURN_CONTEXT_KEY`），只在 `messages_for_ai()` 投影时折进 `content`。
+
+### 为什么必须挂在尾部而不是提示词尾部
+
+没有这套机制，提示词里**所有描述「现在」的内容都被冻结**：
+
+- 7月24日建的会话连着几天都告诉用户今天是 7月24日；
+- 构建那一刻若时区标签算错了（容器 `TZ` 尚未生效 → `_build_datetime_section` 落到 `astimezone()` 回退分支，`Asia/Shanghai` 被记成 `UTC`），这个错标签会活到会话结束；
+- agent 照读这行陈旧时间作答，被追问矛盾时还会临时编一套时区换算来解释对不上的地方（真实事故）。
+
+但**修法不能是每回合重渲染提示词**，哪怕只重渲染它的尾部：
+
+| | |
+|--|--|
+| **代价一：重扫 workspace** | 整段构建要重扫 skills / tools / bootstrap 文件。实测 haitun 约 **110ms、150KB** 提示词，放进每个回合是净损失 |
+| **代价二：永久堵死提示缓存** | 上游按**前缀**缓存，而 system prompt 是**整个请求的最前面**（`any_llm` 的 Anthropic 转换器把所有 `role=system` 抽成顶层 `system` 参数，排在 `messages` 之前）。每回合改它——哪怕只改尾部——就意味着无论怎么配缓存都不可能命中 |
+| **⚠️ 时态：本仓当前并未开启缓存** | Anthropic 的 prompt caching 是 **opt-in** 的：文档里那个叫 "automatic caching" 的选项指的是断点自动前移，**仍然要在请求顶层放一个 `cache_control`**；`src/` 里没有任何 `cache_control`/`ephemeral`（可 grep 复核），`ai/server.py` 也只读 `prompt_tokens`/`completion_tokens`/`total_tokens`。所以**代价二是未来式**，当下真正在付的只有代价一 |
+| **所以** | 易变块彻底移出提示词，挂到**请求尾部**（本回合 user 消息）。这不是「保住了缓存」，而是**让前缀真正稳定下来、把开启缓存变成一个可行选项**；开启本身是独立的事（动计费行为，且要先确认提示词过得了 512/1024 token 门槛、会话节奏跟得上 5 分钟 TTL）|
+
+### 契约与容错（刻意为之）
+
+| | 约定 |
+|--|------|
+| **workspace 侧签名** | `async def turn_context_builder() -> str`——不收参数（它不改写任何已有文本，只生产本回合的块），返回要挂上去的内容。**未定义即没有这个块**，老 workspace 行为不变 |
+| **折进位置** | 折在消息正文**之后**。放前面会移动这一回合的每个 byte，正好抵掉「存在带外键里」想省的东西 |
+| **不写回 history 行** | `turn_context` 是非上线键，与 `kind` / `chat_type` 同属 `_DISPLAY_ONLY_KEYS`：投影给 AI 时才折进 `content`，落盘行与 SPA 展示都看不到它。这样**之前每个回合投影出来都逐字节相同**，前缀才真的可复用 |
+| **多模态 content** | `content` 不是 `str`（block 列表）时原样返回、丢掉这个块——没有唯一的可追加位置，丢一行时钟远好过把 block 结构写坏 |
+| **构建失败** | `except Exception` 记 ERROR 后返回 `""`，不中断回合。**丢一行时钟远好过丢掉整个回合** |
+| **返回值不可用** | 非 `str` / 空串 / 纯空白一律当「没有这个块」 |
+| **为什么不给 `turn_context_fn` 设默认函数**（不同于 `builder` / `checker` 的「Default over None」，见根 AGENTS.md 坑 8） | 默认函数只能返回空串，那与 `None` 语义重合、却多一次无谓的 `await`；且 `None` 在这里承载**可观测的语义**——「这个 workspace 没有易变块」。`compaction_fn` 同样保持 `None` |
+| **为什么不单独发一条尾部消息** | 不是因为发不出去——Anthropic 会把连续的同角色轮次**合并成一条**（"Consecutive `user` or `assistant` turns in your request will be combined into a single turn"），不报错。真正的理由是那条消息**必须落进 history 才能发出去**（`messages_for_ai()` 只投影已有行，凭空插一条就要在投影期造行），于是每回合都往历史里多塞一条一次性的时钟消息：历史被噪音撑大、压缩时还得判断哪些该丢。挂在本回合 user 消息上则一行不多、且天然随该回合一起过期 |
+| **`USER.md` / `HEARTBEAT.md` 归谁** | 留在提示词里——它们是「当作长期上下文读」的散文，不是本回合的新闻。文档承诺的「re-read every turn」由 `system_prompt_rebuild_checker()` 按**内容哈希**兑现：字节真变了才整段重建，改一次付一次，而不是每回合付一次 |
 
 ## 其他约定
 

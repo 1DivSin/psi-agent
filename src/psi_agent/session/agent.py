@@ -16,6 +16,7 @@ from psi_agent.session.conversation import Conversation
 from psi_agent.session.event_protocol import EventProtocolError, parse_event_envelope
 from psi_agent.session.history_display import (
     KIND_COMPACTED,
+    TURN_CONTEXT_KEY,
     message_kind,
     messages_for_ai,
     with_kind,
@@ -275,7 +276,7 @@ class SessionAgent:
                 await self._tool_registry.refresh()
                 await self._schedule_registry.refresh()
 
-                # system prompt (lazy + optional rebuild)
+                # system prompt (lazy build / optional rebuild)
                 await self._system_prompt.ensure(self._conversation)
 
                 # peek pending schedule chunks — yield first, clear only after yield
@@ -286,6 +287,14 @@ class SessionAgent:
                     for chunk in pending:
                         yield chunk
                     self._conversation.clear_pending()
+
+                # Volatile context (wall-clock time, runtime info) rides on this
+                # turn's user message instead of the prompt, so the per-turn
+                # change lands at the request tail and leaves the prefix —
+                # prompt plus every earlier turn — byte-identical.
+                turn_context = await self._system_prompt.turn_context()
+                if turn_context:
+                    user_message = user_message | {TURN_CONTEXT_KEY: turn_context}
 
                 self._conversation.add(user_message)
                 await self._conversation.commit()

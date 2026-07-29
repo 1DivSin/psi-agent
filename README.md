@@ -207,7 +207,7 @@ my-workspace/
 │   └── daily-report/
 │       └── TASK.md           # YAML 头 (name, cron) + Markdown body
 └── systems/
-    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker()
+    └── system.py             # async def system_prompt_builder() / system_prompt_rebuild_checker() / turn_context_builder()
 ```
 
 ### Tools
@@ -233,7 +233,7 @@ async def bash(command: str) -> str:
 
 ### System Prompt
 
-在 `systems/system.py` 中定义两个可选异步函数：
+在 `systems/system.py` 中定义三个可选异步函数：
 
 ```python
 async def system_prompt_builder() -> str:
@@ -243,11 +243,16 @@ async def system_prompt_builder() -> str:
 async def system_prompt_rebuild_checker() -> bool:
     """每次对话回合前调用。返回 True 则重建 system prompt。"""
     return False
+
+async def turn_context_builder() -> str:
+    """每次对话回合前调用。返回本回合的易变块（时间等），挂在本回合 user 消息尾部。"""
+    return render_volatile_sections()
 ```
 
 - `builder` 在首次对话时惰性调用
 - `checker` 每次回合前调用，可用于监控文件变更后自动刷新 prompt
-- 两个都是可选的，缺失时用合理默认值
+- `turn_context_builder` 每回合调用，产物**不进 system prompt**，而是随本回合的 user 消息一起送到**请求尾部**。之所以不写进 prompt：一是每回合重建要重扫整个 workspace；二是上游按前缀缓存，而 system prompt 是整个请求的最前面，每回合改它（哪怕只改尾部）就意味着无论怎么配缓存都不可能命中。挂在尾部则变动只落在这一个回合，前缀保持稳定——这是**开启缓存的前提**，框架本身并未开启（Anthropic 的 prompt caching 是 opt-in，需在请求顶层放 `cache_control`）。不定义它则整段 prompt 在会话内永不变——里面所有描述「现在」的内容都会冻结在首次构建那一刻
+- 三个都是可选的，缺失时用合理默认值。`turn_context_builder` 抛异常、返回非字符串或空串时一律当作没有这个块——丢一行时钟远好过丢掉整个回合
 
 ### 定时任务
 

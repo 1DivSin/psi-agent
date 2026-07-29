@@ -26,10 +26,14 @@ class SystemPrompt:
     ``True`` triggers an in-place rebuild.
     ``compaction_fn(history, complete_fn) → str`` summarises the
     conversation history when the token budget is exceeded.
+    ``turn_context_fn() → str`` is called before every agent turn to render
+    the *volatile* block for that turn (wall-clock time, runtime info). It goes
+    to the tail of the request, not into the prompt — see ``turn_context``.
 
     Defaults: if no builder is provided, an empty prompt is used.  If
     no checker is provided, the prompt is never rebuilt.  If no
-    compaction_fn is provided, compaction is silently skipped.
+    compaction_fn is provided, compaction is silently skipped.  If no
+    turn_context_fn is provided, no volatile block is injected.
     """
 
     @staticmethod
@@ -45,10 +49,12 @@ class SystemPrompt:
         builder: Callable[..., Any] | None = None,
         checker: Callable[..., Any] | None = None,
         compaction_fn: Callable[..., Any] | None = None,
+        turn_context_fn: Callable[..., Any] | None = None,
     ):
         self._builder = builder if builder is not None else self._default_builder
         self._checker = checker if checker is not None else self._default_checker
         self._compaction_fn = compaction_fn
+        self._turn_context_fn = turn_context_fn
 
     @property
     def compaction_fn(self) -> Callable[..., Any] | None:
@@ -57,12 +63,28 @@ class SystemPrompt:
     @classmethod
     async def from_workspace(cls, workspace_path: Path, session_id: str) -> SystemPrompt:
         """Load the system module.  Defaults are used when builder, checker,
-        or compaction_fn are not found in the workspace."""
-        builder, checker, compaction_fn = await cls._load_module(workspace_path, session_id)
-        return cls(builder=builder, checker=checker, compaction_fn=compaction_fn)
+        compaction_fn, or turn_context_builder are not found in the workspace."""
+        builder, checker, compaction_fn, turn_context_fn = await cls._load_module(workspace_path, session_id)
+        return cls(
+            builder=builder,
+            checker=checker,
+            compaction_fn=compaction_fn,
+            turn_context_fn=turn_context_fn,
+        )
 
     async def ensure(self, conversation: Conversation) -> None:
-        """Build or rebuild the system prompt if needed."""
+        """Build or rebuild the system prompt.
+
+        Two paths, in order of precedence:
+
+        1. Empty history → build the whole prompt.
+        2. ``checker()`` says yes → rebuild the whole prompt.
+
+        Otherwise the prompt is left exactly as it was. Anything in it that
+        describes **now** therefore stays frozen for the life of the history —
+        which is why volatile content does not belong here at all, but in
+        ``turn_context()``.
+        """
         if not conversation.messages:
             try:
                 sp = await self._builder()
@@ -70,30 +92,78 @@ class SystemPrompt:
                 conversation.replace_system(sp)
             except Exception as e:
                 logger.error(f"Failed to build system prompt: {e}")
-        else:
-            try:
-                if await self._checker():
-                    sp = await self._builder()
-                    logger.info(f"System prompt rebuilt ({len(sp)} chars)")
-                    conversation.replace_system(sp)
-            except Exception as e:
-                logger.error(f"Rebuild check or rebuild failed: {e}")
+            return
+
+        try:
+            if await self._checker():
+                sp = await self._builder()
+                logger.info(f"System prompt rebuilt ({len(sp)} chars)")
+                conversation.replace_system(sp)
+        except Exception as e:
+            logger.error(f"Rebuild check or rebuild failed: {e}")
+
+    async def turn_context(self) -> str:
+        """Render this turn's volatile block, or ``""`` if the workspace has none.
+
+        The prompt is built once and reused for the life of the history, which
+        freezes everything in it that describes **now**: a Session opened on
+        Monday kept telling users it was Monday all week, and a ``Time zone``
+        label that was wrong at build time stayed wrong for as long as the
+        Session lived.
+
+        Re-rendering the prompt each turn would fix the clock at the cost of
+        rebuilding it — a full workspace rescan, ~110ms and ~150KB for haitun —
+        and it would permanently rule out prompt caching. Upstream caches by
+        prefix, and the system prompt is the *front* of the request, so a prompt
+        that changes every turn can never be cached however the cache is
+        configured. (Caching is not enabled here today: Anthropic's is opt-in
+        and nothing in ``src/`` sets ``cache_control``. Keeping the prefix
+        stable is what makes enabling it possible later, not an optimization
+        that is already paying off.)
+
+        So the volatile block is not part of the prompt at all: it rides on the
+        current turn's user message, at the **tail** of the request, where the
+        change is confined to that one turn. The prompt and every earlier turn
+        project byte-identically.
+
+        A workspace opts in by exposing ``turn_context_builder()``; those that
+        don't get no block. A builder that raises or returns a non-string is
+        likewise treated as "no block", because losing a clock line is a far
+        smaller problem than losing the turn.
+        """
+        if self._turn_context_fn is None:
+            return ""
+        try:
+            block = await self._turn_context_fn()
+        except Exception as e:
+            logger.error(f"Turn context build failed: {e}")
+            return ""
+        if not isinstance(block, str) or not block.strip():
+            return ""
+        logger.info(f"Turn context built ({len(block)} chars)")
+        return block
 
     # -- module loading --------------------------------------------------------
 
     @staticmethod
     async def _load_module(
         workspace_path: Path, session_id: str
-    ) -> tuple[Callable[..., Any] | None, Callable[..., Any] | None, Callable[..., Any] | None]:
+    ) -> tuple[
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+        Callable[..., Any] | None,
+    ]:
         """Import ``system_prompt_builder``, ``system_prompt_rebuild_checker``,
-        and ``compact_history`` from ``workspace/systems/system.py``."""
+        ``compact_history``, and ``turn_context_builder`` from
+        ``workspace/systems/system.py``."""
         system_py = workspace_path / "systems" / "system.py"
         ap = anyio.Path(str(system_py))
         try:
             file_bytes = await ap.read_bytes()
         except OSError:
             logger.warning(f"No system.py found at {system_py}")
-            return None, None, None
+            return None, None, None, None
 
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         module_name = f"psi_system_{session_id}_{file_hash}"
@@ -103,7 +173,7 @@ class SystemPrompt:
             compiled = compile(source, str(system_py), "exec")
         except Exception as e:
             logger.error(f"Failed to read or compile {system_py!r}: {e!r}")
-            return None, None, None
+            return None, None, None, None
 
         module = types.ModuleType(module_name)
         module.__file__ = str(system_py)
@@ -113,7 +183,7 @@ class SystemPrompt:
         except Exception as e:
             logger.error(f"Failed to execute system module {system_py!r}: {e!r}")
             sys.modules.pop(module_name, None)
-            return None, None, None
+            return None, None, None, None
         except BaseException:
             sys.modules.pop(module_name, None)
             raise
@@ -122,11 +192,12 @@ class SystemPrompt:
             builder = SystemPrompt._extract_async_func(module, "system_prompt_builder")
             checker = SystemPrompt._extract_async_func(module, "system_prompt_rebuild_checker")
             compaction_fn = SystemPrompt._extract_async_func(module, "compact_history")
+            turn_context_fn = SystemPrompt._extract_async_func(module, "turn_context_builder")
         except Exception as e:
             logger.error(f"Failed to extract functions from {system_py!r}: {e!r}")
             sys.modules.pop(module_name, None)
-            return None, None, None
-        return builder, checker, compaction_fn
+            return None, None, None, None
+        return builder, checker, compaction_fn, turn_context_fn
 
     @staticmethod
     def _extract_async_func(module: object, name: str) -> Callable[..., Any] | None:
