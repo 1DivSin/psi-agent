@@ -8,6 +8,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, aclosing
 from datetime import date
+from pathlib import Path
 from typing import Any, Protocol
 
 import aiohttp
@@ -27,6 +28,7 @@ from loguru import logger
 
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, InputChunk, ReasoningChunk, TextChunk
+from psi_agent.channel.feishu._agent_events import register_feishu_agent_events
 
 from ._card_action import handle_card_action
 
@@ -763,6 +765,7 @@ async def run_feishu(
     respond_to_comments: bool = True,
     gateway_url: str | None = None,
     appdata: str = "",
+    agent_root: str = "",
 ) -> None:
     policy = PolicyConfig(
         require_mention=require_mention,
@@ -842,7 +845,27 @@ async def run_feishu(
             # dispatcher, so an earlier registration would be discarded.
             _register_approval_processor(channel, _on_approval)
             await _ensure_bot_identity(channel)
-            await anyio.sleep_forever()
+            # Agent-package channel_events/feishu → unified POST /events
+            if agent_root.strip():
+                root = await anyio.Path(agent_root).expanduser()
+            else:
+                root = await anyio.Path.cwd()
+            root_resolved = Path(await root.resolve())
+            # TaskGroup owns synthetic producers; cancel with Channel shutdown.
+            async with anyio.create_task_group() as events_tg:
+                stats = await register_feishu_agent_events(
+                    channel=channel,
+                    agent_root=root_resolved,
+                    resolve_core=resolve_core,
+                    portal_start=portal.start_task_soon,
+                    task_group=events_tg,
+                )
+                logger.info(
+                    f"Feishu agent channel_events root={root_resolved} "
+                    f"platform_processors={stats.platform_processors} "
+                    f"synthetic_producers={stats.synthetic_producers}"
+                )
+                await anyio.sleep_forever()
         finally:
             logger.info("Shutting down Feishu bot")
             with anyio.CancelScope(shield=True):
