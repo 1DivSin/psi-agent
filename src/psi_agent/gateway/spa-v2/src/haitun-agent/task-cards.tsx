@@ -54,17 +54,22 @@ export function TaskRow({
   task,
   active,
   onSelect,
+  onPrefetch,
   onOpenArtifact,
   onDelete,
 }: {
   task: Task;
   active: boolean;
   onSelect: () => void;
+  onPrefetch?: () => void;
   onOpenArtifact: (task: Task, fileName?: string) => void;
   onDelete?: (task: Task) => void;
 }) {
   return (
-    <div className={`task-row ${active ? "active" : ""}`}>
+    <div
+      className={`task-row ${active ? "active" : ""}`}
+      onPointerEnter={onPrefetch}
+    >
       <button type="button" className="task-row-select" onClick={onSelect} aria-label={`打开任务：${task.title}`}>
         <span className="task-row-main">
           <span className="task-row-progress-line">
@@ -105,7 +110,13 @@ export function TaskRow({
   );
 }
 
-export function OverviewCard({ tasks }: { tasks: Task[] }) {
+export function OverviewCard({
+  tasks,
+  onOpenChat,
+}: {
+  tasks: Task[];
+  onOpenChat?: () => void;
+}) {
   const dayLabel = useLiveOverviewDay();
   const finiteTasks = tasks.filter((task) => task.status !== "continuous");
   const tracked = finiteTasks.filter((task) => task.hasTodoTrack);
@@ -118,7 +129,19 @@ export function OverviewCard({ tasks }: { tasks: Task[] }) {
   const newDeliveries = tasks.filter((task) => task.deliveryState === "ready").length;
 
   return (
-    <article className="focus-card overview-card">
+    <article
+      className={`focus-card overview-card${onOpenChat ? " card-open-chat" : ""}`}
+      onClick={onOpenChat}
+      onKeyDown={onOpenChat ? (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenChat();
+        }
+      } : undefined}
+      role={onOpenChat ? "button" : undefined}
+      tabIndex={onOpenChat ? 0 : undefined}
+      aria-label={onOpenChat ? "打开任务总览对话" : undefined}
+    >
       <div className="card-orbit orbit-one" />
       <div className="card-orbit orbit-two" />
       <div className="overall-dial" style={{ "--progress": `${overall * 3.6}deg` } as CSSProperties} aria-label={`综合进度 ${overall}%`}>
@@ -206,7 +229,11 @@ function TaskStepsPanel({ task }: { task: Task }) {
               className="task-steps-page-btn"
               disabled={safePage <= 0}
               aria-label="上一页步骤"
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              data-card-interactive=""
+              onClick={(event) => {
+                event.stopPropagation();
+                setPage((p) => Math.max(0, p - 1));
+              }}
             >
               <ChevronLeft size={16} />
             </button>
@@ -216,7 +243,11 @@ function TaskStepsPanel({ task }: { task: Task }) {
               className="task-steps-page-btn"
               disabled={safePage >= pageCount - 1}
               aria-label="下一页步骤"
-              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              data-card-interactive=""
+              onClick={(event) => {
+                event.stopPropagation();
+                setPage((p) => Math.min(pageCount - 1, p + 1));
+              }}
             >
               <ChevronRight size={16} />
             </button>
@@ -280,16 +311,37 @@ export function TaskCard({
   task,
   onOpenArtifact,
   onDelete,
+  onOpenChat,
 }: {
   task: Task;
   onOpenArtifact: (task: Task, fileName?: string) => void;
   onDelete?: (task: Task) => void;
+  /** Overview swipe surface: open split chat (same as clicking the dialogue strip). */
+  onOpenChat?: () => void;
 }) {
   return (
-    <article className="focus-card task-card" style={{ "--task-accent": task.accent } as CSSProperties}>
+    <article
+      className={`focus-card task-card${onOpenChat ? " card-open-chat" : ""}`}
+      style={{ "--task-accent": task.accent } as CSSProperties}
+      onClick={onOpenChat}
+      onKeyDown={onOpenChat ? (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenChat();
+        }
+      } : undefined}
+      role={onOpenChat ? "button" : undefined}
+      tabIndex={onOpenChat ? 0 : undefined}
+      aria-label={onOpenChat ? `打开任务对话：${task.title}` : undefined}
+    >
       <div className="task-accent-line" />
 
-      <div className="task-corner-treasure">
+      <div
+        className="task-corner-treasure"
+        data-card-interactive=""
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
         <span className="task-corner-treasure-label">交付物</span>
         <TreasureButton task={task} onOpen={onOpenArtifact} />
       </div>
@@ -303,7 +355,11 @@ export function TaskCard({
               className="task-card-delete"
               title="删除任务"
               aria-label={`删除任务：${task.title}`}
-              onClick={() => onDelete(task)}
+              data-card-interactive=""
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(task);
+              }}
             >
               <Trash2 size={16} />
             </button>
