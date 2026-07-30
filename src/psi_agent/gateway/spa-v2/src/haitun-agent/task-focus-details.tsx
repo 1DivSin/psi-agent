@@ -44,8 +44,13 @@ export function TaskFocusDetails({
   onOpenArtifact: (task: Task, fileName?: string) => void;
 }) {
   const workingStep = task?.steps.find((step) => step.state === "working");
+  const checklistDone = !!task?.hasTodoTrack
+    && !!task.steps.length
+    && task.steps.every((step) => step.state === "done");
   const activeStep = task?.phase === "done"
-    ? (task.hasTodoTrack ? "全部执行步骤已完成" : "本轮已完成")
+    ? (task.hasTodoTrack
+      ? (checklistDone ? "全部执行步骤已完成" : (workingStep?.label || `清单 ${task.progressLabel || "未完成"}`))
+      : "本轮已完成")
     : task?.phase === "deliver"
       ? "正在整理交付"
       : task?.phase === "advance"
@@ -62,17 +67,24 @@ export function TaskFocusDetails({
       id: `status-${task.id}`,
       kind: "status" as const,
       title: task.hasTodoTrack
-        ? `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`
+        ? (task.phase === "done"
+          ? (checklistDone
+            ? `本轮已完成 · ${task.progressLabel || `${task.progress}%`}`
+            : `本轮已回复 · ${task.progressLabel || `${task.progress}%`}`)
+          : `${task.statusLabel} · ${task.progressLabel || `${task.progress}%`}`)
         : (task.progressIndeterminate
           ? `${task.statusLabel} · 处理中`
-          : `${task.statusLabel}${task.phase === "done" ? " · 已完成" : ""}`),
-      detail: plainTextFromMarkdown(task.summary),
+          : task.phase === "done"
+            ? (task.status === "completed" ? task.statusLabel : "本轮已完成")
+            : task.statusLabel),
+      // detail must not repeat time — template renders both <p> and <em>.
+      detail: "",
       time: task.updated,
     }] : tasks.slice(0, 3).map((item) => ({
       id: `status-${item.id}`,
       kind: "status" as const,
       title: `${item.shortTitle} · ${item.statusLabel}`,
-      detail: plainTextFromMarkdown(item.summary),
+      detail: "",
       time: item.updated,
     }))),
   ].slice(0, 8);
@@ -102,7 +114,7 @@ export function TaskFocusDetails({
     <div className="focus-detail-panel">
       <section className="focus-state-banner">
         <div>
-          <span><Sparkles size={13} /> 当前任务上下文</span>
+          <span><Sparkles size={13} /> 任务摘要</span>
           <strong>{task ? task.title : "今天全部任务的执行上下文"}</strong>
           <p>{task ? plainTextFromMarkdown(task.summary) : `共 ${tasks.length} 个任务，综合进度 ${overall}%。您可以基于任一历史动作继续补充要求。`}</p>
         </div>
@@ -159,7 +171,11 @@ export function TaskFocusDetails({
             {historyItems.map((item) => (
               <div className={`focus-history-item ${item.kind}`} key={item.id}>
                 <span className="focus-history-icon"><FocusHistoryIcon item={item} task={task} /></span>
-                <div><strong>{item.title}</strong><p>{item.detail}</p><em>{item.time}</em></div>
+                <div>
+                  <strong>{item.title}</strong>
+                  {item.detail.trim() ? <p>{item.detail}</p> : null}
+                  {item.time.trim() ? <em>{item.time}</em> : null}
+                </div>
               </div>
             ))}
             {historyItems.length === 0 && (
