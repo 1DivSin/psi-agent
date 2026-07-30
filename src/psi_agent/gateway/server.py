@@ -298,11 +298,12 @@ async def _create_router(request: web.Request) -> web.Response:
         body = await request.json()
         info = await rm.create(
             name=body["name"],
+            mode=body["mode"],
             router_ai_id=body["router_ai_id"],
             upstreams=[RouterUpstreamInfo(item["ai_id"], item["description"]) for item in body["upstreams"]],
             default_ai_id=body["default_ai_id"],
             router_timeout=body.get("router_timeout"),
-            router_context_chars=body.get("router_context_chars", 12_000),
+            max_context_length=body.get("max_context_length", 12_000),
             id=body.get("id", ""),
         )
         return _json(asdict(info), status=201)

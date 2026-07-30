@@ -164,6 +164,7 @@ class Gateway:
                 try:
                     await rm.create(
                         name=cfg.get("name", ""),
+                        mode=cfg.get("mode", ""),
                         router_ai_id=cfg.get("router_ai_id", ""),
                         upstreams=[
                             RouterUpstreamInfo(item.get("ai_id", ""), item.get("description", ""))
@@ -171,7 +172,7 @@ class Gateway:
                         ],
                         default_ai_id=cfg.get("default_ai_id", ""),
                         router_timeout=cfg.get("router_timeout"),
-                        router_context_chars=cfg.get("router_context_chars", 12_000),
+                        max_context_length=cfg.get("max_context_length", 12_000),
                         id=cfg.get("id", ""),
                     )
                     logger.info(f"Restored Router {cfg.get('id', '?')!r}")
@@ -251,13 +252,14 @@ class Gateway:
                         {
                             "id": info.id,
                             "name": info.name,
+                            "mode": info.mode,
                             "router_ai_id": info.router_ai_id,
                             "upstreams": [
                                 {"ai_id": item.ai_id, "description": item.description} for item in info.upstreams
                             ],
                             "default_ai_id": info.default_ai_id,
                             "router_timeout": info.router_timeout,
-                            "router_context_chars": info.router_context_chars,
+                            "max_context_length": info.max_context_length,
                         }
                         for info in await rm.list_all()
                     ],
