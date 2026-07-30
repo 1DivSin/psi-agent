@@ -112,9 +112,38 @@ async def test_agent_runs_after_turn_hook_on_stop(tmp_path: Path) -> None:
         )
         _ = [chunk async for chunk in agent.run(user)]
 
-        assert calls == [(user, {"role": "assistant", "content": "final reply"})]
+        assert calls == [({**user, "session_id": ""}, {"role": "assistant", "content": "final reply"})]
     finally:
         await mock_server.cleanup()
+
+
+@pytest.mark.anyio
+async def test_agent_forwards_hook_context_and_extra_request_parameters(tmp_path: Path) -> None:
+    hook_messages: list[dict] = []
+    requests: list[dict] = []
+
+    async def before_turn(message: dict) -> dict:
+        hook_messages.append(dict(message))
+        return {"workspace_advice": "focus"}
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        requests.append(await request.json())
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(_sse_chunk(content="ok", finish="stop").encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    server = MockAIServer(tmp_path)
+    socket = await server.start(handler)
+    try:
+        agent = SessionAgent(ai_client=AiClient(socket), system_prompt=SystemPrompt(before_turn=before_turn))
+        _ = [chunk async for chunk in agent.run({"role": "user", "content": "hi"}, {"profile_id": "p1"})]
+    finally:
+        await server.cleanup()
+
+    assert hook_messages == [{"role": "user", "content": "hi", "session_id": "", "profile_id": "p1"}]
+    assert requests[0]["profile_id"] == "p1"
 
 
 @pytest.mark.anyio
