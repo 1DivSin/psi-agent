@@ -302,10 +302,23 @@ message_id / sender_open_id）。需要群里之前的上下文时：
        1/2/5/13/15/20/22，所以把文本类主键（编号/名称）放第一个，别拿"人员/单选"开头（飞书报 1254012）。
        建完 `default_table_id` 那张空表用不上，`feishu_bitable_clear_table` / `feishu_bitable_delete_fields`
        收拾干净或直接留着，别把数据写进它。
-    3. 逐行 `feishu_bitable_create_record(app_token, table_id, fields_json)` 填数据（列名必须和上一步一致）。
+    3. 填数据：**多行一次写完**用 `feishu_bitable_create_records(app_token, table_id, records_json)`
+       （`records_json` 是 `[{"姓名":"张三","状态":"在读"},{"姓名":"李四"}]`，单次 500 行、一张表上限
+       20000 行），别 for 循环单条调 `create_record`——那样慢还容易撞飞书限流。只写一行才用
+       `feishu_bitable_create_record`。列名必须和上一步一致。
+    **已有一张建好的标准台账时别从零重建**：`feishu_bitable_copy_app(app_token, name, without_content=True)`
+    直接复制一份（`without_content=True` 只复制结构不复制数据），这就是"模板"的用法。
     事后要加列用 `feishu_bitable_create_field(app_token, table_id, field_name, field_type, property_json)`；
-    要"同一张表不同人看到不同内容"用 `feishu_bitable_create_role` + `feishu_bitable_add_role_member`（需在表上
-    开高级权限）。表名/列名一律**按用户说的建，缺信息就问**，别自己编一套字段糊上去。
+    列**建错了别删了重建**（删列连数据一起丢），用 `feishu_bitable_update_field(app_token, table_id,
+    field_id, field_name, field_type, property_json)` 改名/改类型/改选项。要一次加好几张空表用
+    `feishu_bitable_create_tables(app_token, table_names="合同,付款,发票")`；整张表连数据一起删用
+    `feishu_bitable_delete_tables`（**破坏性、API 撤不回，删前跟用户确认**；只清数据留结构用
+    `clear_table`；一张多维表格至少留一张表，删最后一张飞书报 1254034）。
+    要"同一张表不同人看到不同内容"用 `feishu_bitable_create_role` + `feishu_bitable_add_role_member`——这需要
+    表上**开了高级权限**，先 `feishu_bitable_get_app(app_token)` 看 `is_advanced`，没开用
+    `feishu_bitable_update_app(app_token, is_advanced="true")` 开（wiki 里的表和嵌在文档里的表开不了，
+    报 1254301）；`update_app` 也能给表格本体改名。
+    表名/列名一律**按用户说的建，缺信息就问**，别自己编一套字段糊上去。
 18. **撤回发错的消息**：用户说"把刚才那条撤回/撤销/删掉""发错了"时，用
     `feishu_message_recall(message_id=<om_...>, user_key=<sender_open_id>)`。`message_id` 只能是**消息 id**
     （`om_` 开头）——来自 `feishu_message_send`/`_send_card`/`_reply` 的返回、`<feishu_context>`，或
@@ -314,3 +327,26 @@ message_id / sender_open_id）。需要群里之前的上下文时：
     此时传群主的 `user_key` 并让其授权才行。撤回还有**时限**（企业管理员配置），超时报 230009。
     这两类失败工具都会在结果里带一句 `hint` 说明卡在哪，**如实转告用户**，别反复重试或谎称已撤回。
     撤回不是编辑：内容写错就"撤回旧的 + 重发一条新的"。
+19. **改多维表格里已有的格子（改状态/改错的值/补空格，不是新增一行）**：用户说"把张三那行状态改成
+    已完成""金额写错了改成 12000""把这几行都标记成已归档"时，**别用 `feishu_bitable_create_record`**
+    （那会多出一行重复数据），按三步改：
+    1. `feishu_bitable_list_fields(app_token, table_id)` 拿**真实列名**——飞书对不认识的列名**静默丢弃
+       还照样返回 code:0**，列名对不上就是"报成功但格子没变"（这是历史上真翻过的车）。
+    2. `feishu_bitable_search_records(app_token, table_id, filter_json=...)` 按条件定位到那行，拿 `record_id`：
+       `filter_json` 是 `{"conjunction":"and","conditions":[{"field_name":"姓名","operator":"is",
+       "value":["张三"]}]}`，`conjunction` 是 `and`/`or`，`value` **一律是字符串数组**，可用的 operator 有
+       `is`/`isNot`/`contains`/`doesNotContain`/`isEmpty`/`isNotEmpty`/`isGreater`/`isGreaterEqual`/
+       `isLess`/`isLessEqual`（日期列不支持 isNot/contains/doesNotContain/isGreaterEqual/isLessEqual）。
+       这是官方推荐的拿 record_id 的方式，比 `list_records` 整表翻页靠谱；只想整表/整视图列出来才用
+       `list_records`。要看某一行现在的值用 `feishu_bitable_get_record(app_token, table_id, record_id)`。
+    3. 改一行用 `feishu_bitable_update_record(app_token, table_id, record_id, fields_json)`；一次改多行用
+       `feishu_bitable_update_records(app_token, table_id, records_json)`，`records_json` 是
+       `[{"record_id":"recA","fields":{"状态":"已完成"}},{"record_id":"recB","fields":{"金额":12000}}]`
+       （单次上限 1000 行，别 for 循环单条调）。
+    **增量语义**：只写传进去的列，同一行其它格子保持原值，所以改一个单元格只传那一个列名就够，
+    不用把整行重发。要**清空**一个格子传 `null`（`{"备注":null}`）。值的形状按列类型走：数字给数字、
+    单选给选项名、多选给数组、**日期给毫秒时间戳**、复选框 true/false、人员给 `[{"id":"ou_..."}]`、
+    超链接给 `{"text":...,"link":...}`、附件给 `[{"file_token":...}]`、地理位置给 `"纬度,经度"`。
+    公式/查找引用/创建时间/自动编号是**计算列，写不进去**，用户要改这些得改它依赖的列。
+    两个工具默认 `validate_fields=True` 会先核列名、写完再比对飞书回显，发现没落值就在结果里给
+    `dropped_fields` + `warning`——**看到这个别报"已改好"**，如实说哪几个值没写进去。
