@@ -87,7 +87,35 @@ service tools:
 
 ## Channel events (`channel_events/`)
 
-**定事信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册（官方：`map.py`；自定义：`produce.py`），≈ 加 tool；**不要**改 Session catalog，也**不要**为每个事件改 Channel 源码（Feishu 已统一接线）。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage`。
+**触发器信号源（交付对接）**：有「每次 xx 就…」类需求且 xx 可观测时，在 **`channel_events/<channel>/`** 按需注册（官方：`map.py`；自定义：`produce.py`），≈ 加 tool；目录 + `channel_events/README.md` 索引表即事件表，**不要**另建 Session catalog，也**不要**为每个事件改 Channel 源码（Feishu 已统一接线）。必读：`docs/superpowers/specs/2026-07-29-channel-events-developer-guide.md`。挂钩仍用 `triggers/` + `trigger_manage` / skill `feishu-event-remind`。产品用语：**触发器**（旧称「定事」已弃用），与**定时任务**成对。
+
+### `source` 与 `event` 是什么关系（刻意为之）
+
+信封里两层正交字段，**不要混成一张表**：
+
+| 字段 | 一句话 | 例子 |
+|------|--------|------|
+| **`source`** | **谁家的管道**——信号从哪一类生产者进来（粗粒度，很少变） | `feishu`（飞书平台推送）、`haitun`（本 agent 合成）、`telegram`、`gateway`、`test` |
+| **`event`** | **发生了什么事**——业务稳定名（细粒度，常加） | `feishu.hr.user_created`、`haitun.task.overdue` |
+
+关系：**一个 `source` 下可以有很多 `event`**。Session 只硬校验 `source ∈ KNOWN_SOURCES`；**不**枚举 `event` 名（event 清单在本目录）。
+
+**什么时候才要引入新 `source`？**
+
+- **要**：出现一种**全新的生产者类别**——现有标签套不上。例：以前只有飞书平台推送（`feishu`），后来要加「agent 自己巡检/合成」→ 开 `haitun`；将来若接钉钉原生推送 → 才开 `dingtalk` 之类。
+- **不要**：只是多一种业务事（又一种入职/逾期/报销）。同管道下**加新 `event` 即可**，继续用已有 `feishu` 或 `haitun`。
+- **不要**：为每个 skill / 每个 SOP / 每个部门各开一个 `source`。
+
+口诀：**source = 管道品牌；event = 管道里的具体信号。加信号默认只加 event；换品牌才加 source（并改 `KNOWN_SOURCES`）。**
+
+**注册事件改哪一层：**
+
+| 情况 | 最小改动 | 不要动 |
+|------|----------|--------|
+| 已有 `source` 下加新 `event` | **仅本 agent 包** `channel_events/`（+ README；重启 Channel） | Session / Channel 框架 |
+| **首次**新 `source` 字符串 | agent `channel_events/` **+** Session `KNOWN_SOURCES` | Channel 业务清单；不要为每条 event 改 Session |
+| 改信封字段 / `POST /events` 形状 | Session `event_protocol` | 不要用改协议冒充「加一条业务事件」 |
+| 事件已接通，只要「每次就提醒」 | 只写 `triggers/` | 不必再注册 event |
 
 ## Tools (`tools/`)
 
@@ -120,10 +148,11 @@ service tools:
 | `list_dir` / `find_files` | List one directory level; recursively find files by glob (`**/*.py`), sorted newest-first；默认根为 **workspace**. |
 | `write_excel` | Build a real `.xlsx` from a 2D array (bold header, column-width fitting). |
 | `write_word` | Build a real `.docx` from structured blocks (headings/paragraphs/tables); sets the East-Asian font (`w:eastAsia`) on every style so Chinese text isn't "字体不齐". |
-| `skill_manage` | CRUD on **agent** `skills/<name>/SKILL.md`（经 `get_agent()`；agent-created skills are mutable）. |
+| `skill_manage` | CRUD on **agent** `skills/<name>/SKILL.md`（经 `get_agent()`）。**先 list 再 create**：同类 skill 已存在则 `patch`，禁止平行新建。`patch` 允许 `created_by: agent` 或 `agent_editable: true`（如 `feishu-resume-review`）。判定/写法：`skill-authoring-when` / `skill-authoring-how`（**先于**自进化落库）。 |
 | `flow_manage` | CRUD + promote on Fusion Flow assets under **workspace** `flows/`. |
 | `schedule_manage` | CRUD on **workspace** `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
 | `trigger_manage` | CRUD on **agent** `triggers/<name>/TRIGGER.md`。`event` 名应对齐 agent ``channel_events/`` 已接通能力；Session 不再用 catalog 硬拒。`fire=tool` 命中后直调工具。见 `skills/feishu-event-remind`；事件定义见 ``channel_events/README.md``。 |
+| `handbook_onboarding_send_welcome` / `handbook_onboarding_process_submit` | 入职管理制度确认闭环：欢迎卡（链接+表单）→ 校验 → 通过双侧通知 / 失败重发新卡。配置 `config/handbook_onboarding.yaml`；触发器 `handbook-onboarding-welcome` 挂 `feishu.hr.user_created`。卡片回调 skill：`feishu-handbook-onboarding`。 |
 | `memory_add` / `memory_search` / `memory_answer_context` / `memory_health` / `assignment_upsert` / `assignment_get` / `assignment_list` / `assignment_transition` | Per-Session routed Fusion Memory MCP tools. Authentication comes only from the trusted runtime Session and operator token map. Assignment tools carry generic work-arrangement facts and state transitions; they do not expose organization_id in tool arguments. |
 | `assignment_send_card` | Haitun workspace wrapper for sending a deterministic Feishu work-assignment card with `view_assignment_detail` and `confirm_assignment_receipt` actions wired to assignment handlers. |
 | `haibao_list_datasets` / `haibao_ask` | Bundled Haibao MCP Adapter tools for real business-data queries. They require an operator-provisioned private MCP server; no private server or database onboarding is bundled. |
@@ -151,6 +180,9 @@ service tools:
 ## Skills (`skills/`)
 
 - `_universal` — always-relevant working discipline.
+- `skill-authoring-when` — **whether** to create/patch（复用价值门 + **先 list，有同类则 patch，无则 create**；自进化前同样遵守）。
+- `skill-authoring-how` — **how** to write body and call `skill_manage`（禁止 raw `write` under `skills/`）。
+- `feishu-resume-review` — 简历评估底座（分项评分 + 综合评价 + 面试题）；`agent_editable: true`，用户规则合并进本 skill，不另建平行简历 skill；可选写飞书多维表。
 - The hermes domain skill set (cryptanalysis, image-segmentation, ml-inference, …).
 - Selected curated skills (`psi-agent-help`, `code-review-checklist`, `python-async-basics`,
   `python-static-analysis`, `user-preferences-and-language`, `example-skill`).
@@ -184,7 +216,8 @@ service tools:
 - `feishu-todo-board-sync` — 搬运一篇飞书 docx 个人 ToDoList 进团队看板电子表格（列=日期、行=人）: slice the doc's newest date section, split its `ToDo` items **by the `@name` mentioned in each item** (items mentioning nobody go to the doc's owner), assemble each person's cell text, and write it to the **caller-specified** column. Three hard rules: attribution follows `@name`; the target column is always given by the caller (**never** inferred from the source doc's date, whose format differs from the header's); a non-empty target cell is reported for confirmation instead of being silently overwritten. Board structure (header row / name column / `SHEET_ID`) is discovered per run, never hardcoded. Drives the existing `feishu_wiki_get_node` → `feishu_sheet_tabs` → `feishu_doc_read` → `feishu_sheet_read` → `feishu_sheet_write` tools; `productivity`, no dedicated tool, no extra deps. Never adds rows for people absent from the board — it reports them as skipped.
 - `feishu-share-brief` — collect explicitly scoped Feishu messages/documents/comments for a person or task and an offset-qualified time range, then create an evidence-backed text preview or, after exact user confirmation, an unshared draft document. Ordinary group messages are not automatically copied into Session history; retrieval uses existing `feishu_*` tools, while `share_brief_guard` enforces evidence, coverage, revision, and confirmation boundaries.
 - `feishu-schedule-message` — Feishu timed reminders via **`schedule_manage` `fire=tool`**: Session **directly** calls `feishu_message_send(**tool_args)` at fire time (no LLM). Pass `tool_args` JSON with real `chat_id`/`open_id` from `<feishu_context>` (**not** Gateway `session_id`). Prefer `visibility=silent`. One-shot (`once_at`) **rejects** `fire=prompt` / content-embedded calls — create must include `fire`+`tool`+`tool_args` in one shot; Session `run_once` deletes TASK after fire.
-- `feishu-event-remind` — Feishu **event** reminders（定事）via **`trigger_manage` `fire=tool`**: map NL → catalog `event`（如 `feishu.chat.member_added`）+ dual-write `raw_event`（如 `im.chat.member.user.added_v1`）；Session 先规范匹配再 raw 回退。禁止手写 `TRIGGER.md`；未接通事件勿 invent catalog 名。
+- `feishu-event-remind` — Feishu **触发器**（事件触发）via **`trigger_manage` `fire=tool`**: map NL → catalog `event`（如 `feishu.chat.member_added`）+ dual-write `raw_event`（如 `im.chat.member.user.added_v1`）；Session 先规范匹配再 raw 回退。禁止手写 `TRIGGER.md`；未接通事件勿 invent catalog 名。用户说法「触发器 / 触发事件」均指本能力，勿再称「定事」。
+- `feishu-handbook-onboarding` — 入职管理制度确认闭环：`feishu.hr.user_created` → `handbook_onboarding_send_welcome` 发卡；`<feishu_card_action>` → `handbook_onboarding_process_submit` 校验（通过双侧通知 / 失败重发新卡）。配置 `config/handbook_onboarding.yaml`。
 - **Feishu tool credentials on Gateway（踩坑）**：`feishu_message_send` 等 workspace 工具跑在 **Session / Gateway 进程**里，读的是该进程的 `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET`。只给 Feishu **channel** 进程设环境变量不够——定时触发时会报 `Feishu app not configured`，飞书收不到推送。启动 Gateway 时也要带上同一组凭证。
 - **Feishu interactive-card callback contract**：发送给其他人的卡片必须同时传
   `business_context_json`（业务类型、稳定业务 ID、发起人、当前状态等收件方 agent 独立处理所需事实）和
