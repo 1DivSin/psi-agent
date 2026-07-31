@@ -1,7 +1,8 @@
 import type { ChatFile, ChatMessage, DeliveryState, Task } from '../haitun-agent/model'
-import type { HistoryMessage, SessionInfo, SessionTodo } from './api'
+import type { HistoryMessage, HistoryToolCall, SessionInfo, SessionTodo } from './api'
 import { stripTransferMarkers } from './sendMarkers'
 import { applyTaskProgress } from './taskProgress'
+import { summarizeToolCall } from './turnProgress'
 
 const ACCENTS = ['#007bff', '#27a06b', '#d8a62a', '#ff6b57', '#4d8eff', '#7c5cfc']
 
@@ -50,14 +51,25 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
     // Pure SEND bubble (no prose): still skip chat row; chest owns those files.
     if (!text.trim()) continue
     const role = m.role === 'assistant' ? 'agent' : 'user'
+    const reasoning =
+      role === 'agent' && typeof m.reasoning === 'string' && m.reasoning.trim()
+        ? m.reasoning
+        : undefined
+    const tools = role === 'agent' ? toolSummariesFromHistory(m.tools) : []
     const last = out[out.length - 1]
     if (role === 'agent' && last?.role === 'agent') {
       const mergedText = [last.text, text].filter((t) => t.trim()).join('\n\n')
       const mergedFiles = mergeChatFiles(last.files, files)
+      const mergedReasoning = [last.reasoning, reasoning]
+        .filter((r): r is string => typeof r === 'string' && !!r.trim())
+        .join('\n')
+      const mergedTools = mergeToolLines(last.tools, tools)
       out[out.length - 1] = {
         ...last,
         text: mergedText,
         ...(mergedFiles.length ? { files: mergedFiles } : {}),
+        ...(mergedReasoning ? { reasoning: mergedReasoning } : {}),
+        ...(mergedTools.length ? { tools: mergedTools } : {}),
       }
       continue
     }
@@ -65,7 +77,35 @@ export function historyToChat(messages: HistoryMessage[]): ChatMessage[] {
       role,
       text,
       ...(files.length ? { files } : {}),
+      ...(reasoning ? { reasoning } : {}),
+      ...(tools.length ? { tools } : {}),
     })
+  }
+  return out
+}
+
+function toolSummariesFromHistory(tools: HistoryToolCall[] | undefined): string[] {
+  if (!Array.isArray(tools) || !tools.length) return []
+  const out: string[] = []
+  for (const t of tools) {
+    if (!t || typeof t.name !== 'string' || !t.name.trim()) continue
+    const args = typeof t.arguments === 'string' ? t.arguments : '{}'
+    const line = summarizeToolCall(t.name, args)
+    if (out[out.length - 1] === line) continue
+    out.push(line)
+  }
+  return out
+}
+
+function mergeToolLines(
+  a: string[] | undefined,
+  b: string[] | undefined,
+): string[] {
+  const out: string[] = []
+  for (const line of [...(a ?? []), ...(b ?? [])]) {
+    if (!line.trim()) continue
+    if (out[out.length - 1] === line) continue
+    out.push(line)
   }
   return out
 }

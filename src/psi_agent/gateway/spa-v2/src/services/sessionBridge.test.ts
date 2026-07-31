@@ -113,6 +113,52 @@ describe('historyToChat', () => {
       { role: 'agent', text: '好的' },
     ])
   })
+
+  it('merges consecutive assistant reasoning for expandable thinking', () => {
+    expect(
+      historyToChat([
+        {
+          role: 'assistant',
+          text: 'Step 1',
+          reasoning: '先读文件',
+        },
+        {
+          role: 'assistant',
+          text: '最终回复',
+          reasoning: '再总结',
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'agent',
+        text: 'Step 1\n\n最终回复',
+        reasoning: '先读文件\n再总结',
+      },
+    ])
+  })
+
+  it('maps structured tools separately from reasoning', () => {
+    expect(
+      historyToChat([
+        {
+          role: 'assistant',
+          text: '完成了',
+          reasoning: '先列目录再读文件',
+          tools: [
+            { name: 'list_dir', arguments: '{"path": "."}' },
+            { name: 'read', arguments: '{"path": "a.md"}' },
+          ],
+        },
+      ]),
+    ).toEqual([
+      {
+        role: 'agent',
+        text: '完成了',
+        reasoning: '先列目录再读文件',
+        tools: ['浏览 `.`', '读取 `a.md`'],
+      },
+    ])
+  })
 })
 
 describe('historyToDeliverables', () => {
