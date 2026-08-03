@@ -4,7 +4,7 @@ Layout (per channel name, e.g. ``feishu``)::
 
     {agent}/channel_events/<channel>/
         <event_dir>/
-            EVENT.yaml   # name, source, platform_event?, kind, …
+            EVENT.yaml   # name, source, platform_event?, kind, filters?, …
             map.py       # required for kind=platform_map: map_event(raw) -> list[dict]
             produce.py   # required for kind=synthetic: async produce(ctx) -> None
 
@@ -12,9 +12,11 @@ Session only receives envelopes via ``POST /events``. Business event
 registry lives here (agent package), not in ``session/event_protocol``.
 
 Adding a new event ≈ adding a tool: drop a directory under
-``channel_events/<channel>/``, implement ``map.py`` or ``produce.py``,
-restart Channel. Do **not** edit ``src/psi_agent/channel`` for each event
-once the Feishu (or other) Channel runner is wired (刻意为之).
+``channel_events/<channel>/``, implement ``map.py`` or ``produce.py``. The
+Channel watches this tree and picks up new or edited definitions without a
+restart (see ``channel/feishu/_agent_events``). Do **not** edit
+``src/psi_agent/channel`` for each event once the Feishu (or other) Channel
+runner is wired (刻意为之).
 """
 
 from __future__ import annotations
@@ -49,6 +51,11 @@ class ChannelEventDef:
     map_fn: MapEventFn | None
     produce_fn: ProduceFn | None
     path: Path
+    # ``filters: true`` in EVENT.yaml — this mapper returns [] as normal
+    # operation (it subscribes to a broad platform event and keeps only some
+    # deliveries), so an empty result is not evidence of a bug. Governs the log
+    # level only; see ``feishu/_agent_events._log_empty_mapping``.
+    filters: bool = False
 
 
 async def load_channel_event_defs(agent_root: Path, channel: str) -> list[ChannelEventDef]:
@@ -83,6 +90,7 @@ async def load_channel_event_defs(agent_root: Path, channel: str) -> list[Channe
             kind = str(header.get("kind") or "platform_map").strip().casefold()
             platform_event = str(header.get("platform_event") or "").strip()
             description = str(header.get("description") or "").strip()
+            filters = bool(header.get("filters") or False)
             map_fn: MapEventFn | None = None
             produce_fn: ProduceFn | None = None
             map_file = entry / "map.py"
@@ -118,6 +126,7 @@ async def load_channel_event_defs(agent_root: Path, channel: str) -> list[Channe
                     map_fn=map_fn,
                     produce_fn=produce_fn,
                     path=Path(str(entry)),
+                    filters=filters,
                 )
             )
             logger.info(
@@ -127,6 +136,38 @@ async def load_channel_event_defs(agent_root: Path, channel: str) -> list[Channe
             logger.error(f"Failed to load channel event from {entry!r}: {e!r}")
     defs.sort(key=lambda d: d.name)
     return defs
+
+
+async def channel_events_fingerprint(agent_root: Path, channel: str) -> str:
+    """Fingerprint the ``channel_events/<channel>`` tree for change detection.
+
+    Covers added/removed directories and edits to ``EVENT.yaml`` / ``map.py`` /
+    ``produce.py``, so a reload can be skipped when nothing moved. Uses size and
+    mtime rather than hashing file contents — this runs on a timer.
+    """
+    root = anyio.Path(str(agent_root / "channel_events" / channel))
+    try:
+        if not await root.is_dir():
+            return ""
+    except Exception:
+        return ""
+    parts: list[str] = []
+    try:
+        async for entry in root.iterdir():
+            if not await entry.is_dir() or entry.name.startswith(("_", ".")):
+                continue
+            for filename in ("EVENT.yaml", "EVENT.yml", "map.py", "produce.py"):
+                target = entry / filename
+                try:
+                    stat = await target.stat()
+                except OSError:
+                    continue
+                parts.append(f"{entry.name}/{filename}:{stat.st_size}:{stat.st_mtime_ns}")
+    except Exception as e:
+        logger.debug(f"fingerprint of channel_events/{channel} failed: {e!r}")
+        return ""
+    parts.sort()
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 def _load_map_fn(map_path: Path, event_name: str) -> MapEventFn | None:
