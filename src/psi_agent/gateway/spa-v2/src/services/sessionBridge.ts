@@ -27,6 +27,25 @@ export function basenameOf(path: string): string {
   return n[n.length - 1] || path
 }
 
+/** Extract ``[SEND:path]`` values in order (parity with backend ``extract_send_paths``). */
+export function extractSendPaths(text: string): string[] {
+  const out: string[] = []
+  const re = /\[\s*SEND\s*:\s*([^\]]*?)\s*\]/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text ?? '')) !== null) {
+    const p = m[1]?.trim()
+    if (p) out.push(p)
+  }
+  return out
+}
+
+/** Map file basenames to their absolute paths for preview reload. */
+export function pathsByName(paths: string[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const p of paths) out[basenameOf(p)] = p
+  return out
+}
+
 /**
  * Project Gateway `/history` rows into workspace chat bubbles.
  * Server already whitelists by ``kind``; still strip transfer markers and drop empties

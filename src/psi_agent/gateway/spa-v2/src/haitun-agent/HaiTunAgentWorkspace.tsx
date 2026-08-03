@@ -393,6 +393,25 @@ export default function HaiTunAgentWorkspace({
     }
   }, [refreshTodos, refreshTodoSegments, refreshTaskSummary, showToast]);
 
+  /** Re-read the authoritative /history after a turn so sends always surface. */
+  const refreshHistory = useCallback(async (taskId: string) => {
+    if (taskId === "overview") return;
+    try {
+      const hist = await fetchHistory(taskId);
+      const { names, paths } = historyToDeliverables(hist);
+      setTasks((current) =>
+        current.map((task) =>
+          task.id === taskId && names.length
+            ? withHistoricalDeliverables(task, names, paths)
+            : task,
+        ),
+      );
+      historyLoadedRef.current.add(taskId);
+    } catch {
+      // 保留现有状态；下次打开卡片时 ensureHistory 仍会重试
+    }
+  }, []);
+
   // While Agent runs, poll todos so middle step updates mid-turn (tool writes file).
   // Pass streaming=true so 「产出与确认」 stays working until the turn ends.
   useEffect(() => {
@@ -932,7 +951,11 @@ export default function HaiTunAgentWorkspace({
       void (async () => {
         const todosAfter = await refreshTodos(cardId, false);
         await refreshTodoSegments(cardId);
-        if (!turnOk || epoch !== streamEpochRef.current) return;
+        if (epoch !== streamEpochRef.current) return;
+        if (!turnOk) {
+          historyLoadedRef.current.delete(cardId);
+          return;
+        }
         setTasks((current) =>
           current.map((task) => (task.id === cardId ? withCompletedTurn(task) : task)),
         );
@@ -945,6 +968,8 @@ export default function HaiTunAgentWorkspace({
             4200,
           );
         }
+        // 服务端已提交本轮 history；回读 sends，补齐历史交付物（含路径）
+        await refreshHistory(cardId);
       })();
     }
   };
@@ -1197,7 +1222,6 @@ export default function HaiTunAgentWorkspace({
       }),
       category: category || "自由任务",
     };
-    historyLoadedRef.current.add(session.id);
     setTasks((current) => [...current, newTask]);
     const storedFiles = pendingFiles.length ? await filesToChatFiles(pendingFiles) : [];
     setMessages((current) => ({
