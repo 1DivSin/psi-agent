@@ -10,9 +10,12 @@ in the system prompt). It merges the most useful parts of the other example work
   `turn_context_builder()` and delivered at the *tail* of the request, on the turn's own user
   message, so staying current leaves the prompt and every earlier turn untouched. `USER.md` and the dynamic
   context files stay in the prompt and trigger a rebuild only when their **content** changes.
-- **Fusion Flow** — full workflow-authoring capability (`flow_manage`, the bundled node
-  runtime under `skills/fusion-flow/`, the `bin/` stateful-session shim, the `flows/`
-  layout, and authoring guidance injected into the prompt).
+- **Workflow** — `workflow` hosts the formal-language workflow system
+  defined by `FusionFlow.g4`; `workflow_graph` stores checked Step–Artifact
+  structure, `workflow_execution` executes inspectable plans, and the workspace
+  runner dispatches Agent and Program Steps plus resumable Human waits.
+  Node/Fuclaw `fusion-flow-legacy` + `flow_run` remains an explicit `.flow.ts` fallback.
+  `flow_manage` supports both and prefers G4 assets.
 - **Skills + file tools** — the full hermes-skills domain skill set plus selected curated
   skills, on top of clean async file/shell tools.
 
@@ -150,7 +153,9 @@ service tools:
 | `write_excel` | Build a real `.xlsx` from a 2D array (bold header, column-width fitting). |
 | `write_word` | Build a real `.docx` from structured blocks (headings/paragraphs/tables); sets the East-Asian font (`w:eastAsia`) on every style so Chinese text isn't "字体不齐". |
 | `skill_manage` | CRUD on **agent** `skills/<name>/SKILL.md`（经 `get_agent()`）。**先 list 再 create**：同类 skill 已存在则 `patch`，禁止平行新建。`patch` 允许 `created_by: agent` 或 `agent_editable: true`（如 `feishu-resume-review`）。判定/写法：`skill-authoring-when` / `skill-authoring-how`（**先于**自进化落库）。 |
-| `flow_manage` | CRUD + promote on Fusion Flow assets under **workspace** `flows/`. |
+| `flow_manage` | CRUD + promote on workflow assets under **workspace** `flows/`; prefers `.workflow` / `.g4` over `.flow.ts`. |
+| `run_flow` / `run_flow_resume` | Execute Workflow plans. Runs without Human Steps finish in the initial call; Human Steps return a checkpointed request that resumes only through `run_flow_resume`. |
+| `flow_run` | Legacy Node/Fuclaw `.flow.ts` runner retained for explicit fallback use. |
 | `schedule_manage` | CRUD on **workspace** `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
 | `trigger_manage` | CRUD on **agent** `triggers/<name>/TRIGGER.md`。`event` 名应对齐 agent ``channel_events/`` 已接通能力；Session 不再用 catalog 硬拒。`fire=tool` 命中后直调工具。见 `skills/feishu-event-remind`；事件定义见 ``channel_events/README.md``。 |
 | `channel_event_check` | 自查 agent `channel_events/` 的事件（只读、无副作用）。`action=list` 看加载了哪些事件名；`action=shape` + `platform_event=` 用真实 lark SDK 模型给出字段所在层级（`im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`）；`action=probe` + `event=` 拿样例事件试跑该事件自己的 `map.py`，返回空时打印 mapper 实际拿到的结构与可读路径。**改完 `map.py` 必须先 probe 再上线** —— mapper 返回 `[]` 在日志里与「去重跳过」无法区分。 |
@@ -253,7 +258,8 @@ service tools:
   `NO_REPLY`、发送确认或重复卡片内容/按钮；若仍有卡片未承载的必要信息（风险、部分失败、必要后续步骤），
   则必须只回复这些信息。若卡片已发送但 snapshot 保存失败，工具返回
   `ok=false, sent=true, callback_context_saved=false`；必须告知这项必要的部分失败，且不要重发卡片造成重复。
-- `fusion-flow` — the immutable Fusion Flow runtime skill (node-based). **Do not edit it.**
+- `workflow` — immutable Workflow skill for the formal G4 language and checked Step–Artifact plans.
+- `flow` (`skills/fusion-flow-legacy/`) — immutable legacy Node/Fuclaw `.flow.ts` fallback.
 
 ## Schedules (`schedules/`)
 
@@ -302,7 +308,9 @@ service tools:
   a token or token map; do not authenticate from `<feishu_context>`, create a
   local memory service, or use another public memory transport.
 
-- **Fusion Flow**: Node.js / `npm` / `npx`. First use: `cd skills/fusion-flow && npm install`.
+- **Workflow**: bundled Python parser/compiler and executor; no separate setup.
+- **Fusion Flow Legacy**: Node.js / `npm` / `npx`. First use:
+  `cd skills/fusion-flow-legacy && npm install`.
 - **Serper search**: install psi-agent with the `mcp` extra and have `uvx` available.
 - **Browser tools**: Node.js / `npx` (first run downloads `@playwright/mcp`) and a system
   browser (Edge by default). Optional env: `BROWSER_CHANNEL` (`msedge`/`chrome`),

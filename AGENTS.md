@@ -39,6 +39,16 @@ JSONL 格式零依赖，逐行追加读写简单。现路径为 AppData ``{appda
 **为什么 socket 文件不自动 unlink？**
 支持热换 Server。每个 `session.post()` 新建 TCP/Unix 连接，由 `UnixConnector` 按路径重新 connect。只要新的服务进程绑定到同一 socket 路径，客户端无需重启即可继续通信。auto-unlink 会破坏这个能力——socket 文件需要保留，由新进程手动接管。
 
+**Workflow 的形式语言与执行边界是什么？**
+Workflow 是由 `FusionFlow.g4` 定义的形式语言工作流系统。Haitun workspace
+的 `workflow` Skill 负责其声明式源码；parser/compiler 将源码编译为
+`fusion_flow.workflow_graph` 的 Step–Artifact 图，`fusion_flow.workflow_execution`
+生成并执行可检查的计划。workspace runner 在计划之上分派 Agent 和 Program，并用
+checkpoint + `run_flow_resume` 处理 Human 的跨回合等待。不含 Human Step 的工作流在
+首次 `run_flow` 调用内完成；Human 工作流只通过保存的请求继续。各类 Step 只能使用
+runner 注入的受限能力，外层 Session 仍须先收集完整的输入 Artifact。旧 Node/Fuclaw
+runtime 位于 `fusion-flow-legacy`，只处理显式 `.flow.ts` 兼容请求。
+
 ## 技术栈
 
 | 领域 | 技术 |

@@ -23,6 +23,7 @@ ContextVar 是**隐式环境态**，比进程全局好（多 Session 不互踩�
 | **唯一写入方** | 仅 `SessionAgent.run` 经 `runtime_scope`（整轮含 tool 执行）。禁止 Gateway / Channel / AI / 测试外业务代码自行 `set_*` |
 | **`get_session_id()`** | 仅 **workspace 工具**需要「当前会话 id」时（如 `todo`、fusion memory）。框架内部用 `Conversation.session_id` / 显式参数 |
 | **`get_workspace()` / `get_agent()`** | 仅 **workspace 工具**在解析相对路径、找 agent 包根时（`write`/`bash`/`read` 等）。**框架核心**（`SessionAgent` / registries / Gateway / Channel）一律用构造时的 `workspace_path` / `agent_path` 或 REST 入参，**禁止**回读 ContextVar |
+| **Tool AI socket bridge** | `current_tool_ai_socket()` 仅在 `SessionAgent` 实际 await workspace tool 的区间返回当前 AI socket，并用 token 复位；它供 `run_flow` 创建受限的临时 Step Session，不进入 tool schema，也不能传播 API key/provider 配置。 |
 | **禁止扩进 ContextVar 的** | AppData / 记忆区根、API key、provider、Gateway listen、任意「方便全局拿一下」的配置——这些走显式字段 / DI / CLI |
 | **本步消费现状** | ✅ haitun 工具经 ``tools/_runtime_paths.py`` 读 ``get_workspace()`` / ``get_agent()``。todos / history / Gateway ``state/`` 已迁 AppData（legacy 双读） |
 
@@ -260,7 +261,7 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 收到 `finish_reason="tool_calls"` 后，按 index 排序生成完整 tool_calls 列表，逐一执行。
 
 **Tool 执行容错**：
-- `arguments` 可能不是合法 JSON → `json.loads` 包在 try/except 中，失败时 fallback 为 `{}`
+- `arguments` 不是合法 JSON，或解析结果不是 JSON object → 返回明确的错误 tool result，且不调用 Tool；合法的 `{}` 仍可用于零参数 Tool
 - Tool 函数可能抛异常 → 以错误文本作为 tool result 返回，不中断 agent loop
 - Tool 返回非字符串（int, None） → 通过 `str()` 强转
 

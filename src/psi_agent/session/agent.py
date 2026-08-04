@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,17 @@ fraction of the threshold — in that regime the signal re-fires every turn but
 compaction cannot shrink the system prompt, so each pass costs an LLM call and
 erodes older context without lowering ``prompt_tokens``.
 """
+
+_CURRENT_TOOL_AI_SOCKET: ContextVar[str | None] = ContextVar(
+    "psi_agent_current_tool_ai_socket",
+    default=None,
+)
+
+
+def current_tool_ai_socket() -> str | None:
+    """Return the invoking Session's AI socket while a workspace tool runs."""
+
+    return _CURRENT_TOOL_AI_SOCKET.get()
 
 
 class AgentRun:
@@ -360,10 +372,12 @@ class SessionAgent:
                     )
                 )
 
-        hook_message = dict(user_message)
-        hook_message["session_id"] = self._conversation.session_id
         request_params = dict(extra_params or {})
+        hook_message = dict(user_message)
         hook_message |= request_params
+        # Hooks must see the trusted Conversation identity. Request extras still
+        # pass through to the AI, but cannot impersonate another Session here.
+        hook_message["session_id"] = self._conversation.session_id
 
         user_kind = message_kind(user_message)
         turn_response_kind = response_kind if response_kind is not None else user_kind
@@ -377,7 +391,7 @@ class SessionAgent:
             agent=str(self._agent_path) if self._agent_path is not None else "",
         ):
             async with self._conversation:
-                # reload tools and schedules from agent package (incremental hash-based)
+                # Reload tools and schedules from their configured roots.
                 await self._tool_registry.refresh()
                 await self._schedule_registry.refresh()
 
@@ -508,19 +522,24 @@ class SessionAgent:
                                 self._conversation.add(with_kind(assistant_msg, turn_response_kind))
 
                                 # pre-compute args + yield tool-call intent
-                                tool_args: list[tuple[int, dict[str, Any], str, dict[str, Any]]] = []
+                                tool_args: list[tuple[int, dict[str, Any], str, dict[str, Any], str | None]] = []
                                 for i, tc in enumerate(ordered_calls):
                                     func_info = tc.get("function", {})
                                     func_name = func_info.get("name", "")
                                     func_args_str = func_info.get("arguments", "{}")
+                                    argument_error: str | None = None
 
                                     try:
                                         args = json.loads(func_args_str)
                                         if not isinstance(args, dict):
                                             logger.warning(f"Tool arguments is not a dict: {type(args).__name__}")
+                                            argument_error = (
+                                                f"Error: Tool '{func_name}' arguments must be a JSON object"
+                                            )
                                             args = {}
                                     except json.JSONDecodeError, TypeError:
                                         logger.warning(f"Failed to parse tool call arguments: {func_args_str[:1000]!r}")
+                                        argument_error = f"Error: Tool '{func_name}' arguments must be valid JSON"
                                         args = {}
 
                                     logger.info(f"Executing tool: {func_name!r}({args!r})")
@@ -528,7 +547,7 @@ class SessionAgent:
                                         reasoning=(f"[Tool Call: {func_name}({json.dumps(args, ensure_ascii=False)})]"),
                                         kind=REASONING_KIND_TOOL_CALL,
                                     )
-                                    tool_args.append((i, tc, func_name, args))
+                                    tool_args.append((i, tc, func_name, args, argument_error))
 
                                 # execute all tools concurrently
                                 results: list[str] = [""] * len(ordered_calls)
@@ -540,7 +559,11 @@ class SessionAgent:
                                         logger.error(f"Tool not found: {fn!r}")
                                     else:
                                         try:
-                                            raw = await func(**a)
+                                            token = _CURRENT_TOOL_AI_SOCKET.set(self._ai_client.ai_socket)
+                                            try:
+                                                raw = await func(**a)
+                                            finally:
+                                                _CURRENT_TOOL_AI_SOCKET.reset(token)
                                             r[idx] = str(raw)
                                             logger.info(f"Tool result ({fn!r}): {str(raw)[:1000]!r}")
                                         except Exception as e:
@@ -548,14 +571,16 @@ class SessionAgent:
                                             logger.error(f"Tool execution error ({fn!r}): {e!r}")
 
                                 async with anyio.create_task_group() as tg:
-                                    for i, _tc, func_name, args in tool_args:
-                                        if func_name:
-                                            tg.start_soon(_execute_one, i, func_name, args, results)
-                                        else:
+                                    for i, _tc, func_name, args, argument_error in tool_args:
+                                        if not func_name:
                                             results[i] = "Error: empty tool call name"
+                                        elif argument_error is not None:
+                                            results[i] = argument_error
+                                        else:
+                                            tg.start_soon(_execute_one, i, func_name, args, results)
 
                                 # yield results in order, save
-                                for i, tc, func_name, _args in tool_args:
+                                for i, tc, func_name, _args, _argument_error in tool_args:
                                     result = results[i]
                                     yield AgentChunk(
                                         reasoning=f"[Tool Result: {str(result)[:1000]}]",

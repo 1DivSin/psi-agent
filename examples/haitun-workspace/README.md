@@ -3,7 +3,9 @@
 A consolidated psi-agent workspace whose agent is **Haitun (海豚)**. It combines:
 
 - a de-branded OpenClaw-style system-prompt engine (all config kept **inside** the workspace),
-- full **Fusion Flow** workflow authoring (node runtime + `flow_manage` + `flows/`),
+- full **Workflow** authoring (the formal language defined by
+  `FusionFlow.g4`, hosted by the `workflow` skill, with an explicit
+  TypeScript fallback under `fusion-flow-legacy`, plus `flow_manage` + `flows/`),
 - the hermes domain skill set + curated skills, and
 - clean async file/shell tools, Serper web search, and environment-configured
   iFLYTEK STT/TTS tools.
@@ -44,15 +46,22 @@ uv run psi-agent channel repl --session-socket /tmp/ch.sock
 
 - **First run** triggers a short onboarding (from `BOOTSTRAP.md`). Delete `BOOTSTRAP.md` to
   skip it.
-- **Fusion Flow** needs Node.js. First use: `cd examples/haitun-workspace/skills/fusion-flow && npm install`.
-  Generated flows go under `flows/<task-slug>/`; reusable templates under `flows/curated/`.
+- **Workflow** is the default for new workflows. Its formal G4 language uses the
+  bundled Python parser/compiler and checked `run_flow` executor for Agent and Program Steps;
+  Human waits continue through `run_flow_resume`. No separate setup is required. The existing
+  `fusion-flow-legacy` Node/Fuclaw runtime remains available for explicit `.flow.ts` work:
+  first use `cd examples/haitun-workspace/skills/fusion-flow-legacy && npm install`.
+  One-off flows go under `flows/<task-slug>/`; saved reusable declarations go under
+  `flows/workflows/<slug>/`. `flows/curated/` remains only as a compatibility catalog for
+  `flow_manage` and legacy assets.
   For stateful sub-agent sessions, copy `bin/env.stateful.template` to
-  `skills/fusion-flow/.env` and fill in the paths.
+  `skills/fusion-flow-legacy/.env` and fill in the paths.
 - **Serper search** needs psi-agent installed with the `mcp` extra and `uvx` on PATH.
 - **Haibao ChatBI** needs the required operator-provisioned private MCP server and the three
   deployment-managed variables documented in `docs/haibao-integration.md`. The bundled Adapter,
   tools, and Skill do not provide the private service or database onboarding.
 - Never put API keys in this workspace or in generated `.flow.ts` / `.env` files.
+  The same rule applies to instruction payloads and generated `.workflow` / `.g4` files.
 
 ## Fusion Memory
 

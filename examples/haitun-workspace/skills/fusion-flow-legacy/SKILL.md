@@ -1,14 +1,16 @@
 ---
 name: flow
-description: For authoring and running `@agent-flow/core` (Fuclaw) TypeScript multi-agent workflows. Use when the task involves `.flow.ts` files, an explicit mention of "agent-flow"/"Fuclaw"/"@agent-flow/core", or a request to coordinate multiple agents, run sub-tasks in parallel, build a multi-step pipeline, or inspect a prior workflow run. Not for `.prose` files. Activated by task intent, not by slash commands.
+description: Legacy fallback for authoring or running existing `@agent-flow/core` (Fuclaw) TypeScript `.flow.ts` workflows. Activate only for an explicit `.flow.ts`, Fuclaw, or `@agent-flow/core` request; use `workflow` for new multi-agent workflows.
 metadata: { "openclaw": { "emoji": "🐾", "homepage": "https://github.com/fuclaw" } }
 ---
 
-# OpenFlow Skill (Fuclaw)
+# OpenFlow Skill (Fuclaw, legacy fallback)
 
 This skill is the author + run protocol for **`@agent-flow/core`** (alias: Fuclaw) — a TypeScript runtime that executes multi-agent workflows and emits a full **execution graph** for replay. Unlike OpenProse, where the LLM *is* the VM, here the VM is a Node.js process; the LLM only orchestrates running it and reading its artifacts.
 
-> **What you're working in.** The normal delivery is a **self-contained bundle**: the user copied the `fusion-flow/` folder somewhere, ran `npm install` once, and works inside it. Call that directory `<workDir>`. Everything below — generated `.flow.ts`, the `.env`, the `runs/` artifacts — lives **relative to `<workDir>`** (the directory you `cd` into and run `npx tsx` from), NOT inside any `core/` subfolder. The only time `<workDir>` is a `core/` is when the user happens to be inside a cloned Fuclaw source repo (see "Runtime mode detection"). This skill runs in any long-context LLM client (Claude Code / Cursor / Cherry Studio / Claude.ai); it does not depend on OpenClaw or any plugin install.
+> **Compatibility boundary.** Use this runtime only for explicit legacy `.flow.ts` work. New workflows use the `workflow` skill and its formal G4 `run_flow` path.
+
+> **What you're working in.** The normal delivery is a **self-contained bundle**: the user copied the `fusion-flow-legacy/` folder somewhere, ran `npm install` once, and works inside it. Call that directory `<workDir>`. Everything below — generated `.flow.ts`, the `.env`, the `runs/` artifacts — lives **relative to `<workDir>`** (the directory you `cd` into and run `npx tsx` from), NOT inside any `core/` subfolder. The only time `<workDir>` is a `core/` is when the user happens to be inside a cloned Fuclaw source repo (see "Runtime mode detection"). This skill runs in any long-context LLM client (Claude Code / Cursor / Cherry Studio / Claude.ai); it does not depend on OpenClaw or any plugin install.
 
 > **No slash commands.** This skill is triggered by **natural-language intent**, never by a `/flow xxx` command. The user just talks: "帮我写个并行调研的工作流" / "跑一下刚生成的那个" / "刚才那个跑完了吗". Do NOT teach, suggest, or expect any `/flow run` / `/flow show` / `/flow author` syntax — those slash commands do not exist and printing them to the user is a bug (a user in an environment without this skill installed will see "命令没找到"). Map what the user *means* to the actions below.
 
@@ -19,9 +21,9 @@ Activate this skill when the user:
 - Asks to run a `.flow.ts` file they already have — e.g. one you just generated in Authoring Mode, or a file they point you at ("跑一下这个 / 帮我跑 / 执行"). (This skill does **not** ship runnable demo examples; "run" always means a concrete `.flow.ts` the user has.)
 - Asks to see the result of a previous run ("跑完了吗 / 看看结果 / 上次那个怎么样了")
 - Mentions "agent-flow", "Fuclaw", or "@agent-flow/core"
-- **Describes any task that needs a multi-agent workflow or agent collaboration**, even without saying "flow" — e.g. "让几个 agent 分别审一遍再汇总", "并行跑 N 个子任务再合并", "一步接一步处理(先 A 再 B 再 C)", "多角度评审 / 打分选边", "把这件事拆成多个 agent 协作". If the task clearly benefits from orchestrating more than one agent / parallel branches / a multi-step pipeline, enter **Authoring Mode** (below) and offer to build a flow.
+- Explicitly asks to keep or migrate behavior tied to the legacy TypeScript runtime.
 
-When in doubt about whether a task is "workflow-shaped": if it would take **two or more coordinated LLM steps** (fan-out, pipeline, loop, or judge-then-branch), it qualifies — activate and propose a flow. A single one-shot question does not.
+For generic multi-agent, parallel, or multi-step intent without a legacy marker, activate `workflow` instead.
 
 ### HARD RULE: when you recognize a multi-agent task, your job is to BUILD A FLOW — not to do it yourself
 
@@ -76,11 +78,11 @@ cd <workDir>
 npx tsx <path-to-flow-file>
 ```
 
-`<workDir>` is **the directory the user is working in** — almost always the copied `fusion-flow/` bundle folder. How to resolve it:
+`<workDir>` is **the directory the user is working in** — almost always the copied `fusion-flow-legacy/` bundle folder. How to resolve it:
 
-1. **Default: it's the bundle folder.** If you see `runtime/agent-flow-core.bundle.mjs` + a sibling `examples/` (and a `package.json` with `"name": "fusion-flow"`), that folder IS `<workDir>`. Generated flows go in `<workDir>/examples/`, artifacts land in `<workDir>/runs/`. No config, no plugin, nothing to look up.
+1. **Default: it's the bundle folder.** If you see `runtime/agent-flow-core.bundle.mjs` + a sibling `examples/` (and a `package.json` with `"name": "fusion-flow-legacy"`), that folder IS `<workDir>`. Generated flows go in `<workDir>/examples/`, artifacts land in `<workDir>/runs/`. No config, no plugin, nothing to look up.
 2. **Source-repo case:** if instead you see `core/src/index.ts`, the user is inside a cloned Fuclaw repo — then `<workDir>` is the `core/` directory (see "Runtime mode detection" for the import-path difference).
-3. **If you genuinely can't tell which folder to work in** (e.g. several candidates), ask the user once in plain language: "你把 fusion-flow 文件夹拷到哪了？我在那个目录里帮你跑。" Then **remember it for the rest of this session** — don't re-ask.
+3. **If you genuinely can't tell which folder to work in** (e.g. several candidates), ask the user once in plain language: "你把 fusion-flow-legacy 文件夹拷到哪了？我在那个目录里帮你跑。" Then **remember it for the rest of this session** — don't re-ask.
 
 Never guess a path without verification. Never hardcode `D:/...` or any machine-specific path. Don't go scanning the filesystem for "a flow project" — work in the folder the user is actually in (see Hard-stop #4 in Authoring Mode).
 
@@ -536,7 +538,7 @@ The author skill must catch and refuse to emit code that does any of these:
 
 Before writing the import line, decide which of two runtime modes the user is in. The author skill MUST pick the right one — wrong import = `tsc` fails or runtime crashes. **The default is bundle mode** (Mode B); source-repo mode (Mode A) only applies when the user is inside a cloned Fuclaw checkout.
 
-**Mode B — skill bundle mode (the normal case)** (the user copied the `fusion-flow/` folder standalone; `<workDir>` is that folder; generated file goes to `<workDir>/examples/flow-author-*.flow.ts` next to a `runtime/` folder):
+**Mode B — skill bundle mode (the normal case)** (the user copied the `fusion-flow-legacy/` folder standalone; `<workDir>` is that folder; generated file goes to `<workDir>/examples/flow-author-*.flow.ts` next to a `runtime/` folder):
 
 ```ts
 import { run } from "../runtime/agent-flow-core.bundle.mjs";
@@ -552,13 +554,13 @@ import { run } from "../src/index.js";
 
 How to detect: the working directory contains `core/src/index.ts` and `core/examples/`, OR the user explicitly said "in the repo / 源码仓".
 
-**Mode C — psi-agent workspace mode** (this skill ships *inside* a psi-agent workspace at `skills/fusion-flow/`, and generated task flows live in a sibling `flows/<task-slug>/` tree — NOT next to the runtime). This is the layout you are in whenever the workspace system prompt tells you to author flows under `flows/<task-slug>/<task-slug>.flow.ts`. The runtime bundle is two levels up and back down into the skill:
+**Mode C — psi-agent workspace mode** (this skill ships *inside* a psi-agent workspace at `skills/fusion-flow-legacy/`, and generated task flows live in a sibling `flows/<task-slug>/` tree — NOT next to the runtime). This is the layout you are in whenever the workspace system prompt tells you to author flows under `flows/<task-slug>/<task-slug>.flow.ts`. The runtime bundle is two levels up and back down into the skill:
 
 ```ts
-import { run } from "../../skills/fusion-flow/runtime/agent-flow-core.bundle.mjs";
+import { run } from "../../skills/fusion-flow-legacy/runtime/agent-flow-core.bundle.mjs";
 ```
 
-How to detect: there is a `skills/fusion-flow/runtime/agent-flow-core.bundle.mjs` and the file you are generating goes under `flows/<task-slug>/` (a sibling of `skills/`, not under `examples/`), OR the workspace system prompt gave you an explicit `flows/<task-slug>/` layout and a `../../skills/fusion-flow/runtime/...` import string. When the system prompt specifies the import path, that instruction wins over Mode A/B — copy it verbatim. Typecheck and run from the skill dir: `cd skills/fusion-flow && npm run typecheck` / `npx tsx ../../flows/<task-slug>/<task-slug>.flow.ts`.
+How to detect: there is a `skills/fusion-flow-legacy/runtime/agent-flow-core.bundle.mjs` and the file you are generating goes under `flows/<task-slug>/` (a sibling of `skills/`, not under `examples/`), OR the workspace system prompt gave you an explicit `flows/<task-slug>/` layout and a `../../skills/fusion-flow-legacy/runtime/...` import string. When the system prompt specifies the import path, that instruction wins over Mode A/B — copy it verbatim. Typecheck and run from the skill dir: `cd skills/fusion-flow-legacy && npm run typecheck` / `npx tsx ../../flows/<task-slug>/<task-slug>.flow.ts`.
 
 **If still unsure, ask the user once.** Cost of guessing wrong: every file fails `tsc`. Cost of asking: one short question.
 
@@ -615,7 +617,7 @@ After generation, run `cd <workDir> && npm run typecheck`. Common errors and fix
 - `Property 'paralel' does not exist on type 'FlowAPI'` — typo. The correct name is `parallel`. Check the spelling against the "Primitive usage rules" list above.
 - `Type 'X' is not assignable to type 'Y'` on a `flow.evaluate` call — most often `kind` was wrong (e.g. `"num"` instead of `"number"`).
 - `'someVar' is possibly 'undefined'` after `flow.call` or `flow.ifElse` — these return `T | undefined`. Use `?? <fallback>` or pull the call inside a function that always provides else.
-- `error TS2307: Cannot find module '../src/index.js'` (or `'../runtime/agent-flow-core.bundle.mjs'` / `'../../skills/fusion-flow/runtime/agent-flow-core.bundle.mjs'` / `'@agent-flow/core'`) — **wrong runtime mode import path**, not a missing dependency. This is the #1 high-frequency trap (see "Runtime mode detection"). Match the path to the mode you're in: bundle mode (has a sibling `runtime/`) → `../runtime/agent-flow-core.bundle.mjs`; source-repo mode (has `core/src/`) → `../src/index.js`; **psi-agent workspace mode** (generated flow under `flows/<task-slug>/`, skill at `skills/fusion-flow/`) → `../../skills/fusion-flow/runtime/agent-flow-core.bundle.mjs`. A bare `@agent-flow/core` is **always wrong** — the runtime is a local file, never a public npm package, so `npm install @agent-flow/core` will 404. Fix the relative path; never add a dependency.
+- `error TS2307: Cannot find module '../src/index.js'` (or `'../runtime/agent-flow-core.bundle.mjs'` / `'../../skills/fusion-flow-legacy/runtime/agent-flow-core.bundle.mjs'` / `'@agent-flow/core'`) — **wrong runtime mode import path**, not a missing dependency. This is the #1 high-frequency trap (see "Runtime mode detection"). Match the path to the mode you're in: bundle mode (has a sibling `runtime/`) → `../runtime/agent-flow-core.bundle.mjs`; source-repo mode (has `core/src/`) → `../src/index.js`; **psi-agent workspace mode** (generated flow under `flows/<task-slug>/`, skill at `skills/fusion-flow-legacy/`) → `../../skills/fusion-flow-legacy/runtime/agent-flow-core.bundle.mjs`. A bare `@agent-flow/core` is **always wrong** — the runtime is a local file, never a public npm package, so `npm install @agent-flow/core` will 404. Fix the relative path; never add a dependency.
 - `Cannot find name 'flow'` — the closure parameter is destructured: `async ({ flow, save }) => { ... }`. Check the skeleton.
 - `Property 'X' does not exist on type` for context bindings — the binding-name string in `flow.session(...)`'s 3rd arg is opaque to TS. Re-read the corresponding `save`/`output` calls and align.
 
@@ -741,7 +743,7 @@ When the user asks what this skill can do ("你能帮我做什么 / 我能用这
   • "环境齐不齐 / 能不能跑"                        → 检查 Node + tsx + .env + authoring 就绪度
 
 我不再附带「现成 demo 例子」——你想要什么工作流，直接描述，我现写给你。
-工作目录：就是你拷走的 fusion-flow 文件夹，`npm install` 一次即可（见 "Running a Program" 一节）
+工作目录：就是你拷走的 fusion-flow-legacy 文件夹，`npm install` 一次即可（见 "Running a Program" 一节）
 ```
 
 ## Security + Approvals
