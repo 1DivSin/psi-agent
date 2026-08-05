@@ -46,17 +46,21 @@ items and what page size they ask for. Both are declarable:
 
 ``confirm`` is the other capability a table row has to carry, and for a sharper
 reason. The dedicated tools guarded their irreversible calls — resigning a user,
-deleting a department, deleting a user group — behind a literal token the caller had
-to echo back. That is a *gate*, not a warning: it forces a round trip in which the
-model has to tell the user what is about to happen. Deleting such a tool in favour of
-a table row would quietly remove the gate and leave only prose behind, which is a
-downgrade no amount of documentation makes up for. So the token moves into the rule:
+deleting a department, deleting a user group — behind a gate the caller had to clear.
+Deleting such a tool in favour of a table row would quietly remove the gate and leave
+only prose behind, which is a downgrade no amount of documentation makes up for. So
+the gate moves into the rule:
 
     confirm: DELETE_DEPT
 
-and the request is refused until ``confirm`` matches. Resigning a user has no undo
-beyond ``/resurrect``, and deleting a group silently strips the permission subject
-from every document and approval that referenced it.
+The value names the operation ("what is being confirmed"); it is **not** a password
+the model may echo. Enforcement lives in ``_feishu_api_impl._confirm_refusal``, which
+sends a one-time 6-digit code to the *user* and requires it back — a constant written
+in this file would be readable by the model that is asking to use it, and a gate whose
+key is printed next to the lock stops nobody. Resigning a user has no undo beyond
+``/resurrect``, deleting a group silently strips the permission subject from every
+document and approval that referenced it, and a dissolved chat takes all of its
+messages and files with it.
 
 A rule matched by *prefix* rather than exactly is downgraded to advice before it is
 returned, because prefix matching and refusal compose badly. Feishu hangs unrelated
@@ -414,6 +418,24 @@ def _check_field(name: str, spec: Any, value: Any) -> str | None:
     return None
 
 
+def _misplaced(
+    name: str,
+    where: str,
+    body: dict[str, Any],
+    query: dict[str, Any],
+    paths: dict[str, Any],
+) -> str:
+    """The bucket *name* was actually passed in, when the rule pins it elsewhere.
+
+    Empty string means it is not sitting in the wrong bucket. A pinned field that is
+    simply absent is not misplaced — that is what ``required`` is for.
+    """
+    for bucket, holder in (("body", body), ("query", query), ("paths", paths)):
+        if bucket != where and name in holder:
+            return bucket
+    return ""
+
+
 def validate(
     rule: Rule | None,
     body: dict[str, Any],
@@ -429,13 +451,38 @@ def validate(
     if rule is None:
         return []
     problems: list[str] = []
+    # Names the ``required`` pass already complained about being in the wrong bucket, so
+    # the ``fields`` pass below does not say the same thing a second time — a field is
+    # routinely both required and constrained, and one mistake should read as one line.
+    misplaced_said: set[str] = set()
     for key in rule.required:
         where, name = _split_field(key, rule.fields.get(key))
-        if not _present(name, body, query, paths, where)[0]:
+        if _present(name, body, query, paths, where)[0]:
+            continue
+        # Say which bucket it belongs in rather than "missing": a required field pinned
+        # to the query and passed in the body is present, just unreachable, and being
+        # told it is missing sends the caller looking for the wrong mistake.
+        if where and (wrong := _misplaced(name, where, body, query, paths)):
+            problems.append(f"必填字段 {name} 放在 {wrong} 里了, 这个端点要求它在 {where} 里")
+            misplaced_said.add(name)
+        else:
             problems.append(f"缺少必填字段 {name}")
     for key, spec in rule.fields.items():
         where, name = _split_field(key, spec)
         found, value = _present(name, body, query, paths, where)
+        # A field pinned to one bucket but passed in another used to be invisible here:
+        # the lookup was scoped to the declared bucket, found nothing, and fell through
+        # to ``continue`` as if it were absent — so the request went out with the field
+        # in the wrong place and Feishu answered 99992402 (field validation failed).
+        # The table already knows where it belongs, which is exactly enough to say so.
+        if (
+            not found
+            and where
+            and name not in misplaced_said
+            and (wrong := _misplaced(name, where, body, query, paths))
+        ):
+            problems.append(f"{name} 放在 {wrong} 里了, 这个端点要求它在 {where} 里")
+            continue
         if not found:
             continue
         if isinstance(spec, dict) and (need := spec.get("requires")):

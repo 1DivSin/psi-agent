@@ -18,11 +18,14 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
 |---|---|---|---|
 | 按名字搜群（机器人在的群） | GET | `/open-apis/im/v1/chats/search` | `query`、`page_size` |
 | 列出机器人在的群 | GET | `/open-apis/im/v1/chats` | `sort_type=ByCreateTimeAsc`、`page_size` |
-| 列出「我」在的群 | GET | `/open-apis/im/v1/chats` | 同上，但 `identity=user` + 本人 `user_key` |
+| 列出「我」在的群 | GET | `/open-apis/im/v1/chats` | 同上，但 `prefer="user"` + 本人 `user_key` |
 | 建群并拉人 | POST | `/open-apis/im/v1/chats` | `name`、`user_id_list`、`owner_id`、`description` |
 
 「我在哪些群」和「机器人在哪些群」是**同一个接口**，只有 token 不同。拿机器人的群列表回答
-「我在哪些群」是个看起来合理的错答案 —— 问本人的群必须 `identity=user` 且带本人 `user_key`。
+「我在哪些群」是个看起来合理的错答案 —— 问本人的群必须 `prefer="user"` 且带本人 `user_key`，
+这样列出来的就是**那个人**所在的群，机器人在不在里面无关。切 token 的参数是 `prefer`，不是
+`identity`（后者只在创建有归属的内容时才用）；只传 `identity` 会仍旧走机器人 token，看起来
+像「用户的群列不出来」。
 
 翻页固定按创建时间正序（`ByCreateTimeAsc`）：飞书文档说过，按活跃度排序的列表在翻页过程中
 顺序会变，会漏群。
@@ -49,10 +52,19 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
 | 改群名/头像/权限 | PUT | `/open-apis/im/v1/chats/:chat_id` | 只传要改的字段 |
 | 转让群主 | PUT | `/open-apis/im/v1/chats/:chat_id` | `owner_id` |
 | 禁言设置 | PUT | `/open-apis/im/v1/chats/:chat_id/moderation` | `moderation_setting` |
-| 解散群 | DELETE | `/open-apis/im/v1/chats/:chat_id` | 不可逆 |
+| 解散群 | DELETE | `/open-apis/im/v1/chats/:chat_id` | 不可逆，须本人确认码 + `user_key` |
 
 改群设置只传要改的字段，别整份覆盖 —— 否则改个群名会顺手把「谁可以加人」重置了。
 `share_card_permission` 必须和 `add_member_permission` 一致，飞书拒绝不一致的组合。
+
+**解散群必须先向本人确认，绝不能自己决定。** 飞书不保留已解散群的会话记录，群里的消息和文件
+全部消失，任何工具都恢复不了。调用时把 `<feishu_context>` 里的 `sender_open_id` 作为 `user_key`
+传进去：第一次调用**不会**解散，而是给本人私聊发一个 6 位确认码并返回 `need_confirmation`。
+把「要解散哪个群、群里有多少人、后果是什么」讲清楚，等本人把确认码告诉你，再带
+`confirm=<那6位数字>` 调一次。确认码只对**这一个** `chat_id` 有效、15 分钟过期、只能用一次，
+你自己编不出来 —— 用户没给码就说明这事没被批准，别绕。
+
+只想让群停用而不销毁内容，用移出成员或归档，别用解散。
 
 **禁言是另一个接口**，这是最容易踩的一处：`谁可以发言` 这个值读得到，但在
 `PUT /chats/:chat_id` 里改它会被**静默忽略** —— 必须走 `/moderation`。
@@ -83,12 +95,17 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
 | 要做的事 | 用哪个工具 | 为什么 |
 |---|---|---|
 | 按名字在群里找人 | `feishu_chat_find_member` | 要的是筛完的结果，不是把整个群名册灌进上下文 |
-| 读群详情（含设置） | `feishu_chat_get` | 非成员时飞书返回 200 但只给残缺数据，需要 `partial` 标出来 |
+| 读群详情（含设置） | `feishu_chat_get` | 非成员时飞书返回 200 但只给残缺数据，需要 `partial` 标出来；带 `user_key` 会自动以本人身份重读一次 |
 | 读/写/清空群公告 | `feishu_chat_announcement*` | 公告是文档：要读元信息、翻页读块、并把 `revision_id` 串起来做乐观锁 |
 | 上传群头像 | `feishu_chat_upload_avatar` | multipart 二进制上传，JSON 传不了文件句柄 |
 
 群公告是**文档不是消息**，所以不会出现在消息历史里。群头像必须用 `image_type="avatar"` 上传，
 拿消息图片的 key 去设群头像会得到 232021 —— 看起来像头像有问题，其实是上传方式错了。
+
+「机器人不在这个群里」不等于「这个群看不到」。飞书按**发请求的那个 token**判断成员身份，而机器人
+通常不在用户所在的群里 —— 所以带上本人 `user_key`（`feishu_chat_get` 会自动以其身份重读，其他读
+接口用 `prefer="user"`）。别把「机器人不在」说成「无法查看」，也别把残缺结果里的 `user_count: 0`
+当成群里真的没人。
 
 ```rules
 - endpoint: GET /open-apis/im/v1/chats/search
@@ -104,7 +121,9 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
   fields:
     sort_type: {default: ByCreateTimeAsc, in: query, choices: [ByCreateTimeAsc, ByActiveTimeDesc]}
   pitfalls:
-    - 问「我在哪些群」要 identity=user + 本人 user_key；用机器人 token 回答是错答案。
+    - 问「我在哪些群」要 prefer="user" + 本人 user_key; 用机器人 token 回答是错答案。
+    - 切 token 的是 prefer 不是 identity; 只传 identity 仍走机器人 token, 会误以为用户的群列不出来。
+    - 以本人身份列群时机器人在不在那些群里无关; 别把「机器人不在」说成「列不出来」。
     - 不返回单聊(p2p)，飞书的会话列表只有群。
 
 - endpoint: POST /open-apis/im/v1/chats
@@ -176,6 +195,7 @@ description: 飞书群（chat）接口表 —— 建群/拉人/踢人、群设�
   confirm: 解散群
   pitfalls:
     - 飞书不保留会话记录，群里的消息和文件全部消失，任何工具都恢复不了。
+    - 必须先向本人确认: 传 user_key 后本人会私聊收到 6 位确认码, 带 confirm=<码> 才会执行。
     - 只想停用可以改用移出成员或归档。232009 表示群已经解散过了。
 
 - endpoint: GET /open-apis/im/v1/chats/:chat_id/menu_tree
