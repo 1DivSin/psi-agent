@@ -129,7 +129,6 @@ export default function UserHub({
             onClick={() => openPanel('models')}
           >
             <Bot size={16} />
-            {aiCount > 0 ? <em className="user-hub-shortcut-badge">{aiCount}</em> : null}
           </button>
           <button
             type="button"

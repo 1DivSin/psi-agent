@@ -96,6 +96,11 @@ import {
 } from "../services/sessionBridge";
 import { normalizeFailedTurns } from "../services/messageTurn";
 import {
+  addPendingDeliveries,
+  clearPendingDeliveries,
+  pendingDeliveriesFor,
+} from "../services/pendingDeliveries";
+import {
   normalizeWorkspacePath,
   sessionBackendId,
   sessionMatchesWorkspace,
@@ -353,6 +358,10 @@ export default function HaiTunAgentWorkspace({
         current.map((task) => {
           if (task.id !== taskId) return task;
           let next = names.length ? withHistoricalDeliverables(task, names, paths) : task;
+          if (names.length) {
+            const pending = pendingDeliveriesFor(task.id).filter((name) => names.includes(name));
+            if (pending.length) next = { ...next, newDeliverables: pending, deliveryState: "ready" };
+          }
           if (chat.length) {
             const lastAgent = [...chat].reverse().find((m) => m.role === "agent" && !m.failed);
             const lastUser = [...chat].reverse().find((m) => m.role === "user" && !m.failed);
@@ -402,11 +411,13 @@ export default function HaiTunAgentWorkspace({
       const hist = await fetchHistory(taskId);
       const { names, paths } = historyToDeliverables(hist);
       setTasks((current) =>
-        current.map((task) =>
-          task.id === taskId && names.length
-            ? withHistoricalDeliverables(task, names, paths)
-            : task,
-        ),
+        current.map((task) => {
+          if (task.id !== taskId || !names.length) return task;
+          let next = withHistoricalDeliverables(task, names, paths);
+          const pending = pendingDeliveriesFor(taskId).filter((name) => names.includes(name));
+          if (pending.length) next = { ...next, newDeliverables: pending, deliveryState: "ready" };
+          return next;
+        }),
       );
       historyLoadedRef.current.add(taskId);
     } catch {
@@ -428,12 +439,13 @@ export default function HaiTunAgentWorkspace({
   }, [typingCard, refreshTodos, refreshTodoSegments]);
 
   const openArtifact = useCallback((task: Task, fileName?: string, listMode?: "new" | "history") => {
+    void ensureHistory(task.id);
     const mode = listMode
       ?? (fileName ? "history" : (task.newDeliverables.length ? "new" : "history"));
     setArtifactListMode(mode);
     setArtifactInitialFile(fileName);
     setArtifactTask(task);
-  }, []);
+  }, [ensureHistory]);
 
   const closeArtifact = useCallback(() => {
     setArtifactTask(null);
@@ -464,11 +476,13 @@ export default function HaiTunAgentWorkspace({
         if (cancelled) return;
         setAiId(preferred?.id ?? null);
         setOpenModelsOnce(openModels);
-        const mapped = inWs.map((s) =>
-          sessionToTask(s, titles[s.id] || "新任务", {
+        const mapped = inWs.map((s) => {
+          const pending = pendingDeliveriesFor(s.id)
+          return sessionToTask(s, titles[s.id] || "新任务", {
             ...(summaries[s.id] ? { summary: summaries[s.id] } : {}),
-          }),
-        );
+            ...(pending.length ? { newDeliverables: pending, deliveryState: "ready" } : {}),
+          })
+        });
         setTasks(mapped);
         historyLoadedRef.current = new Set(["overview"]);
         setMessages({ overview: [OVERVIEW_WELCOME] });
@@ -621,6 +635,7 @@ export default function HaiTunAgentWorkspace({
       }
     }
 
+    clearPendingDeliveries(task.id);
     historyLoadedRef.current.delete(task.id);
     setTasks((current) => current.filter((item) => item.id !== task.id));
     setMessages((current) => {
@@ -809,6 +824,7 @@ export default function HaiTunAgentWorkspace({
           },
           onBlob: (name, data, path) => {
             if (!live()) return;
+            addPendingDeliveries(cardId, [name]);
             setTasks((current) =>
               current.map((task) =>
                 (task.id === cardId
@@ -1316,6 +1332,7 @@ export default function HaiTunAgentWorkspace({
   };
 
   const saveArtifact = (task: Task) => {
+    clearPendingDeliveries(task.id);
     setTasks((current) => current.map((item) => item.id === task.id
       ? {
           ...item,
@@ -1536,7 +1553,22 @@ export default function HaiTunAgentWorkspace({
                       className={`chat-top-icon agent-status-icon ${unitBusy ? "busy" : ""}`}
                       aria-label={unitBusy ? "Agent 正在思考执行任务" : "Agent 空闲"}
                     >
-                      <History size={15} className="agent-status-clock" />
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className="agent-status-clock"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                        <path d="M3 3v5h5" />
+                        <path className="agent-status-clock-hand" d="M12 7v5l4 2" />
+                      </svg>
                     </button>
                     <span className="agent-status-tooltip" role="tooltip">
                       {unitBusy ? "Agent 正在思考执行任务" : "Agent 空闲"}

@@ -1063,8 +1063,10 @@ textarea:focus-visible {
   position: relative;
 }
 
-.agent-status-icon.busy .agent-status-clock {
-  animation: spin 1.7s linear infinite;
+.agent-status-icon.busy .agent-status-clock-hand {
+  animation: spin-reverse 1.7s linear infinite;
+  transform-box: view-box;
+  transform-origin: 12px 12px;
 }
 
 .agent-status-icon.busy .signal-orb.red {
