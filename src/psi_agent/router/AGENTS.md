@@ -1,65 +1,87 @@
-# Router 层设计文档
+# Router 层开发约定
 
-## 概述
+Router 是无状态的 Chat Completions/SSE 组合层。修改本目录时同时遵守仓库根
+`AGENTS.md`，尤其是 AnyIO、单 choice、`aclosing()`、Socket 平台门控、零 suppressions
+和 `setup_logging` 第一行约束。
 
-Router 位于 Session 与多个 AI 后端之间，负责把一次 Session 请求交给路由模型判断，再将子任务发送到匹配的 upstream，最后由同一个 `router_socket` 上的模型聚合结果。Router 不加载 workspace tools，也不维护正式会话历史；工具始终由 Session 执行。
-
-## 目录结构
+## 模块边界
 
 ```text
 router/
-├── __init__.py              # Router 对外统一导出
-├── entry.py                 # CLI/dataclass 启动入口，按 mode 选择策略
-├── server.py                # HTTP/SSE 服务、fallback、生命周期
-├── client.py                # socket/SSE 传输实现
-├── protocol.py              # 类型和配置定义
-├── routing/
-│   ├── __init__.py          # 分流模式对外导出
-│   ├── orchestrator.py      # 分流策略：选择一个 upstream 并转发完整上下文
-│   └── prompts.py           # 分流模式提示词
-└── aggregation/
-    ├── __init__.py          # 聚合模式对外导出
-    ├── orchestrator.py      # 聚合策略：规划、分发子任务、汇总结果
-    ├── planner.py           # 聚合模式的任务规划和计划校验
-    └── prompts.py           # 聚合模式提示词
+├── entry.py          # 统一 Router facade，只按显式 mode 组装策略
+├── client.py         # Socket-aware HTTP/SSE 客户端
+├── request.py        # 公开请求深拷贝与私有字段剥离
+├── models.py         # RouterMode、RouterTarget、CompletionResult
+├── server.py         # 公共 HTTP/SSE 边界，不写 mode 分支
+├── routing/          # Selector 选择一个目标 + 工具链 sticky
+└── aggregation/      # 全目标并发广播 + 专用 Aggregator 综合
 ```
 
-业务逻辑必须放在 `routing/` 或 `aggregation/` 内部；根目录只保留传输、协议和启动入口，不得新增模式相关业务逻辑。
+共享传输、错误和模型放根包；模式特有逻辑必须留在同名子包。不要把 aggregation 分支塞进
+`RoutingStrategy`，也不要让 server 理解 Selector 或 Aggregator。
 
-## 数据流
+## Socket 所有权
 
-```text
-Session -> router_socket (Planner)
-        -> upstream[socket] (selected subtasks, concurrent)
-        -> router_socket (Aggregator)
-        -> Session (content/reasoning/tool_calls)
-```
+- `session_socket`：Router 对 Session 监听的地址。
+- `router_socket`：统一入口的专用 Router AI；routing 为 Selector，aggregation 为 Aggregator。
+- target Socket：只存在于本地配置，绝不进入 prompt、日志反馈或外部请求元数据。
+- aggregation 的 Aggregator 必须专用，不得复用为 target；routing 允许 Selector 同时是候选。
 
-Planner 接收完整的 upstream `(socket, description)` 目录，只能输出已配置 socket。任务数量由主任务与 description 的适配度决定，不固定为三个。被选中的子任务可以并发执行；结果按 Planner 输出顺序聚合。相同原始 `tool_call.id` 只保留第一次完整定义。
+所有地址经 `psi_agent._sockets` 解析。Windows 裸路径和非 Windows Named Pipe 的 fail-fast
+检查是刻意设计，不得绕过。
 
-## Session 与工具
+## 请求复制
 
-Router 不执行工具。聚合结果包含 `tool_calls` 时，Session 执行唯一的 ToolRegistry，并将工具结果写入 history 后重新请求 Router，开始下一轮“分流 → 子任务 → 聚合”。内部 `routing.session_id` 仅用于关联请求，普通 AI provider 转发前必须移除。
+两个策略统一调用 `copy_public_request_body()`：
 
-## 错误与取消
+1. 深拷贝输入，禁止修改 caller dict。
+2. 只删除 `model` 与 `routing`。
+3. 强制 `stream=True`。
+4. 其余字段（含未知扩展字段）全部透传。
 
-- Planner、upstream 或 Aggregator 全部失败时，server 只调用一次 `default_socket`。
-- 部分 upstream 失败时保留成功结果，并在聚合前记录 warning。
-- 所有 task group、SSE generator、aiohttp runner 在取消时必须清理；跨 await 的清理使用 shielded cancel scope。
-- `setup_logging(verbose=...)` 必须是 `Router.run()` 第一条可执行语句。
+Selector prompt 是例外：它只接收候选编号/描述、压缩后的对话与工具摘要，不接收私有
+Socket 或原始完整请求。
 
-## 日志
+## SSE 约束
 
-INFO 级别必须记录实际 Planner 计划、选中的 socket、成功 upstream 数量和聚合结果；逐 chunk 的原始 SSE 内容使用 DEBUG。不要使用标准 logging 的 `%s` 占位符，loguru 日志使用 f-string。
+- 每个有效 event 恰好一个 choice；0 choice 静默跳过，多 choice 抛错。
+- `finish_reason="compaction_needed"` 是辅助帧，不覆盖真实 completion finish。
+- `finish_reason="error"` 转换为 Router 错误。
+- 每个进入/离开 Router 的 chunk 都写 DEBUG 日志。
+- 每个 async generator 必须经 `aclosing()` 消费；提前退出和取消必须关闭上游连接。
+- aiohttp session/response/runner 的跨 await 清理放在 shielded CancelScope 中。
 
-## 测试
+## routing 不变量
 
-测试目录镜像 `tests/psi_agent/router/`。必须覆盖：动态任务数量、socket 白名单、并发子任务、聚合顺序、tool-call ID 去重、Session 多轮工具调用、部分失败和 default fallback。
+- 每个普通用户轮次重新调用 Selector。
+- Selector 只能返回严格 `{"candidate_id":"..."}`，再由本地映射解析 Socket。
+- `routing.session_id` 只为一次 Session 工具链保存 sticky target。
+- 仅 `finish_reason="tool_calls"` 保留 sticky；正常结束、错误、断连或新用户轮次均清理。
 
-## 模式切换契约
+## aggregation 不变量
 
-Router 启动时必须显式指定模式，不存在隐式默认模式。
+- 每回合把同一公开请求并发发送给全部 targets，不做 Planner、子任务拆分或候选子集选择。
+- 用预分配 slot 保证反馈始终按配置顺序，不按完成顺序。
+- 普通分支异常隔离；取消异常必须继续传播并取消整个 task group。
+- 至少一个分支成功才调用 Aggregator；全部失败直接 `AggregationError`。
+- 分支 reasoning 永不进入反馈；分支 tool calls 只作为材料。
+- 只有 Aggregator 的 content/reasoning/tool_calls 可以返回 Session。
+- `discard()` / `clear()` 是显式无状态 no-op；工具结果轮重新广播全部 targets。
+- 失败摘要须替换原始、repr 和转义形式的私有 Socket，并截到 512 字符。
+- 动态材料压缩必须确定、可复现，不得依赖异步完成顺序。
 
-- `routing` 表示分流模式：路由模型从已配置的 upstream socket 中选择一个，并把完整请求转发给该 socket。
-- `aggregation` 表示聚合模式：先把任务分发给已配置的 upstream，再由聚合模型综合子结果生成最终回复。
-- CLI、YAML、Gateway 和 SPA 的 Router 创建路径都必须要求传入 `mode`，并且原样透传，不得丢失或自行补默认值。
+## 有意不支持
+
+- Planner、动态任务拆分、请求选择候选 Socket。
+- fallback、默认模型、自动重试、熔断、健康检查、负载均衡。
+- Router 内会话持久化或 workspace tool 执行。
+- 已删除的 `RouterClient`、`UpstreamResult`、`stream_raw`、`Orchestrator` 等旧 API。
+
+## 测试位置
+
+- 共享边界：`tests/psi_agent/router/test_*.py`
+- aggregation：`tests/psi_agent/router/aggregation/`
+- 真实 Session 链路：`tests/integration/test_serial_multi_ai_router.py`
+
+并发测试用 `anyio.Event` / cancel scope，不用固定 sleep。测试提前退出任务组前先 cancel，避免
+常驻 aiohttp server 把 `__aexit__(None, None, None)` 永久挂住。

@@ -1,25 +1,17 @@
-"""Aggregation strategy package for Router result handling."""
+"""Broadcast aggregation configuration, evidence, prompts, and runtime."""
 
-from __future__ import annotations
-
-from psi_agent.router.aggregation.orchestrator import AggregationOrchestrator, OrchestrationError, Orchestrator
-from psi_agent.router.aggregation.planner import Planner, PlanValidationError, parse_plan
-from psi_agent.router.aggregation.prompts import (
-    build_aggregation_messages,
-    build_branch_messages,
-    build_planning_messages,
-    build_repair_messages,
-)
+from .entry import AggregationRouter
+from .errors import AggregationError
+from .models import AggregationConfig, AggregationFeedback, compact_feedback
+from .prompts import build_aggregation_messages
+from .strategy import AggregationStrategy
 
 __all__ = [
-    "AggregationOrchestrator",
-    "OrchestrationError",
-    "Orchestrator",
-    "PlanValidationError",
-    "Planner",
+    "AggregationConfig",
+    "AggregationError",
+    "AggregationFeedback",
+    "AggregationRouter",
+    "AggregationStrategy",
     "build_aggregation_messages",
-    "build_branch_messages",
-    "build_planning_messages",
-    "build_repair_messages",
-    "parse_plan",
+    "compact_feedback",
 ]

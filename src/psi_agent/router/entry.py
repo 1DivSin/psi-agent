@@ -1,97 +1,82 @@
-"""CLI entry point for the serial Router service."""
+"""Unified Router entry point for routing and broadcast aggregation."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from psi_agent._logging import setup_logging
-from psi_agent.router.aggregation import Orchestrator as AggregationOrchestrator
-from psi_agent.router.aggregation import Planner
-from psi_agent.router.client import RouterClient
-from psi_agent.router.protocol import RouterConfig, RouterMode
-from psi_agent.router.routing import Orchestrator as RoutingOrchestrator
-from psi_agent.router.server import serve_router
+
+from .aggregation import AggregationConfig, AggregationStrategy
+from .client import RouterHttpClient
+from .models import RouterMode, RouterTarget
+from .routing import RouteSelector, RoutingConfig, RoutingStrategy
+from .server import RouterStrategy, serve_router
 
 
 @dataclass
 class Router:
-    """Start the Router service used between Session and configured AI backends."""
+    """Expose one explicitly selected Router mode through a shared facade."""
 
     session_socket: str
-    """Transport address on which Router accepts Session requests."""
-
     router_socket: str
-    """Transport address for the planning and aggregation AI backend."""
-
-    default_socket: str
-    """Transport address for fallback requests after an orchestration failure."""
-
     mode: RouterMode | str
-    """Router orchestration mode: routing or aggregation."""
-
     upstream: list[tuple[str, str]]
-    """Configured (transport address, capability description) branch backends."""
-
-    max_tool_rounds: int = 10
-    """Maximum tool rounds independently allowed for each branch."""
-
-    router_timeout: float | None = 60.0
-    """Timeout in seconds for planning requests, or None to disable it."""
-
-    branch_timeout: float | None = None
-    """Timeout in seconds for each branch request, or None to disable it."""
-
-    aggregate_timeout: float | None = None
-    """Timeout in seconds for the final aggregation request, or None to disable it."""
-
-    run_ttl: float = 1_800.0
-    """Maximum seconds to retain a run while waiting for tool results."""
-
-    max_context_length: int = 12_000
-    """Maximum context characters supplied to the routing model."""
-
+    router_timeout: float | None = 30.0
+    target_timeout: float | None = None
+    max_context_chars: int = 12_000
     verbose: bool = False
-    """Enable DEBUG-level logging."""
 
     async def run(self) -> None:
-        """Validate configuration and serve until externally cancelled."""
+        """Build the selected strategy and serve until externally cancelled."""
 
         setup_logging(verbose=self.verbose)
-        config = RouterConfig(
-            session_socket=self.session_socket,
-            router_socket=self.router_socket,
-            default_socket=self.default_socket,
-            mode=self.mode,
-            upstream=self.upstream,
-            max_tool_rounds=self.max_tool_rounds,
-            router_timeout=self.router_timeout,
-            branch_timeout=self.branch_timeout,
-            aggregate_timeout=self.aggregate_timeout,
-            run_ttl=self.run_ttl,
-            max_context_length=self.max_context_length,
-        )
-        for name, timeout in (
-            ("router_timeout", config.router_timeout),
-            ("branch_timeout", config.branch_timeout),
-            ("aggregate_timeout", config.aggregate_timeout),
-            ("run_ttl", config.run_ttl),
+        try:
+            mode = RouterMode(self.mode)
+        except TypeError, ValueError:
+            raise ValueError("mode must be 'routing' or 'aggregation'") from None
+        if not isinstance(self.upstream, list) or not self.upstream:
+            raise ValueError("upstream must be a non-empty list of two-string tuples")
+        if any(
+            not isinstance(item, tuple) or len(item) != 2 or any(not isinstance(value, str) for value in item)
+            for item in self.upstream
         ):
-            if timeout is not None and not math.isfinite(timeout):
-                raise ValueError(f"{name} must be a finite positive number or None")
+            raise ValueError("upstream must be a non-empty list of two-string tuples")
 
-        client = RouterClient()
-        if config.mode == RouterMode.AGGREGATION:
-            planner = Planner(
-                client=client,
-                router_socket=config.router_socket,
-                upstream=config.upstream,
-                timeout=config.router_timeout,
+        targets = [
+            RouterTarget(
+                candidate_id=f"candidate-{index}",
+                socket=socket,
+                description=description,
             )
-            strategy = AggregationOrchestrator(config=config, client=client, planner=planner)
+            for index, (socket, description) in enumerate(self.upstream, start=1)
+        ]
+        client = RouterHttpClient()
+        if mode is RouterMode.ROUTING:
+            config = RoutingConfig(
+                session_socket=self.session_socket,
+                selector_socket=self.router_socket,
+                targets=targets,
+                selector_timeout=self.router_timeout,
+                target_timeout=self.target_timeout,
+                max_selection_chars=self.max_context_chars,
+            )
+            selector = RouteSelector(config=config, client=client)
+            strategy: RouterStrategy = RoutingStrategy(
+                config=config,
+                selector=selector,
+                client=client,
+            )
         else:
-            strategy = RoutingOrchestrator(config=config, client=client)
-        await serve_router(config=config, strategy=strategy, client=client)
+            config = AggregationConfig(
+                session_socket=self.session_socket,
+                aggregator_socket=self.router_socket,
+                targets=targets,
+                aggregator_timeout=self.router_timeout,
+                target_timeout=self.target_timeout,
+                max_context_chars=self.max_context_chars,
+            )
+            strategy = AggregationStrategy(config=config, client=client)
+        await serve_router(session_socket=config.session_socket, strategy=strategy)
 
 
 __all__ = ["Router"]

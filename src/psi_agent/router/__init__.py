@@ -1,20 +1,56 @@
-"""Dynamic multi-backend routing component."""
+"""Experimental Router framework with shared transport and pluggable strategies."""
 
-from .aggregation import AggregationOrchestrator
+from .aggregation import (
+    AggregationConfig,
+    AggregationError,
+    AggregationFeedback,
+    AggregationRouter,
+    AggregationStrategy,
+    build_aggregation_messages,
+    compact_feedback,
+)
+from .client import RouterHttpClient
 from .entry import Router
-from .protocol import RouterMode
-from .routing import OrchestrationError, Orchestrator, Planner, RouterClient, RouterConfig, RoutingOrchestrator
-from .server import serve_router
+from .errors import InvalidRouterRequestError, RouterError, RouterUpstreamError
+from .models import CompletionResult, RouterMode, RouterTarget
+from .routing import (
+    RouteSelectionError,
+    RouteSelector,
+    RoutingConfig,
+    RoutingRouter,
+    RoutingStrategy,
+    RoutingTarget,
+    SelectionResult,
+    build_selector_messages,
+)
+from .server import RouterStrategy, create_router_app, handle_chat_completions, serve_router
 
 __all__ = [
-    "AggregationOrchestrator",
-    "OrchestrationError",
-    "Orchestrator",
-    "Planner",
+    "AggregationConfig",
+    "AggregationError",
+    "AggregationFeedback",
+    "AggregationRouter",
+    "AggregationStrategy",
+    "CompletionResult",
+    "InvalidRouterRequestError",
+    "RouteSelectionError",
+    "RouteSelector",
     "Router",
-    "RouterClient",
-    "RouterConfig",
+    "RouterError",
+    "RouterHttpClient",
     "RouterMode",
-    "RoutingOrchestrator",
+    "RouterStrategy",
+    "RouterTarget",
+    "RouterUpstreamError",
+    "RoutingConfig",
+    "RoutingRouter",
+    "RoutingStrategy",
+    "RoutingTarget",
+    "SelectionResult",
+    "build_aggregation_messages",
+    "build_selector_messages",
+    "compact_feedback",
+    "create_router_app",
+    "handle_chat_completions",
     "serve_router",
 ]
