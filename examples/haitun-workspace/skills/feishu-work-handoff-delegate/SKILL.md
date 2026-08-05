@@ -1,6 +1,6 @@
 ---
 name: feishu-work-handoff-delegate
-description: "工作同步 + 交接代答 — 飞书成员私聊 HaiTun 同步自己负责的工作（当前进展 / 下一步 / 交接原则），HaiTun 记进一张团队可见的『工作交接台账』多维表格；之后别人来找这个人对接、而本人不在时，HaiTun 在其交接原则的框架内代答『当前进展 + 下一步该做什么』。Use in two cases: (1) a member DMs the bot to sync their own work status/next-steps/handoff principles — record it into a Feishu bitable under their own sender_open_id; (2) someone asks about another person's work or says they're taking over — read that person's rows from the bitable and, strictly within the recorded 交接原则, tell them the current progress and next step. Anything outside the principles: say it's not authorized, give the owner's contact via feishu_user_get, optionally notify the owner with feishu_message_send. Uses feishu_bitable_* (read/write the ledger), feishu_chat_find_member / feishu_department_members (resolve names to open_id), feishu_user_get (contacts), feishu_message_send (relay/notify). Needs bitable:app scope + the app as a collaborator on the ledger base, and contact scopes for phone/email."
+description: "工作同步 + 交接代答 — 飞书成员私聊 HaiTun 同步自己负责的工作（当前进展 / 下一步 / 交接原则），HaiTun 记进一张团队可见的『工作交接台账』多维表格；之后别人来找这个人对接、而本人不在时，HaiTun 在其交接原则的框架内代答『当前进展 + 下一步该做什么』。Use in two cases: (1) a member DMs the bot to sync their own work status/next-steps/handoff principles — record it into a Feishu bitable under their own sender_open_id; (2) someone asks about another person's work or says they're taking over — read that person's rows from the bitable and, strictly within the recorded 交接原则, tell them the current progress and next step. Anything outside the principles: say it's not authorized, give the owner's contact via feishu_api (GET contact/v3/users/batch), optionally notify the owner with feishu_message_send. Uses feishu_bitable_* (read/write the ledger), feishu_chat_find_member / feishu_department_members (resolve names to open_id), feishu_api for contacts (see the feishu-contact skill), feishu_message_send (relay/notify). Needs bitable:app scope + the app as a collaborator on the ledger base, and contact scopes for phone/email."
 category: productivity
 ---
 
@@ -18,14 +18,14 @@ category: productivity
 与 [`feishu-blocker-routing`]（人找对人给联系方式）互补：那个只指路，本技能能替本人交代下一步。
 
 用到的现成工具：
-- `feishu_bitable_list_tables(app_token)` / `feishu_bitable_list_records(app_token, table_id, ...)`
-  / `feishu_bitable_create_record(app_token, table_id, fields_json)` — 读写工作交接台账
-- `feishu_bitable_list_fields` / `feishu_bitable_delete_fields` / `feishu_bitable_clear_table`
+- `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables / `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records
+  / `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records — 读写工作交接台账
+- `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields / `feishu_api` DELETE /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id / `feishu_bitable_clear_table`
   — 建表后清默认空行/占位列
-- `feishu_user_get(user_ids, ...)` — 用 open_id 取负责人联系方式（电话/邮箱/职位）
+- `feishu_api` 调 `GET /open-apis/contact/v3/users/batch` — 用 open_id 取负责人联系方式（电话/邮箱/职位）；先读 `feishu-contact` skill
 - `feishu_chat_find_member(...)` / `feishu_department_members(...)` — 按姓名反查 open_id
 - `feishu_message_send(receive_id, text, on_behalf_of=...)` — 通知本人有人来交接，或代人带话署名
-- `feishu_wiki_get_node(node_token)` — wiki 链接换 `app_token`
+- `feishu_api` 打 `wiki/v2/spaces/get_node` — wiki 链接换 `app_token`
 
 ## 台账数据源（一张团队可见的多维表格）
 
@@ -46,17 +46,17 @@ category: productivity
 拿 `app_token`：
 1. 用户给的多维表格链接形如 `https://<域名>.feishu.cn/base/<app_token>?table=<table_id>&...`，
    `/base/` 后那段就是 `app_token`，URL 里的 `table` 参数就是 `table_id`。
-2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_wiki_get_node(node_token)` 拿到
+2. 若是 wiki 链接（`/wiki/<node_token>`），先 `feishu_api` 打 `wiki/v2/spaces/get_node` 拿到
    `obj_token` 当 `app_token`。
-3. 不知道 `table_id` 就 `feishu_bitable_list_tables(app_token)` 列出来选对的那张。
+3. 不知道 `table_id` 就 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables 列出来选对的那张。
 
 **没有台账链接就先问用户要**，别猜 `app_token`，也别凭空编负责人/进展/原则。
 
 ### 清理飞书新建表的默认空行/空列
 
 飞书新建数据表会自带占位列和空行。建表 → `feishu_bitable_clear_table(app_token, table_id)`
-清默认空行 → `feishu_bitable_list_fields(app_token, table_id)` 看列 →
-`feishu_bitable_delete_fields(app_token, table_id, field_ids)` 删多余占位列（主键列 `is_primary=true`
+清默认空行 → `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields 看列 →
+`feishu_api` DELETE /open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields/:field_id 删多余占位列（主键列 `is_primary=true`
 删不掉，保留即可）→ 确认剩下列名与 `fields_json` 的键一致 → 再写数据。
 
 ## 用法一：成员同步自己的工作 + 交接原则（同步端）
@@ -71,12 +71,12 @@ category: productivity
      大改必须等我确认」「客户口径以合同为准，别自行承诺」）。**照本人说的记，别替他扩大或收紧**。
    - 关键项缺失就**问清再记**（这块具体是什么事？现在到哪了？下一步谁做什么？交接时有什么要守的？），
      **绝不替员工编进展或原则**。
-3. **定位行 → 更新或新建**：先 `feishu_bitable_list_records` 找有没有（同一 `open_id` +
+3. **定位行 → 更新或新建**：先 `feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records 找有没有（同一 `open_id` +
    同一 `工作事项`）的行。
-   - 已存在：视为同一块工作的更新，用 `feishu_bitable_create_record` 写一条新的最新记录，
+   - 已存在：视为同一块工作的更新，用 `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records 写一条新的最新记录，
      或按台账约定更新（本仓库 `feishu_bitable_*` 以新建记录为主；如需覆盖旧行，先
-     `feishu_bitable_delete_records` 删旧行再建）。以「保留最新一条可读」为准。
-   - 不存在：`feishu_bitable_create_record(app_token, table_id, fields_json)` 新建。
+     `feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_delete 删旧行再建）。以「保留最新一条可读」为准。
+   - 不存在：`feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records 新建。
    - `fields_json` 的键必须与表里真实列名逐字一致，例如：
      ```json
      {"负责人":"张老师","open_id":"ou_xxx","工作事项":"客户合同评审","当前进展":"已过初审，等法务复核","下一步":"法务复核通过后寄回客户盖章","交接原则":"小改直接改；改条款必须等我确认；口径以合同为准","更新时间":"2026-07-24"}
@@ -93,7 +93,7 @@ category: productivity
 2. **把姓名解析成 open_id**：台账靠 `open_id` 匹配最稳。姓名→open_id 用
    `feishu_chat_find_member` 或 `feishu_department_members(recursive=True)` 反查；
    同名多人要跟来问的人核对是哪位。
-3. **读台账匹配**：`feishu_bitable_list_records` 读记录，按（`open_id` 或 `负责人` + `工作事项`）
+3. **读台账匹配**：`feishu_api` GET /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records 读记录，按（`open_id` 或 `负责人` + `工作事项`）
    匹配到那块工作的行；同一块取**最新一条**（看 `更新时间`）。
 4. **在「交接原则」框架内代答**：一句话说清 **①当前进展 ②下一步该做什么 ③相关约束/原则**，例如：
    「张老师负责的客户合同评审：目前已过初审、等法务复核；下一步是法务复核通过后寄回客户盖章。
@@ -108,7 +108,7 @@ category: productivity
 
 1. **如实说未授权**：明确讲「这块超出 {负责人} 给我的交接原则，我不能替他定，需要他本人确认」，
    **绝不越权承诺、不替本人拍板、不编原则来硬答**。
-2. **给联系方式兜底**：拿负责人 `open_id` 调 `feishu_user_get(user_ids=<open_id>)` 取
+2. **给联系方式兜底**：拿负责人 `open_id` 调 `feishu_api(endpoint="GET /open-apis/contact/v3/users/batch", query={"user_ids": [<open_id>]})` 取
    `name` / `mobile` / `email` / `job_title` 给来问的人。读不到就说「电话/邮箱没读到
    （可能权限没开），可在飞书里直接 @他」并给其飞书姓名，**不编号码**。
 3. **可选：通知本人有人来交接**：`feishu_message_send(receive_id=<负责人 open_id>,

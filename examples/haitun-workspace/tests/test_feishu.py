@@ -165,27 +165,6 @@ async def test_add_comment_builds_create_request(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_list_comments_passes_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_comments_impl("tok", "docx", 25, "pt1")
-    q = _qdict(cap.request)
-    assert q.get("page_size") == "25"  # add_query coerces to str
-    assert q.get("page_token") == "pt1"
-    assert q.get("is_whole") == "true"
-
-
-@pytest.mark.asyncio
-async def test_reply_replies_list_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_comment_replies_impl("tok", "docx", "cid", 50, "")
-    req = cap.request
-    assert req.paths["comment_id"] == "cid"
-    assert "replies" in req.uri
-
-
-@pytest.mark.asyncio
 async def test_reply_comment_plain(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke({"reply_id": "r1"})
     monkeypatch.setattr(_impl, "_invoke", cap)
@@ -211,9 +190,9 @@ def test_drive_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_drive")
     for name in (
         "feishu_drive_add_comment",
-        "feishu_drive_list_comments",
-        "feishu_drive_list_comment_replies",
         "feishu_drive_reply_comment",
+        "feishu_file_download",
+        "feishu_drive_upload",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
@@ -233,85 +212,6 @@ async def test_drive_add_comment_tool_returns_json(monkeypatch: pytest.MonkeyPat
 
 
 # ── IM (messaging) impl tests ─────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_find_chat_builds_search_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"chat_id": "oc_1", "name": "主群", "description": "d"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.find_chat_impl("主群", False, 50, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/chats/search")
-    assert _qdict(req).get("query") == "主群"
-    assert result["matches"][0]["chat_id"] == "oc_1"
-    assert result["count"] == 1
-
-
-@pytest.mark.asyncio
-async def test_find_chat_exact_filters(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"items": [{"chat_id": "oc_1", "name": "主群"}, {"chat_id": "oc_2", "name": "主群通知"}], "has_more": False}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.find_chat_impl("主群", True)
-    assert result["count"] == 1
-    assert result["matches"][0]["chat_id"] == "oc_1"
-
-
-@pytest.mark.asyncio
-async def test_create_chat_builds_request_and_returns_chat_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"chat_id": "oc_new", "name": "项目群", "invalid_user_id_list": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("项目群", ["ou_a", "ou_b"], description="d")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/im/v1/chats")
-    assert _qdict(req).get("user_id_type") == "open_id"
-    assert req.body["name"] == "项目群"
-    assert req.body["description"] == "d"
-    assert req.body["user_id_list"] == ["ou_a", "ou_b"]
-    assert "set_bot_manager" not in _qdict(req)  # no owner → bot stays owner
-    assert result["ok"] is True
-    assert result["chat_id"] == "oc_new"
-    assert result["invited_count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_create_chat_owner_is_requester_bot_stays_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    # owner_id is the requester's sender_open_id: the group is handed to them, and
-    # set_bot_manager keeps the bot on as admin so it can still post afterwards.
-    cap = _CapturedInvoke({"chat_id": "oc_o", "owner_id": "ou_requester"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("群", ["ou_a"], owner_id="ou_requester")
-    assert cap.request.body["owner_id"] == "ou_requester"
-    assert _qdict(cap.request).get("set_bot_manager") == "true"
-    assert result["owner_id"] == "ou_requester"
-
-
-@pytest.mark.asyncio
-async def test_create_chat_no_owner_leaves_bot_as_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No requester → bot owns the group; set_bot_manager is not sent.
-    cap = _CapturedInvoke({"chat_id": "oc_b"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.create_chat_impl("群", ["ou_a"])
-    assert "owner_id" not in cap.request.body
-    assert "set_bot_manager" not in _qdict(cap.request)
-
-
-@pytest.mark.asyncio
-async def test_create_chat_requires_name() -> None:
-    result = await _impl.create_chat_impl("   ", ["ou_a"])
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_chat_rejects_over_50_members(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"chat_id": "oc_x"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_chat_impl("群", [f"ou_{i}" for i in range(51)])
-    assert result["ok"] is False
-    assert cap.request is None  # never sent
 
 
 @pytest.mark.asyncio
@@ -367,107 +267,6 @@ async def test_send_message_on_behalf_falls_back_to_open_id(monkeypatch: pytest.
     assert json.loads(cap.request.body["content"])["text"] == "ou_zhangsan给你发了一条消息：「记得交周报」"  # noqa: RUF001
 
 
-@pytest.mark.asyncio
-async def test_reply_message_sets_reply_in_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"message_id": "om_2", "thread_id": "omt_1"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.reply_message_impl("om_1", "评价内容", True)
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.paths["message_id"] == "om_1"
-    assert req.uri.endswith("/reply")
-    assert req.body["reply_in_thread"] is True
-    assert json.loads(req.body["content"])["text"] == "评价内容"
-    assert result["thread_id"] == "omt_1"
-
-
-@pytest.mark.asyncio
-async def test_list_messages_thread_container(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"message_id": "om_x"}], "has_more": True, "page_token": "pt2"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_messages_impl("omt_1", "thread", "ByCreateTimeAsc", 50, "")
-    q = _qdict(cap.request)
-    assert cap.request.http_method.name == "GET"
-    assert q.get("container_id_type") == "thread"
-    assert q.get("container_id") == "omt_1"
-    assert q.get("sort_type") == "ByCreateTimeAsc"
-    assert result["has_more"] is True
-    assert result["page_token"] == "pt2"
-    assert result["items"][0]["message_id"] == "om_x"
-
-
-@pytest.mark.asyncio
-async def test_recall_message_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.recall_message_impl("om_abc", user_key="ou_owner")
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/im/v1/messages/:message_id"
-    assert req.paths["message_id"] == "om_abc"
-    # tenant first: the bot's own messages need no user authorization at all
-    assert cap.prefer == "tenant"
-    assert cap.user_key == "ou_owner"
-    # Feishu returns an empty data object on success, so success must be explicit
-    assert result == {"ok": True, "message_id": "om_abc", "recalled": True}
-
-
-@pytest.mark.asyncio
-async def test_recall_message_trims_and_requires_message_id() -> None:
-    for bad in ("", "   "):
-        result = await _impl.recall_message_impl(bad)
-        assert result["ok"] is False
-        assert "message_id is required" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_recall_message_rejects_chat_or_open_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    for bad in ("oc_group", "ou_person"):
-        result = await _impl.recall_message_impl(bad)
-        assert result["ok"] is False
-        assert "must be a message id" in result["message"]
-    assert cap.request is None  # rejected before spending a request
-
-
-@pytest.mark.asyncio
-async def test_recall_message_adds_hint_for_known_error_codes(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 230026, "msg": "No permission to recall this message.", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fake)
-    result = await _impl.recall_message_impl("om_other")
-    assert result["ok"] is False
-    assert result["code"] == 230026
-    assert "群主" in result["hint"]  # names the real blocker, not a bare "error 230026"
-
-
-@pytest.mark.asyncio
-async def test_recall_message_keeps_unknown_error_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 99999, "msg": "boom", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fake)
-    result = await _impl.recall_message_impl("om_x")
-    assert "hint" not in result
-
-
-@pytest.mark.asyncio
-async def test_recall_tool_returns_json_and_passes_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_message")
-    captured: dict[str, Any] = {}
-
-    async def _fake(message_id: str, user_key: str = "") -> dict[str, Any]:
-        captured.update(message_id=message_id, user_key=user_key)
-        return {"ok": True, "message_id": message_id, "recalled": True}
-
-    monkeypatch.setattr(_impl, "recall_message_impl", _fake)
-    out = await mod.feishu_message_recall(message_id="om_9", user_key="ou_a")
-    assert json.loads(out)["recalled"] is True
-    assert captured == {"message_id": "om_9", "user_key": "ou_a"}
-
-
 # ── Editing an already-sent message (改内容而不撤回重发) ────────────────────────
 
 
@@ -511,7 +310,7 @@ async def test_edit_message_rejects_non_message_id_and_empty_text(monkeypatch: p
     # Editing replaces the whole content; empty text is a recall, not an edit
     empty = await _impl.edit_message_impl("om_abc", "  ")
     assert empty["ok"] is False
-    assert "feishu_message_recall" in empty["message"]
+    assert "DELETE /open-apis/im/v1/messages/:message_id" in empty["message"]
     assert cap.request is None  # all rejected before spending a request
 
 
@@ -593,63 +392,6 @@ async def test_edit_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ── Emoji reactions (表情回应) ─────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_add_reaction_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"reaction_id": "re1", "reaction_type": {"emoji_type": "THUMBSUP"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_reaction_impl("om_abc", "THUMBSUP", user_key="ou_me")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/messages/:message_id/reactions"
-    assert req.paths["message_id"] == "om_abc"
-    assert req.body == {"reaction_type": {"emoji_type": "THUMBSUP"}}
-    assert cap.user_key == "ou_me"
-    assert result["reaction_id"] == "re1"
-    assert result["emoji_type"] == "THUMBSUP"
-
-
-@pytest.mark.asyncio
-async def test_add_reaction_normalizes_chinese_emoji_and_casing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Feishu's enum is case-sensitive and inconsistently cased (THUMBSUP but Fire/OnIt),
-    # so a literal Chinese word / emoji / mis-cased key must land on the real key.
-    for given, expected in (("赞", "THUMBSUP"), ("👍", "THUMBSUP"), ("收到", "OnIt"), ("fire", "Fire"), ("ok", "OK")):
-        cap = _CapturedInvoke({"reaction_id": "re1"})
-        monkeypatch.setattr(_impl, "_invoke", cap)
-        result = await _impl.add_reaction_impl("om_abc", given)
-        assert cap.request.body["reaction_type"]["emoji_type"] == expected, given
-        assert result["emoji_type"] == expected
-
-
-@pytest.mark.asyncio
-async def test_add_reaction_passes_unknown_emoji_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Feishu's table has ~130 entries and grows; an unknown value goes out as given and
-    # is answered with 231001, rather than being refused by a list that would go stale.
-    cap = _CapturedInvoke({"reaction_id": "re1"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.add_reaction_impl("om_abc", "SomeNewEmoji2027")
-    assert cap.request.body["reaction_type"]["emoji_type"] == "SomeNewEmoji2027"
-
-
-@pytest.mark.asyncio
-async def test_add_reaction_requires_message_id_and_emoji(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    assert "must be a message id" in (await _impl.add_reaction_impl("oc_group", "OK"))["message"]
-    assert "emoji_type is required" in (await _impl.add_reaction_impl("om_a", "  "))["message"]
-    assert cap.request is None
-
-
-@pytest.mark.asyncio
-async def test_add_reaction_hints_invalid_emoji_and_not_in_chat(monkeypatch: pytest.MonkeyPatch) -> None:
-    for code, needle in ((231001, "大小写敏感"), (231002, "不在该消息所在会话")):
-
-        async def _fake(*a: Any, _code: int = code, **k: Any) -> dict[str, Any]:
-            return {"ok": False, "code": _code, "msg": "nope", "message": "err"}
-
-        monkeypatch.setattr(_impl, "_invoke", _fake)
-        assert needle in (await _impl.add_reaction_impl("om_a", "OK"))["hint"], code
 
 
 @pytest.mark.asyncio
@@ -776,39 +518,8 @@ async def test_remove_reaction_needs_emoji_or_id(monkeypatch: pytest.MonkeyPatch
 @pytest.mark.asyncio
 async def test_reaction_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = importlib.import_module("feishu_message")
-    monkeypatch.setattr(_impl, "_invoke", _CapturedInvoke({"reaction_id": "re1"}))
-    assert json.loads(await mod.feishu_message_react("om_1", "赞"))["reaction_id"] == "re1"
-    monkeypatch.setattr(_impl, "_invoke", _CapturedInvoke({"items": []}))
-    assert json.loads(await mod.feishu_message_reactions("om_1"))["count"] == 0
     monkeypatch.setattr(_impl, "_invoke", _CapturedInvoke({}))
     assert json.loads(await mod.feishu_message_unreact("om_1", reaction_id="re1"))["removed"] is True
-
-
-def test_im_tools_are_async_with_docstrings() -> None:
-    chat_mod = importlib.import_module("feishu_chat")
-    msg_mod = importlib.import_module("feishu_message")
-    fns = [
-        chat_mod.feishu_chat_find,
-        chat_mod.feishu_chat_create,
-        msg_mod.feishu_message_send,
-        msg_mod.feishu_message_send_card,
-        msg_mod.feishu_message_reply,
-        msg_mod.feishu_message_recall,
-        msg_mod.feishu_message_list,
-        msg_mod.feishu_message_edit,
-        msg_mod.feishu_message_edit_card,
-        msg_mod.feishu_message_react,
-        msg_mod.feishu_message_unreact,
-        msg_mod.feishu_message_reactions,
-        msg_mod.feishu_message_send_image,
-        msg_mod.feishu_message_send_file,
-        msg_mod.feishu_message_send_audio,
-        msg_mod.feishu_message_send_video,
-        msg_mod.feishu_message_send_post,
-    ]
-    for fn in fns:
-        assert inspect.iscoroutinefunction(fn), fn.__name__
-        assert (inspect.getdoc(fn) or "").strip(), f"{fn.__name__} needs a docstring"
 
 
 @pytest.mark.asyncio
@@ -935,55 +646,9 @@ def test_doc_tool_is_async_with_docstring() -> None:
     assert (inspect.getdoc(fn) or "").strip()
 
 
-# ── Sheet tabs — list worksheets to get a SHEET_ID ────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_sheet_tabs_lists_worksheets(monkeypatch: pytest.MonkeyPatch) -> None:
-    data = {
-        "sheets": [
-            {
-                "sheet_id": "46a582",
-                "title": "Sheet1",
-                "index": 0,
-                "grid_properties": {"row_count": 201, "column_count": 20},
-            },
-            {"sheetId": "zz999", "title": "备份"},
-        ]
-    }
-    cap = _CapturedInvoke(data)
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_sheet_tabs_impl("sht1")
-    assert result["ok"] is True
-    assert result["count"] == 2
-    first = result["sheets"][0]
-    assert first["sheet_id"] == "46a582"
-    assert first["title"] == "Sheet1"
-    assert first["row_count"] == 201
-    assert first["column_count"] == 20
-    # camelCase sheetId is accepted too, and a tab with no grid_properties still lists
-    assert result["sheets"][1]["sheet_id"] == "zz999"
-    assert result["sheets"][1]["row_count"] is None
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.paths["spreadsheet_token"] == "sht1"
-    assert "sheets/v3/spreadsheets/:spreadsheet_token/sheets/query" in req.uri
-
-
-@pytest.mark.asyncio
-async def test_sheet_tabs_requires_token() -> None:
-    assert (await _impl.list_sheet_tabs_impl("  "))["ok"] is False
-
-
 @pytest.mark.asyncio
 async def test_sheet_reads_forward_user_key_as_tenant_first_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reads stay tenant-first but carry the user identity as a permission fallback."""
-    cap = _CapturedInvoke({"sheets": [{"sheet_id": "s1", "title": "T"}]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_sheet_tabs_impl("sht1", user_key="ou_1")
-    assert cap.user_key == "ou_1"
-    assert cap.prefer == "tenant"
-
     cap = _CapturedInvoke({"valueRange": {"range": "S1!A1", "values": [["x"]]}})
     monkeypatch.setattr(_impl, "_invoke", cap)
     await _impl.read_sheet_range_impl("sht1", "S1!A1", user_key="ou_1")
@@ -1157,7 +822,6 @@ async def test_sheet_format_rejects_non_object(monkeypatch: pytest.MonkeyPatch) 
 def test_sheet_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_sheet")
     for name in (
-        "feishu_sheet_tabs",
         "feishu_sheet_read",
         "feishu_sheet_write",
         "feishu_sheet_append",
@@ -1261,70 +925,6 @@ async def test_chat_find_member_tool_returns_json(monkeypatch: pytest.MonkeyPatc
     assert json.loads(out)["matches"][0]["id"] == "ou_9"
 
 
-@pytest.mark.asyncio
-async def test_list_chat_members_returns_full_roster(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [
-                {"name": "张三", "member_id": "ou_1"},
-                {"name": "李四", "member_id": "ou_2"},
-            ],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_chat_members_impl("oc_x", "open_id")
-    req = cap.request
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.paths["chat_id"] == "oc_x"
-    assert result["count"] == 2
-    assert result["members"] == [
-        {"name": "张三", "id": "ou_1", "member_id_type": "open_id"},
-        {"name": "李四", "id": "ou_2", "member_id_type": "open_id"},
-    ]
-
-
-@pytest.mark.asyncio
-async def test_list_chat_members_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
-    paged = _PagedInvoke(
-        [
-            {"items": [{"name": "张三", "member_id": "ou_1"}], "has_more": True, "page_token": "pt2"},
-            {"items": [{"name": "李四", "member_id": "ou_2"}], "has_more": False, "page_token": ""},
-        ]
-    )
-    monkeypatch.setattr(_impl, "_invoke", paged)
-    result = await _impl.list_chat_members_impl("oc_x", "open_id")
-    assert len(paged.requests) == 2
-    assert _qdict(paged.requests[1]).get("page_token") == "pt2"
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_chat_list_members_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_chat")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "members": [{"name": "张三", "id": "ou_9", "member_id_type": "open_id"}], "count": 1}
-
-    monkeypatch.setattr(_impl, "list_chat_members_impl", _fake)
-    out = await mod.feishu_chat_list_members(chat_id="oc_x")
-    assert inspect.iscoroutinefunction(mod.feishu_chat_list_members)
-    assert json.loads(out)["members"][0]["id"] == "ou_9"
-
-
-@pytest.mark.asyncio
-async def test_chat_create_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_chat")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "chat_id": "oc_new", "invited": ["ou_a"], "invited_count": 1}
-
-    monkeypatch.setattr(_impl, "create_chat_impl", _fake)
-    out = await mod.feishu_chat_create(name="项目群", user_ids=["ou_a"])
-    assert inspect.iscoroutinefunction(mod.feishu_chat_create)
-    assert json.loads(out)["chat_id"] == "oc_new"
-
-
 # ── Group administration — chat details, add/remove members ───────────────────
 
 
@@ -1421,157 +1021,18 @@ async def test_get_chat_requires_chat_id_and_hints_errors(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_add_chat_members_builds_post_and_classifies_leftovers(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "invalid_id_list": ["ou_gone"],
-            "not_existed_id_list": ["ou_nope"],
-            "pending_approval_id_list": ["ou_wait"],
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_chat_members_impl("oc_x", ["ou_a", "ou_gone", "ou_nope", "ou_wait"])
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.paths["chat_id"] == "oc_x"
-    assert req.body == {"id_list": ["ou_a", "ou_gone", "ou_nope", "ou_wait"]}
-    q = _qdict(req)
-    assert q.get("member_id_type") == "open_id"
-    # succeed_type=1 by default: Feishu's own default (0) would add nobody over one bad id.
-    assert q.get("succeed_type") == "1"
-    assert result["added"] == ["ou_a"]
-    assert result["added_count"] == 1
-    # Kept apart because the fixes differ (scope/离职 vs no such id vs owner approval).
-    assert result["invalid_ids"] == ["ou_gone"]
-    assert result["not_existed_ids"] == ["ou_nope"]
-    assert result["pending_approval_ids"] == ["ou_wait"]
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_validates_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    assert "chat_id is required" in (await _impl.add_chat_members_impl("", ["ou_a"]))["message"]
-    assert "user_ids is required" in (await _impl.add_chat_members_impl("oc_x", []))["message"]
-    assert "user_ids is required" in (await _impl.add_chat_members_impl("oc_x", ["  "]))["message"]
-    assert "member_id_type must be" in (await _impl.add_chat_members_impl("oc_x", ["ou_a"], "email"))["message"]
-    assert "at most 50" in (await _impl.add_chat_members_impl("oc_x", [f"ou_{i}" for i in range(51)]))["message"]
-    assert "succeed_type must be" in (await _impl.add_chat_members_impl("oc_x", ["ou_a"], succeed_type=7))["message"]
-    assert cap.request is None  # all rejected before spending a request
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_dedupes_and_takes_app_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_chat_members_impl("oc_x", ["ou_a", " ou_a ", "ou_b"], "app_id", user_key="ou_owner")
-    assert cap.request.body == {"id_list": ["ou_a", "ou_b"]}
-    assert _qdict(cap.request).get("member_id_type") == "app_id"
-    assert cap.user_key == "ou_owner"  # acts as the owner when the bot isn't an admin
-    assert result["requested"] == ["ou_a", "ou_b"]
-
-
-@pytest.mark.asyncio
-async def test_add_chat_members_hints_permission_and_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    for code, needle in ((232017, "群主"), (232013, "上限"), (232006, "chat_id 无效"), (232028, "外部成员")):
-
-        async def _fail(*a: Any, _code: int = code, **k: Any) -> dict[str, Any]:
-            return {"ok": False, "code": _code, "msg": "nope", "message": "err"}
-
-        monkeypatch.setattr(_impl, "_invoke", _fail)
-        result = await _impl.add_chat_members_impl("oc_x", ["ou_a"])
-        assert needle in result["hint"], code
-        assert result["requested"] == ["ou_a"]  # what was attempted survives the failure
-
-
-@pytest.mark.asyncio
-async def test_remove_chat_members_builds_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"invalid_id_list": ["ou_bad"]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.remove_chat_members_impl("oc_x", ["ou_a", "ou_bad"])
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/im/v1/chats/:chat_id/members"
-    assert req.body == {"id_list": ["ou_a", "ou_bad"]}
-    # succeed_type is an add-only query; sending it on a DELETE would be noise.
-    assert "succeed_type" not in _qdict(req)
-    assert result["removed"] == ["ou_a"]
-    assert result["removed_count"] == 1
-    assert result["invalid_ids"] == ["ou_bad"]
-
-
-@pytest.mark.asyncio
-async def test_remove_chat_members_validates_and_hints_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    assert "chat_id is required" in (await _impl.remove_chat_members_impl("", ["ou_a"]))["message"]
-    assert "user_ids is required" in (await _impl.remove_chat_members_impl("oc_x", None))["message"]
-    assert cap.request is None
-
-    async def _fail(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 232076, "msg": "cannot kick owner", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fail)
-    assert "群主不能被移出" in (await _impl.remove_chat_members_impl("oc_x", ["ou_owner"]))["hint"]
-
-
-@pytest.mark.asyncio
 async def test_chat_admin_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = importlib.import_module("feishu_chat")
 
     async def _get(*a: Any, **k: Any) -> dict[str, Any]:
         return {"ok": True, "chat_id": "oc_x", "owner_id": "ou_o", "user_count": 7}
 
-    async def _add(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "added": ["ou_a"], "added_count": 1}
-
-    async def _remove(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "removed": ["ou_a"], "removed_count": 1}
-
     monkeypatch.setattr(_impl, "get_chat_impl", _get)
-    monkeypatch.setattr(_impl, "add_chat_members_impl", _add)
-    monkeypatch.setattr(_impl, "remove_chat_members_impl", _remove)
     assert json.loads(await mod.feishu_chat_get(chat_id="oc_x"))["user_count"] == 7
-    assert json.loads(await mod.feishu_chat_add_members(chat_id="oc_x", user_ids=["ou_a"]))["added_count"] == 1
-    assert json.loads(await mod.feishu_chat_remove_members(chat_id="oc_x", user_ids=["ou_a"]))["removed_count"] == 1
-    for fn in (mod.feishu_chat_get, mod.feishu_chat_add_members, mod.feishu_chat_remove_members):
-        assert inspect.iscoroutinefunction(fn)
+    assert inspect.iscoroutinefunction(mod.feishu_chat_get)
 
 
 # ── Approval — list tasks, read instance, approve/reject ──────────────────────
-
-
-@pytest.mark.asyncio
-async def test_list_approval_tasks_builds_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "tasks": [
-                {
-                    "task_id": "t1",
-                    "process_id": "inst1",
-                    "definition_code": "appr1",
-                    "title": "请假申请",
-                    "status": 1,
-                    "process_status": 1,
-                    "initiator_names": ["张三"],
-                }
-            ],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_approval_tasks_impl("ou_a", "1", "open_id")
-    q = _qdict(cap.request)
-    assert cap.request.http_method.name == "GET"
-    assert cap.request.uri.endswith("/approval/v4/tasks/query")
-    assert q.get("user_id") == "ou_a"
-    assert q.get("topic") == "1"
-    t = result["tasks"][0]
-    assert t["task_id"] == "t1"
-    assert t["instance_code"] == "inst1"
-    assert t["approval_code"] == "appr1"
-    assert t["status"] == "待办"
 
 
 @pytest.mark.asyncio
@@ -1585,32 +1046,6 @@ async def test_get_approval_instance_reads_form(monkeypatch: pytest.MonkeyPatch)
     assert "approval/v4/instances" in cap.request.uri
     assert result["applicant"] == "ou_app"
     assert result["form"] == '[{"id":"w1"}]'
-
-
-@pytest.mark.asyncio
-async def test_decide_approve_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.decide_approval_task_impl(True, "appr1", "inst1", "ou_boss", "t1", "同意")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/tasks/approve")
-    assert req.body["approval_code"] == "appr1"
-    assert req.body["instance_code"] == "inst1"
-    assert req.body["user_id"] == "ou_boss"
-    assert req.body["task_id"] == "t1"
-    assert req.body["comment"] == "同意"
-    assert result["action"] == "approve"
-
-
-@pytest.mark.asyncio
-async def test_decide_reject_uses_reject_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.decide_approval_task_impl(False, "appr1", "inst1", "ou_boss", "t1")
-    assert cap.request.uri.endswith("/tasks/reject")
-    assert "comment" not in cap.request.body  # empty comment omitted
-    assert result["action"] == "reject"
 
 
 @pytest.mark.asyncio
@@ -1712,66 +1147,13 @@ async def test_create_instance_rejects_bad_form_json(monkeypatch: pytest.MonkeyP
 def test_approval_tools_are_async_with_docstrings() -> None:
     mod = importlib.import_module("feishu_approval")
     for name in (
-        "feishu_approval_list_tasks",
         "feishu_approval_get",
-        "feishu_approval_decide",
         "feishu_approval_get_definition",
         "feishu_approval_create",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
         assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-@pytest.mark.asyncio
-async def test_approval_decide_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_approval")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "action": "approve", "instance_code": "inst1", "task_id": "t1"}
-
-    monkeypatch.setattr(_impl, "decide_approval_task_impl", _fake)
-    out = await mod.feishu_approval_decide(
-        approve=True, approval_code="a", instance_code="inst1", approver_user_id="ou_b", task_id="t1"
-    )
-    assert json.loads(out)["action"] == "approve"
-
-
-# ── Wiki — resolve node token to underlying document ──────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_get_wiki_node_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"node": {"node_token": "NFOnw", "obj_token": "doccnX", "obj_type": "docx", "title": "SOP", "space_id": "s1"}}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_wiki_node_impl("NFOnw")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/wiki/v2/spaces/get_node")
-    assert _qdict(req).get("token") == "NFOnw"
-    assert result["obj_token"] == "doccnX"
-    assert result["obj_type"] == "docx"
-    assert result["title"] == "SOP"
-
-
-@pytest.mark.asyncio
-async def test_get_wiki_node_error_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake(_req: Any, user_key: str | None = None, prefer: str = "tenant", **_kw: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 131006, "msg": "node not found", "message": "Feishu API error 131006"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fake)
-    result = await _impl.get_wiki_node_impl("bad")
-    assert result["ok"] is False
-    assert result["code"] == 131006
-
-
-def test_wiki_tool_is_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_wiki")
-    fn = mod.feishu_wiki_get_node
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
 
 
 # ── Start topic with @-mentions ───────────────────────────────────────────────
@@ -2990,40 +2372,6 @@ def test_search_auth_tools_async_with_docstrings() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"table_id": "tbl1", "name": "反馈表"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_tables_impl("appX", 100, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables"
-    assert req.paths["app_token"] == "appX"
-    assert result["tables"] == [{"table_id": "tbl1", "name": "反馈表"}]
-
-
-@pytest.mark.asyncio
-async def test_list_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [{"record_id": "rec1", "fields": {"新人": "张三"}}],
-            "has_more": True,
-            "page_token": "pt2",
-            "total": 5,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_records_impl("appX", "tbl1", 100, "", "", '["日期 DESC"]', "")
-    req = cap.request
-    q = _qdict(req)
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    assert req.paths["table_id"] == "tbl1"
-    assert q.get("sort") == '["日期 DESC"]'
-    assert result["records"][0] == {"record_id": "rec1", "fields": {"新人": "张三"}}
-    assert result["has_more"] is True
-    assert result["total"] == 5
-
-
-@pytest.mark.asyncio
 async def test_search_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
     cap = _CapturedInvoke(
         {"items": [{"record_id": "rec1", "fields": {"状态": "进行中"}}], "has_more": False, "total": 1}
@@ -3091,38 +2439,6 @@ async def test_search_bitable_records_page_size_bounds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "record": {
-                "record_id": "rec1",
-                "fields": {"状态": "进行中"},
-                "record_url": "https://x.feishu.cn/base/appX?table=tbl1&record=rec1",
-                "created_time": 1691049973000,
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_bitable_record_impl("appX", "tbl1", "rec1", automatic_fields=True)
-    req = cap.request
-    q = _qdict(req)
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id"
-    assert req.paths["record_id"] == "rec1"
-    assert q.get("automatic_fields") == "true"
-    assert result["fields"] == {"状态": "进行中"}
-    assert result["url"].endswith("record=rec1")
-    assert result["created_time"] == 1691049973000
-
-
-@pytest.mark.asyncio
-async def test_get_bitable_record_requires_ids() -> None:
-    assert (await _impl.get_bitable_record_impl("", "tbl1", "rec1"))["ok"] is False
-    assert (await _impl.get_bitable_record_impl("appX", "", "rec1"))["ok"] is False
-    assert (await _impl.get_bitable_record_impl("appX", "tbl1", ""))["ok"] is False
-
-
-@pytest.mark.asyncio
 async def test_create_bitable_records_batch(monkeypatch: pytest.MonkeyPatch) -> None:
     paged = _PagedInvoke(
         [
@@ -3183,31 +2499,6 @@ async def test_create_bitable_records_bad_input() -> None:
     assert (await _impl.create_bitable_records_impl("appX", "tbl1", '["a"]'))["ok"] is False
     assert (await _impl.create_bitable_records_impl("appX", "tbl1", "[{}]"))["ok"] is False
     assert (await _impl.create_bitable_records_impl("", "tbl1", '[{"a":1}]'))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"record": {"record_id": "recNew", "fields": {"新人": "张三"}}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", '{"新人":"张三","评分":4}')
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records"
-    assert req.body["fields"] == {"新人": "张三", "评分": 4}
-    assert result["record_id"] == "recNew"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record_bad_json() -> None:
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", "not json")
-    assert result["ok"] is False
-    assert "JSON" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_record_non_object() -> None:
-    result = await _impl.create_bitable_record_impl("appX", "tbl1", '["a","b"]')
-    assert result["ok"] is False
 
 
 @pytest.mark.asyncio
@@ -3358,25 +2649,6 @@ async def test_update_bitable_records_survives_unreadable_fields(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_delete_bitable_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_bitable_records_impl("appX", "tbl1", "recA, recB")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/records/batch_delete")
-    assert req.paths["table_id"] == "tbl1"
-    assert req.body["records"] == ["recA", "recB"]
-    assert result["deleted"] == 2
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_records_empty() -> None:
-    result = await _impl.delete_bitable_records_impl("appX", "tbl1", " , ")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
 async def test_clear_bitable_table(monkeypatch: pytest.MonkeyPatch) -> None:
     paged = _PagedInvoke(
         [
@@ -3420,62 +2692,6 @@ async def test_list_bitable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["fields"][0] == {"field_id": "fld1", "name": "标题", "type": "文本", "is_primary": True}
     assert result["fields"][1]["is_primary"] is False
     assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    paged = _PagedInvoke([{}, {}])
-    monkeypatch.setattr(_impl, "_invoke", paged)
-    result = await _impl.delete_bitable_fields_impl("appX", "tbl1", "fldA, fldB")
-    assert result["deleted"] == ["fldA", "fldB"]
-    assert result["count"] == 2
-    last = paged.requests[-1]
-    assert last.http_method.name == "DELETE"
-    assert last.uri.endswith("/fields/:field_id")
-    assert last.paths["field_id"] == "fldB"
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_fields_empty() -> None:
-    result = await _impl.delete_bitable_fields_impl("appX", "tbl1", "")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_app_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "app": {
-                "app_token": "bascnNew",
-                "name": "合同台账",
-                "folder_token": "fldA",
-                "default_table_id": "tblDefault",
-                "time_zone": "Asia/Shanghai",
-                "url": "https://feishu.cn/base/bascnNew",
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_app_impl("合同台账", "fldA", "Asia/Shanghai", "ou_1")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps"
-    assert req.body == {"name": "合同台账", "folder_token": "fldA", "time_zone": "Asia/Shanghai"}
-    assert cap.prefer == "user"
-    assert cap.user_key == "ou_1"
-    assert result["app_token"] == "bascnNew"
-    assert result["default_table_id"] == "tblDefault"
-    assert result["url"] == "https://feishu.cn/base/bascnNew"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_app_omits_blank_optionals(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "bascnX"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_app_impl("台账")
-    assert cap.request.body == {"name": "台账"}
-    # No url in the response: derive one from the app_token so the user gets a link.
-    assert result["url"] == "https://feishu.cn/base/bascnX"
 
 
 @pytest.mark.asyncio
@@ -3543,58 +2759,6 @@ async def test_create_bitable_table_view_name_needs_fields() -> None:
     result = await _impl.create_bitable_table_impl("appX", "表", "", "视图")
     assert result["ok"] is False
     assert "fields_json" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"field": {"field_id": "fldNew", "field_name": "状态", "type": 3, "is_primary": False}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl(
-        "appX", "tbl1", "状态", 3, '{"options":[{"name":"生效","color":0}]}', "SingleSelect", "ou_1"
-    )
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields"
-    assert req.paths["table_id"] == "tbl1"
-    assert req.body["field_name"] == "状态"
-    assert req.body["type"] == 3
-    assert req.body["property"] == {"options": [{"name": "生效", "color": 0}]}
-    assert req.body["ui_type"] == "SingleSelect"
-    assert cap.prefer == "user"
-    assert result["field_id"] == "fldNew"
-    assert result["type"] == "单选"  # decoded via _BITABLE_FIELD_TYPES
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"field": {"field_id": "fldT", "field_name": "备注", "type": 1}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl("appX", "tbl1", "备注")
-    assert cap.request.body == {"field_name": "备注", "type": 1}
-    assert result["type"] == "文本"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_validates_args() -> None:
-    assert (await _impl.create_bitable_field_impl("", "tbl1", "a"))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "", "a"))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "tbl1", " "))["ok"] is False
-    assert (await _impl.create_bitable_field_impl("appX", "tbl1", "a", 19))["ok"] is False
-    bad_prop = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, "{not json")
-    assert bad_prop["ok"] is False
-    assert "JSON" in bad_prop["message"]
-    non_object = await _impl.create_bitable_field_impl("appX", "tbl1", "a", 3, '["x"]')
-    assert non_object["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_field_allows_person_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 11 is rejected only as a table's first (index) column, not as an added field.
-    cap = _CapturedInvoke({"field": {"field_id": "fldP", "field_name": "负责人", "type": 11}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_field_impl("appX", "tbl1", "负责人", 11)
-    assert result["ok"] is True
-    assert result["type"] == "人员"
 
 
 @pytest.mark.asyncio
@@ -3672,180 +2836,17 @@ async def test_update_bitable_field_requires_ids() -> None:
     assert (await _impl.update_bitable_field_impl("appX", "tbl1", "", "x", 1))["ok"] is False
 
 
-@pytest.mark.asyncio
-async def test_create_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"table_ids": ["tblA", "tblB"]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_tables_impl("appX", "合同, 付款")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/tables/batch_create")
-    assert req.body["tables"] == [{"name": "合同"}, {"name": "付款"}]
-    assert result["tables"] == [{"table_id": "tblA", "name": "合同"}, {"table_id": "tblB", "name": "付款"}]
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_tables_validates_names() -> None:
-    assert (await _impl.create_bitable_tables_impl("appX", " , "))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("appX", "合同/付款"))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("appX", ",".join(f"t{i}" for i in range(51))))["ok"] is False
-    assert (await _impl.create_bitable_tables_impl("", "合同"))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_bitable_tables_impl("appX", "tblA, tblB")
-    req = cap.request
-    assert req.uri.endswith("/tables/batch_delete")
-    assert req.body["table_ids"] == ["tblA", "tblB"]
-    assert result["deleted"] == ["tblA", "tblB"]
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables_last_table_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254034", "message": "The last table cannot be deleted"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.delete_bitable_tables_impl("appX", "tblA")
-    assert result["ok"] is False
-    assert "last one" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_delete_bitable_tables_validates() -> None:
-    assert (await _impl.delete_bitable_tables_impl("appX", " , "))["ok"] is False
-    assert (await _impl.delete_bitable_tables_impl("appX", ",".join(f"tbl{i}" for i in range(51))))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "app": {
-                "app_token": "appX",
-                "name": "合同台账",
-                "is_advanced": True,
-                "time_zone": "Asia/Shanghai",
-                "revision": 7,
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_bitable_app_impl("appX")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token"
-    assert result["name"] == "合同台账"
-    assert result["is_advanced"] is True
-    assert result["revision"] == 7
-    assert result["url"].endswith("/base/appX")
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "appX", "name": "新名字", "is_advanced": True}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.update_bitable_app_impl("appX", "新名字", "true")
-    req = cap.request
-    assert req.http_method.name == "PUT"
-    assert req.body == {"name": "新名字", "is_advanced": True}
-    assert result["changed"] == ["is_advanced", "name"]
-    assert result["is_advanced"] is True
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app_validates() -> None:
-    assert (await _impl.update_bitable_app_impl("appX"))["ok"] is False  # nothing to change
-    assert (await _impl.update_bitable_app_impl("appX", "a/b"))["ok"] is False  # illegal char
-    assert (await _impl.update_bitable_app_impl("appX", "x" * 101))["ok"] is False  # too long
-    assert (await _impl.update_bitable_app_impl("appX", is_advanced="yes"))["ok"] is False
-    assert (await _impl.update_bitable_app_impl("", "新名字"))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_update_bitable_app_advanced_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254301", "message": "advanced permission unsupported"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.update_bitable_app_impl("appX", is_advanced="true")
-    assert result["ok"] is False
-    assert "wiki" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"app": {"app_token": "appNew", "name": "台账副本", "folder_token": "fldA", "url": "https://x/base/appNew"}}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.copy_bitable_app_impl("appX", "台账副本", "fldA", True, "Asia/Shanghai")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/bitable/v1/apps/:app_token/copy"
-    assert req.body == {
-        "name": "台账副本",
-        "folder_token": "fldA",
-        "without_content": True,
-        "time_zone": "Asia/Shanghai",
-    }
-    assert result["app_token"] == "appNew"
-    assert result["without_content"] is True
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_omits_blanks(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"app": {"app_token": "appNew"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.copy_bitable_app_impl("appX")
-    assert cap.request.body == {}
-    assert result["url"].endswith("/base/appNew")
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_in_progress_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _refuse(request: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"ok": False, "code": "1254036", "message": "copying"}
-
-    monkeypatch.setattr(_impl, "_invoke", _refuse)
-    result = await _impl.copy_bitable_app_impl("appX")
-    assert result["ok"] is False
-    assert "retry" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_copy_bitable_app_requires_token() -> None:
-    assert (await _impl.copy_bitable_app_impl(""))["ok"] is False
-
-
 def test_bitable_tools_async_with_docstrings() -> None:
+    """The tools that stayed behind after the endpoint table took over the rest."""
     mod = importlib.import_module("feishu_bitable")
     for name in (
-        "feishu_bitable_list_tables",
-        "feishu_bitable_list_records",
         "feishu_bitable_search_records",
-        "feishu_bitable_get_record",
-        "feishu_bitable_create_record",
         "feishu_bitable_create_records",
         "feishu_bitable_update_record",
         "feishu_bitable_update_records",
-        "feishu_bitable_delete_records",
         "feishu_bitable_clear_table",
-        "feishu_bitable_list_fields",
-        "feishu_bitable_delete_fields",
         "feishu_bitable_update_field",
-        "feishu_bitable_create_app",
-        "feishu_bitable_get_app",
-        "feishu_bitable_update_app",
-        "feishu_bitable_copy_app",
         "feishu_bitable_create_table",
-        "feishu_bitable_create_tables",
-        "feishu_bitable_delete_tables",
-        "feishu_bitable_create_field",
     ):
         fn = getattr(mod, name)
         assert inspect.iscoroutinefunction(fn), name
@@ -3937,147 +2938,7 @@ def test_attendance_tool_async_with_docstring() -> None:
 # ── Attendance admin config — groups (考勤组) & shifts (班次), read-only ────────
 
 
-@pytest.mark.asyncio
-async def test_list_attendance_groups(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "group_list": [
-                {"group_id": "g1", "group_name": "总部考勤"},
-                {"group_id": "g2", "group_name": "研发考勤"},
-            ],
-            "has_more": True,
-            "page_token": "tok2",
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_attendance_groups_impl(50, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/attendance/v1/groups"
-    assert _qdict(req).get("page_size") == "50"
-    assert "page_token" not in _qdict(req)  # empty token not sent
-    assert result["count"] == 2
-    assert result["groups"][0] == {"group_id": "g1", "group_name": "总部考勤"}
-    assert result["has_more"] is True
-    assert result["page_token"] == "tok2"
-
-
-@pytest.mark.asyncio
-async def test_list_attendance_groups_clamps_and_pages(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"group_list": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_attendance_groups_impl(999, "ptok")
-    q = _qdict(cap.request)
-    assert q.get("page_size") == "50"  # clamped to max 50
-    assert q.get("page_token") == "ptok"
-
-
-@pytest.mark.asyncio
-async def test_get_attendance_group_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "group_id": "g1",
-            "group_name": "总部考勤",
-            "group_type": 0,
-            "punch_type": 3,
-            "allow_out_punch": True,
-            "allow_pc_punch": False,
-            "work_day_no_punch_as_lack": True,
-            "punch_day_shift_ids": ["s1", "s2"],
-            "ignored_field": "dropped",
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_attendance_group_impl("g1", "employee_id", "open_id")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/attendance/v1/groups/:group_id"
-    assert req.paths["group_id"] == "g1"
-    assert _qdict(req).get("employee_type") == "employee_id"
-    assert _qdict(req).get("dept_type") == "open_id"
-    grp = result["group"]
-    assert grp["punch_type"] == 3
-    assert grp["punch_day_shift_ids"] == ["s1", "s2"]
-    assert grp["work_day_no_punch_as_lack"] is True
-    assert "ignored_field" not in grp  # only whitelisted config fields kept
-
-
-@pytest.mark.asyncio
-async def test_get_attendance_group_requires_id() -> None:
-    result = await _impl.get_attendance_group_impl("  ")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_list_shifts(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "shift_list": [
-                {"shift_id": "s1", "shift_name": "早班", "punch_times": 2, "is_flexible": True},
-            ],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_shifts_impl(20, "")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/attendance/v1/shifts"
-    assert _qdict(req).get("page_size") == "20"
-    s0 = result["shifts"][0]
-    assert s0["shift_name"] == "早班"
-    assert s0["punch_times"] == 2
-    assert s0["is_flexible"] is True
-    assert result["has_more"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_shift_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "shift_id": "s1",
-            "shift_name": "早班",
-            "punch_times": 2,
-            "is_flexible": True,
-            "flexible_minutes": 30,
-            "flexible_rule": [{"flexible_early_minutes": 30, "flexible_late_minutes": 30}],
-            "punch_time_rule": [{"on_time": "09:00", "off_time": "18:00", "late_minutes_as_late": 10}],
-            "not_a_config_field": "dropped",
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_shift_impl("s1")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/attendance/v1/shifts/:shift_id"
-    assert req.paths["shift_id"] == "s1"
-    shift = result["shift"]
-    assert shift["punch_time_rule"][0]["on_time"] == "09:00"
-    assert shift["flexible_rule"][0]["flexible_late_minutes"] == 30
-    assert shift["flexible_minutes"] == 30
-    assert "not_a_config_field" not in shift  # only whitelisted config fields kept
-
-
-@pytest.mark.asyncio
-async def test_get_shift_requires_id() -> None:
-    result = await _impl.get_shift_impl("")
-    assert result["ok"] is False
-
-
-def test_attendance_config_tools_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_attendance")
-    for name in (
-        "feishu_attendance_groups",
-        "feishu_attendance_group_config",
-        "feishu_attendance_shifts",
-        "feishu_attendance_shift_config",
-    ):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), name
-
-
-# ── Tasks — create/assign, list, update, complete ─────────────────────────────
+# ── Tasks — the create path that assignment_accept still needs ────────────────
 
 
 @pytest.mark.asyncio
@@ -4136,107 +2997,6 @@ def test_due_to_ms_parsing() -> None:
     assert _impl._due_to_ms("not a date") is None
     assert _impl._due_to_ms("2026-07-15").isdigit()
     assert _impl._due_to_ms("2026-07-15 18:00").isdigit()
-
-
-@pytest.mark.asyncio
-async def test_list_tasks_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [{"guid": "g1", "summary": "s1", "status": "todo", "due": {"timestamp": "123"}, "url": "u"}],
-            "has_more": False,
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_tasks_impl("false", 50, "")
-    q = _qdict(cap.request)
-    assert cap.request.http_method.name == "GET"
-    assert q.get("type") == "my_tasks"
-    assert q.get("completed") == "false"
-    assert result["tasks"][0] == {"guid": "g1", "summary": "s1", "status": "todo", "due": "123", "url": "u"}
-
-
-@pytest.mark.asyncio
-async def test_complete_task_patch(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.complete_task_impl("g1", True)
-    req = cap.request
-    assert req.http_method.name == "PATCH"
-    assert req.paths["task_guid"] == "g1"
-    assert req.body["update_fields"] == ["completed_at"]
-    assert req.body["task"]["completed_at"] != "0"
-    # reopen
-    cap2 = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap2)
-    await _impl.complete_task_impl("g1", False)
-    assert cap2.request.body["task"]["completed_at"] == "0"
-
-
-@pytest.mark.asyncio
-async def test_update_task_only_provided_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.update_task_impl("g1", "新标题", "", "")
-    assert cap.request.body["update_fields"] == ["summary"]  # description/due omitted -> not cleared
-    assert cap.request.body["task"] == {"summary": "新标题"}
-    assert result["updated"] == ["summary"]
-
-
-@pytest.mark.asyncio
-async def test_update_task_nothing_to_update() -> None:
-    result = await _impl.update_task_impl("g1", "", "", "")
-    assert result["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_get_task_detail(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "task": {
-                "guid": "g1",
-                "summary": "写周报",
-                "status": "done",
-                "completed_at": "1752490200000",
-                "members": [{"id": "ou_a", "name": "王炜博", "role": "assignee"}],
-                "assignee_related": [{"id": "ou_a", "completed_at": "1752490200000"}],
-                "url": "http://t/g1",
-            }
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_task_impl("g1")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/task/v2/tasks/:task_guid"
-    assert req.paths["task_guid"] == "g1"
-    assert result["status"] == "done"
-    assert result["completed"] is True
-    assert result["completed_at"]  # formatted, non-empty
-    assert result["members"][0]["name"] == "王炜博"
-    assert result["assignee_completion"][0]["id"] == "ou_a"
-
-
-@pytest.mark.asyncio
-async def test_get_task_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task": {"guid": "g1", "summary": "s", "status": "todo", "members": []}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.get_task_impl("g1")
-    assert result["completed"] is False
-    assert result["completed_at"] == ""
-
-
-def test_task_tools_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_task")
-    for name in (
-        "feishu_task_create",
-        "feishu_task_get",
-        "feishu_task_list",
-        "feishu_task_update",
-        "feishu_task_complete",
-    ):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
 
 
 # ── Calendar — create event ───────────────────────────────────────────────────
@@ -4601,28 +3361,6 @@ async def test_department_members_recursive_walks_children(monkeypatch: pytest.M
 # ── Approval — list instances + attachment parsing ────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_list_approval_instances_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"instance_code_list": ["i1", "i2"], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_approval_instances_impl("APV_CODE", "1000", "2000")
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/approval/v4/instances")
-    q = _qdict(req)
-    assert q.get("approval_code") == "APV_CODE"
-    assert q.get("start_time") == "1000"
-    assert result["instance_codes"] == ["i1", "i2"]
-    assert result["count"] == 2
-
-
-@pytest.mark.asyncio
-async def test_list_approval_instances_requires_code() -> None:
-    result = await _impl.list_approval_instances_impl("", "1000", "2000")
-    assert result["ok"] is False
-    assert "approval_code" in result["message"]
-
-
 def test_parse_approval_attachments_url_and_drive() -> None:
     form = json.dumps(
         [
@@ -4647,13 +3385,6 @@ async def test_get_approval_instance_exposes_attachments(monkeypatch: pytest.Mon
     result = await _impl.get_approval_instance_impl("inst1", "open_id")
     assert cap.request.paths["instance_id"] == "inst1"
     assert result["attachments"] == [{"name": "发票", "type": "image", "kind": "url", "value": "https://f.co/x.png"}]
-
-
-def test_approval_list_instances_tool_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_approval")
-    fn = mod.feishu_approval_list_instances
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
 
 
 # ── Drive — download file/attachment ──────────────────────────────────────────
@@ -4877,99 +3608,6 @@ async def test_get_message_image_requires_args() -> None:
 def test_image_get_tool_async_with_docstring() -> None:
     mod = importlib.import_module("feishu_message")
     fn = mod.feishu_image_get
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
-
-
-@pytest.mark.asyncio
-async def test_delete_file_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task_id": ""})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_file_impl("doccnX", "docx")
-    assert result["ok"] is True
-    assert result["file_token"] == "doccnX"
-    assert result["type"] == "docx"
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/drive/v1/files/:file_token"
-    assert req.paths["file_token"] == "doccnX"
-    assert _impl.AccessTokenType.USER in req.token_types
-    # empty user_key -> tenant path (no user_key forwarded)
-    assert cap.user_key in (None, "")
-
-
-@pytest.mark.asyncio
-async def test_delete_file_requires_token() -> None:
-    result = await _impl.delete_file_impl("  ", "docx")
-    assert result["ok"] is False
-    assert "file_token" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_delete_file_rejects_bad_type() -> None:
-    result = await _impl.delete_file_impl("doccnX", "video")
-    assert result["ok"] is False
-    assert "file_type" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_delete_file_folder_returns_task_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"task_id": "tsk_123"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_file_impl("fldrX", "folder")
-    assert result["ok"] is True
-    assert result["task_id"] == "tsk_123"
-
-
-@pytest.mark.asyncio
-async def test_delete_file_user_key_routes_through_uat(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _CapturingUatClient({"code": 0, "data": {}})
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
-
-    async def _uat(user_key: str = "") -> Any:
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
-    assert result["ok"] is True
-    assert client.option.user_access_token == "uat_tok"
-    assert client.request.http_method.name == "DELETE"
-
-
-@pytest.mark.asyncio
-async def test_delete_file_as_user_without_token_prompts_auth(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Acting as the user with no usable token asks them to authorize."""
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
-
-    async def _no_uat(user_key: str = "") -> Any:
-        return None
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    monkeypatch.setattr(_impl, "missing_capabilities", lambda key, needed: [])
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "user")
-    assert result["ok"] is False
-    assert result.get("need_auth") is True
-
-
-@pytest.mark.asyncio
-async def test_delete_file_as_bot_uses_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
-    """identity='bot': the bot deletes it with its own permissions, no auth prompt."""
-
-    class _TenantClient:
-        async def arequest(self, request: Any, option: Any = None) -> Any:
-            raw = _FakeRaw(json.dumps({"code": 0, "data": {"task_id": "tsk_1"}}).encode())
-            return type("R", (), {"raw": raw, "code": 0, "msg": ""})()
-
-    monkeypatch.setattr(_impl, "_get_client", lambda: _TenantClient())
-    result = await _impl.delete_file_impl("doccnX", "docx", "ou_a", "bot")
-    assert result["ok"] is True
-    assert result.get("need_auth") is not True
-
-
-def test_delete_file_tool_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_drive")
-    fn = mod.feishu_drive_delete_file
     assert inspect.iscoroutinefunction(fn)
     assert (inspect.getdoc(fn) or "").strip()
 
@@ -5472,25 +4110,6 @@ async def test_list_wiki_spaces_nonempty_tenant_no_uat_retry(monkeypatch: pytest
     result = await _impl.list_wiki_spaces_impl(20, "", "ou_a")
     assert result["ok"] is True
     assert result["spaces"][0]["space_id"] == "spT"
-
-
-@pytest.mark.asyncio
-async def test_get_wiki_node_forwards_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, Any] = {}
-
-    async def _fake_invoke(
-        request: Any,
-        user_key: str | None = None,
-        prefer: str = "tenant",
-        identity: str = "",
-        capabilities: list[str] | None = None,
-    ) -> dict[str, Any]:
-        seen["user_key"] = user_key
-        return {"ok": True, "code": 0, "msg": "", "data": {"node": {"obj_token": "o", "obj_type": "docx"}}}
-
-    monkeypatch.setattr(_impl, "_invoke", _fake_invoke)
-    await _impl.get_wiki_node_impl("nodeTok", "ou_zhang")
-    assert seen["user_key"] == "ou_zhang"
 
 
 @pytest.mark.asyncio
@@ -6042,168 +4661,6 @@ async def test_wiki_create_doc_tool_returns_json(monkeypatch: pytest.MonkeyPatch
     assert parsed["obj_token"] == "d1"
 
 
-# ── Drive permission impl tests (公开 / 差异化访问) ─────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"member": {"member_id": "od_dept"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_permission_member_impl(
-        "tok", "docx", "od_dept", perm="view", member_type="opendepartmentid", member_kind="department"
-    )
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri.endswith("/permissions/:token/members")
-    assert req.paths["token"] == "tok"
-    assert _qdict(req).get("type") == "docx"
-    assert req.body["member_id"] == "od_dept"
-    assert req.body["perm"] == "view"
-    assert req.body["type"] == "department"
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_rejects_bad_perm() -> None:
-    result = await _impl.add_permission_member_impl("tok", "docx", "u1", perm="admin")
-    assert result["ok"] is False
-    assert "perm must be" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_add_permission_member_rejects_bad_member_type() -> None:
-    result = await _impl.add_permission_member_impl("tok", "docx", "u1", member_type="badtype")
-    assert result["ok"] is False
-    assert "member_type must be" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_list_permission_members_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"member_id": "u1", "member_type": "openid", "perm": "view", "type": "user"}]})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_permission_members_impl("tok", "docx")
-    assert result["ok"] is True
-    assert result["member_total"] == 1
-    assert result["members"][0]["member_id"] == "u1"
-    assert cap.request.http_method.name == "GET"
-
-
-@pytest.mark.asyncio
-async def test_delete_permission_member_builds_delete(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.delete_permission_member_impl("tok", "docx", "u1")
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.paths["member_id"] == "u1"
-    assert _qdict(req).get("member_type") == "openid"
-
-
-def test_permission_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_permission")
-    for name in ("feishu_permission_add_member", "feishu_permission_list_members", "feishu_permission_remove_member"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-# ── Bitable role impl tests (一份资料按角色显示不同内容) ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"role": {"role_id": "r1", "role_name": "读者"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.create_bitable_role_impl("app1", "读者", '[{"table_id": "tbl1", "table_perm": 1}]')
-    assert result["ok"] is True
-    assert result["role_id"] == "r1"
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.paths["app_token"] == "app1"
-    assert req.body["role_name"] == "读者"
-    assert req.body["table_roles"][0]["table_id"] == "tbl1"
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_rejects_bad_json() -> None:
-    result = await _impl.create_bitable_role_impl("app1", "读者", "{not json")
-    assert result["ok"] is False
-    assert "not valid JSON" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_create_bitable_role_requires_array() -> None:
-    result = await _impl.create_bitable_role_impl("app1", "读者", '{"table_id": "tbl1"}')
-    assert result["ok"] is False
-    assert "JSON array" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_list_bitable_roles_normalizes(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"role_id": "r1", "role_name": "读者", "table_roles": []}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_bitable_roles_impl("app1")
-    assert result["ok"] is True
-    assert result["roles"][0]["role_id"] == "r1"
-
-
-@pytest.mark.asyncio
-async def test_add_bitable_role_member_builds_post(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.add_bitable_role_member_impl("app1", "r1", "u1")
-    assert result["ok"] is True
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.paths["role_id"] == "r1"
-    assert req.body["member_id"] == "u1"
-    assert _qdict(req).get("member_id_type") == "open_id"
-
-
-def test_bitable_role_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_bitable")
-    for name in ("feishu_bitable_create_role", "feishu_bitable_list_roles", "feishu_bitable_add_role_member"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-# ── eLearning impl tests (查每人学习记录) ──────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_list_course_registrations_builds_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [{"user_id": "u1", "status": "completed"}], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_course_registrations_impl(user_ids="u1,u2", page_size=50)
-    assert result["ok"] is True
-    assert result["registrations"][0]["status"] == "completed"
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri.endswith("/elearning/v2/course_registrations")
-    # user_ids repeated as multiple query params
-    user_id_vals = [v for (k, v) in req.queries if k == "user_ids"]
-    assert user_id_vals == ["u1", "u2"]
-    assert _qdict(req).get("page_size") == "50"
-
-
-@pytest.mark.asyncio
-async def test_list_course_registrations_no_filter(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": [], "has_more": False})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_course_registrations_impl()
-    assert result["ok"] is True
-    assert [v for (k, v) in cap.request.queries if k == "user_ids"] == []
-
-
-def test_elearning_tool_is_async_with_docstring() -> None:
-    mod = importlib.import_module("feishu_elearning")
-    fn = mod.feishu_elearning_list_registrations
-    assert inspect.iscoroutinefunction(fn)
-    assert (inspect.getdoc(fn) or "").strip()
-
-
 # ── Drive media upload impl tests (视频证据上传) ──────────────────────────────
 
 
@@ -6313,191 +4770,6 @@ async def test_get_users_batch_rejects_over_50() -> None:
     result = await _impl.get_users_batch_impl(ids)
     assert result["ok"] is False
     assert "50" in result["message"]
-
-
-# ── Contact — global user search by name (user_access_token) ──────────────────
-
-
-@pytest.mark.asyncio
-async def test_search_users_not_authorized(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
-
-    async def _no_uat(user_key: str = "") -> Any:
-        return None
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _no_uat)
-    result = await _impl.search_users_impl("张三")
-    assert result["ok"] is False
-    assert result.get("need_auth") is True
-
-
-@pytest.mark.asyncio
-async def test_search_users_requires_query() -> None:
-    result = await _impl.search_users_impl("   ")
-    assert result["ok"] is False
-    assert "required" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_search_users_rejects_bad_page_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: object())
-
-    async def _uat(user_key: str = "") -> Any:
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    result = await _impl.search_users_impl("张三", page_size=500)
-    assert result["ok"] is False
-    assert "200" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_search_users_builds_request_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = {
-        "code": 0,
-        "data": {
-            "users": [
-                {
-                    "open_id": "ou_1",
-                    "user_id": "e1",
-                    "name": "张三",
-                    "avatar": {"avatar_240": "https://x/240.png", "avatar_72": "https://x/72.png"},
-                    "department_ids": ["od_a"],
-                }
-            ],
-            "has_more": True,
-            "page_token": "pt2",
-        },
-    }
-    client = _CapturingUatClient(body)
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
-
-    async def _uat(user_key: str = "") -> Any:
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    result = await _impl.search_users_impl("张三", 10, "pt1", "ou_me")
-    req = client.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/search/v1/user"
-    assert _impl.AccessTokenType.USER in req.token_types
-    q = _qdict(req)
-    assert q.get("query") == "张三"
-    assert q.get("page_size") == "10"
-    assert q.get("page_token") == "pt1"
-    assert client.option.user_access_token == "uat_tok"
-    assert result["users"][0] == {
-        "open_id": "ou_1",
-        "user_id": "e1",
-        "name": "张三",
-        "avatar": "https://x/240.png",
-        "department_ids": ["od_a"],
-    }
-    assert result["count"] == 1
-    assert result["has_more"] is True
-    assert result["page_token"] == "pt2"
-
-
-@pytest.mark.asyncio
-async def test_search_users_forwards_user_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """search_users_impl must resolve the UAT for the passed user_key."""
-    seen: dict[str, str] = {}
-
-    async def _uat(user_key: str = "") -> Any:
-        seen["user_key"] = user_key
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: _CapturingUatClient({"code": 0, "data": {"users": []}}))
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    await _impl.search_users_impl("张三", 20, "", "ou_zhang")
-    assert seen["user_key"] == "ou_zhang"
-
-
-@pytest.mark.asyncio
-async def test_search_users_api_error_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _CapturingUatClient({"code": 99991663, "msg": "permission denied", "data": {}})
-    monkeypatch.setattr(_impl, "_get_uat_client", lambda: client)
-
-    async def _uat(user_key: str = "") -> Any:
-        return _FakeUAT()
-
-    monkeypatch.setattr(_impl, "_get_valid_uat", _uat)
-    result = await _impl.search_users_impl("x")
-    assert result["ok"] is False
-    assert result["code"] == 99991663
-
-
-@pytest.mark.asyncio
-async def test_contact_search_tool_returns_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = importlib.import_module("feishu_contact")
-
-    async def _fake(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": True, "users": [{"open_id": "ou_1", "name": "张三"}], "count": 1}
-
-    monkeypatch.setattr(_impl, "search_users_impl", _fake)
-    out = await mod.feishu_contact_search(query="张三")
-    assert inspect.iscoroutinefunction(mod.feishu_contact_search)
-    assert json.loads(out)["users"][0]["open_id"] == "ou_1"
-
-
-def test_contact_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_contact")
-    for name in ("feishu_department_members", "feishu_user_get", "feishu_contact_search"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.subscribe_approval_impl("appr_1")
-    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": True}
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/approval/v4/approvals/:approval_code/subscribe"
-    assert req.paths["approval_code"] == "appr_1"
-
-
-@pytest.mark.asyncio
-async def test_unsubscribe_approval_builds_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.unsubscribe_approval_impl("appr_1")
-    assert result == {"ok": True, "approval_code": "appr_1", "subscribed": False}
-    assert cap.request.uri == "/open-apis/approval/v4/approvals/:approval_code/unsubscribe"
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_requires_code() -> None:
-    result = await _impl.subscribe_approval_impl("")
-    assert result["ok"] is False
-    assert "approval_code" in result["message"]
-
-
-@pytest.mark.asyncio
-async def test_subscribe_approval_propagates_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fail(
-        request: Any,
-        user_key: str | None = None,
-        prefer: str = "tenant",
-        identity: str = "",
-        capabilities: list[str] | None = None,
-    ) -> dict[str, Any]:
-        return {"ok": False, "code": 99991672, "msg": "no permission", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fail)
-    result = await _impl.subscribe_approval_impl("appr_1")
-    assert result["ok"] is False
-
-
-def test_approval_subscribe_tools_are_async_with_docstrings() -> None:
-    mod = importlib.import_module("feishu_approval")
-    for name in ("feishu_approval_subscribe", "feishu_approval_unsubscribe"):
-        fn = getattr(mod, name)
-        assert inspect.iscoroutinefunction(fn), name
-        assert (inspect.getdoc(fn) or "").strip(), f"{name} needs a docstring"
 
 
 # ── Rate limiting (HTTP 429) ───────────────────────────────────────────────────
@@ -6939,11 +5211,9 @@ def test_write_tools_expose_identity(tmp_path: Any) -> None:
     expected = {
         "feishu_doc": ["feishu_doc_create", "feishu_doc_append_content", "feishu_doc_append_table"],
         "feishu_wiki": ["feishu_wiki_create_doc", "feishu_wiki_create_doc_with_content"],
-        "feishu_bitable": ["feishu_bitable_create_app", "feishu_bitable_create_table"],
+        "feishu_bitable": ["feishu_bitable_create_table", "feishu_bitable_create_records"],
         "feishu_sheet": ["feishu_sheet_write", "feishu_sheet_append", "feishu_sheet_format"],
-        "feishu_task": ["feishu_task_create"],
-        "feishu_drive": ["feishu_drive_delete_file", "feishu_drive_upload"],
-        "feishu_permission": ["feishu_permission_add_member"],
+        "feishu_drive": ["feishu_drive_upload"],
     }
     for mod_name, tools in expected.items():
         mod = importlib.import_module(mod_name)
@@ -6959,7 +5229,7 @@ def test_read_tools_do_not_take_identity() -> None:
         ("feishu_doc", "feishu_doc_read"),
         ("feishu_sheet", "feishu_sheet_read"),
         ("feishu_wiki", "feishu_wiki_list_spaces"),
-        ("feishu_bitable", "feishu_bitable_list_records"),
+        ("feishu_bitable", "feishu_bitable_search_records"),
     ]:
         mod = importlib.import_module(mod_name)
         assert "identity" not in inspect.signature(getattr(mod, tool)).parameters, tool
@@ -7702,218 +5972,14 @@ async def test_read_status_rejects_non_message_id() -> None:
 # ── Pin / unpin (置顶) ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_pin_message_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"pin": {"message_id": "om_abc", "chat_id": "oc_1", "operator_id": "ou_x"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.pin_message_impl("om_abc", user_key="ou_admin")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/pins"
-    assert req.body == {"message_id": "om_abc"}
-    assert cap.prefer == "tenant"
-    assert cap.user_key == "ou_admin"
-    assert result["pinned"] is True
-    assert result["chat_id"] == "oc_1"
-    assert result["operator_id"] == "ou_x"
-
-
-@pytest.mark.asyncio
-async def test_unpin_message_builds_delete_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.unpin_message_impl("om_abc")
-    req = cap.request
-    assert req.http_method.name == "DELETE"
-    assert req.uri == "/open-apis/im/v1/pins/:message_id"
-    assert req.paths["message_id"] == "om_abc"
-    assert result == {"ok": True, "message_id": "om_abc", "pinned": False}
-
-
-@pytest.mark.asyncio
-async def test_pin_hints_owner_admin_only_group(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 230046 is the usual blocker: the group restricts 置顶 to owner/admin.
-    async def _fail(*a: Any, **k: Any) -> dict[str, Any]:
-        return {"ok": False, "code": 230046, "msg": "No Permission to Pin", "message": "err"}
-
-    monkeypatch.setattr(_impl, "_invoke", _fail)
-    for result in (await _impl.pin_message_impl("om_a"), await _impl.unpin_message_impl("om_a")):
-        assert result["ok"] is False
-        assert "群主/管理员" in result["hint"]
-
-
-@pytest.mark.asyncio
-async def test_pin_rejects_non_message_id() -> None:
-    for bad in ("", "oc_1"):
-        assert (await _impl.pin_message_impl(bad))["ok"] is False
-        assert (await _impl.unpin_message_impl(bad))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_list_pins_builds_get_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {
-            "items": [{"message_id": "om_1", "chat_id": "oc_1", "operator_id": "ou_x", "create_time": "170"}],
-            "has_more": True,
-            "page_token": "pt2",
-        }
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.list_pins_impl("oc_1", start_time="100", end_time="200", page_size=90)
-    req = cap.request
-    assert req.http_method.name == "GET"
-    assert req.uri == "/open-apis/im/v1/pins"
-    q = _qdict(req)
-    assert q.get("chat_id") == "oc_1"
-    assert q.get("start_time") == "100"
-    assert q.get("end_time") == "200"
-    assert q.get("page_size") == "50"  # clamped to the API max
-    assert result["count"] == 1
-    assert result["pins"][0]["message_id"] == "om_1"
-    assert result["has_more"] is True
-    assert result["page_token"] == "pt2"
-
-
-@pytest.mark.asyncio
-async def test_list_pins_omits_empty_time_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"items": []})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.list_pins_impl("oc_1")
-    q = _qdict(cap.request)
-    assert "start_time" not in q
-    assert "end_time" not in q
-
-
-@pytest.mark.asyncio
-async def test_list_pins_requires_group_chat_id() -> None:
-    for bad in ("", "om_1", "ou_2"):
-        result = await _impl.list_pins_impl(bad)
-        assert result["ok"] is False
-        assert "chat_id" in result["message"]
-
-
 # ── Forward / merge-forward (转发) ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"message_id": "om_new", "chat_id": "oc_2", "thread_id": "omt_9"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.forward_message_impl("om_abc", "oc_2", user_key="ou_me")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/messages/:message_id/forward"
-    assert req.paths["message_id"] == "om_abc"
-    assert req.body == {"receive_id": "oc_2"}
-    assert _qdict(req).get("receive_id_type") == "chat_id"
-    assert cap.user_key == "ou_me"
-    assert result["forwarded"] is True
-    assert result["source_message_id"] == "om_abc"
-    assert result["message_id"] == "om_new"
-
-
-@pytest.mark.asyncio
-async def test_forward_infers_target_type_from_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A DM, a thread and an email each need a different receive_id_type; the default
-    # chat_id would earn 230034, so the prefix decides (omt_ is forward-only).
-    for rid, expected in (
-        ("ou_a", "open_id"),
-        ("on_b", "union_id"),
-        ("omt_c", "thread_id"),
-        ("a@b.com", "email"),
-        ("oc_d", "chat_id"),
-    ):
-        cap = _CapturedInvoke({"message_id": "om_new"})
-        monkeypatch.setattr(_impl, "_invoke", cap)
-        result = await _impl.forward_message_impl("om_abc", rid)
-        assert _qdict(cap.request).get("receive_id_type") == expected, rid
-        assert result["receive_id_type"] == expected
-
-
-@pytest.mark.asyncio
-async def test_forward_keeps_explicit_type_for_bare_user_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"message_id": "om_new"})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.forward_message_impl("om_abc", "employee_7", receive_id_type="user_id")
-    assert _qdict(cap.request).get("receive_id_type") == "user_id"
-
-
-@pytest.mark.asyncio
-async def test_forward_rejects_message_id_as_target() -> None:
-    result = await _impl.forward_message_impl("om_abc", "om_target")
-    assert result["ok"] is False
-    assert "receive_id" in result["message"]
-    for bad in ("", "  "):
-        assert (await _impl.forward_message_impl("om_abc", bad))["ok"] is False
-
-
-@pytest.mark.asyncio
-async def test_forward_hints_unforwardable_message_types(monkeypatch: pytest.MonkeyPatch) -> None:
-    for code, expect in ((230061, "不支持转发"), (230065, "已被撤回"), (230069, "同一个会话")):
-
-        async def _fail(*a: Any, code: int = code, **k: Any) -> dict[str, Any]:
-            return {"ok": False, "code": code, "msg": "nope", "message": "err"}
-
-        monkeypatch.setattr(_impl, "_invoke", _fail)
-        result = await _impl.forward_message_impl("om_abc", "oc_2")
-        assert expect in result["hint"], code
-
-
-@pytest.mark.asyncio
-async def test_merge_forward_builds_post_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke(
-        {"message": {"message_id": "om_bundle", "chat_id": "oc_2"}, "invalid_message_id_list": ["om_bad"]}
-    )
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    result = await _impl.merge_forward_messages_impl('["om_a", "om_b"]', "oc_2")
-    req = cap.request
-    assert req.http_method.name == "POST"
-    assert req.uri == "/open-apis/im/v1/messages/merge_forward"
-    assert req.body == {"receive_id": "oc_2", "message_id_list": ["om_a", "om_b"]}
-    assert _qdict(req).get("receive_id_type") == "chat_id"
-    assert result["forwarded_count"] == 2
-    assert result["message_id"] == "om_bundle"
-    # ids Feishu refused are surfaced, not silently dropped
-    assert result["invalid_message_ids"] == ["om_bad"]
-
-
-@pytest.mark.asyncio
-async def test_merge_forward_accepts_comma_separated_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    cap = _CapturedInvoke({"message": {"message_id": "om_bundle"}})
-    monkeypatch.setattr(_impl, "_invoke", cap)
-    await _impl.merge_forward_messages_impl("om_a, om_b", "oc_2")
-    assert cap.request.body["message_id_list"] == ["om_a", "om_b"]
-
-
-@pytest.mark.asyncio
-async def test_merge_forward_validates_ids() -> None:
-    empty = await _impl.merge_forward_messages_impl("", "oc_2")
-    assert empty["ok"] is False
-    not_ids = await _impl.merge_forward_messages_impl('["oc_1"]', "oc_2")
-    assert not_ids["ok"] is False
-    assert "om_" in not_ids["message"]
-    too_many = await _impl.merge_forward_messages_impl(json.dumps([f"om_{i}" for i in range(101)]), "oc_2")
-    assert too_many["ok"] is False
-    assert "100" in too_many["message"]
 
 
 @pytest.mark.asyncio
 async def test_read_pin_forward_tools_return_json(monkeypatch: pytest.MonkeyPatch) -> None:
     mod = importlib.import_module("feishu_message")
     monkeypatch.setattr(_impl, "read_status_impl", lambda *a, **k: _async({"ok": True, "read_count": 3}))
-    monkeypatch.setattr(_impl, "pin_message_impl", lambda *a, **k: _async({"ok": True, "pinned": True}))
-    monkeypatch.setattr(_impl, "unpin_message_impl", lambda *a, **k: _async({"ok": True, "pinned": False}))
-    monkeypatch.setattr(_impl, "list_pins_impl", lambda *a, **k: _async({"ok": True, "count": 1}))
-    monkeypatch.setattr(_impl, "forward_message_impl", lambda *a, **k: _async({"ok": True, "forwarded": True}))
-    monkeypatch.setattr(
-        _impl, "merge_forward_messages_impl", lambda *a, **k: _async({"ok": True, "forwarded_count": 2})
-    )
     assert json.loads(await mod.feishu_message_read_status("om_1"))["read_count"] == 3
-    assert json.loads(await mod.feishu_message_pin("om_1"))["pinned"] is True
-    assert json.loads(await mod.feishu_message_unpin("om_1"))["pinned"] is False
-    assert json.loads(await mod.feishu_message_pins("oc_1"))["count"] == 1
-    assert json.loads(await mod.feishu_message_forward("om_1", "oc_2"))["forwarded"] is True
-    assert json.loads(await mod.feishu_message_merge_forward('["om_1"]', "oc_2"))["forwarded_count"] == 2
 
 
 async def _async(value: dict[str, Any]) -> dict[str, Any]:

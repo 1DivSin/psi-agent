@@ -27,18 +27,27 @@ category: integration
 | OAuth 授权 | `feishu_auth_*` | 管着 UAT 存储与回调接收 |
 | 发/编辑消息、卡片 | `feishu_message_send` / `_edit` / `_edit_card` | `<at>` 升级 post、卡片 update_multi 等组包细节 |
 | 读/写群公告 | `feishu_chat_announcement` / `_set` / `_clear` | 公告是 **docx 文档**（不是 im/v1），根 block_id 就是 chat_id，每次写都要按 `revision_id` 乐观锁重读 |
-| 改群设置 / 禁言 | `feishu_chat_update` / `feishu_chat_mute` | 加人权限与群名片权限**必须成对**；禁言根本不在群设置那个 body 里（写了会被静默忽略） |
-| 解散群 / 转让群主 | `feishu_chat_dismiss` / `feishu_chat_transfer_owner` | 解散**不可逆且不保留群记录**，工具要求显式 `confirm="解散群"` |
-| 群菜单 / 群标签页 | `feishu_chat_menu_*` / `feishu_chat_tab*` | 菜单是三层嵌套包装对象、带子菜单的一级菜单不能有链接；标签页 11 种类型只有 2 种能建 |
 | 搜索消息 | `feishu_message_search` | 只吃 user token，且**只返回 message_id**，必须回查才有正文 |
-| 建/改用户、办离职 | `feishu_user_manage` | 离职**不可逆**且无上级时日历/问卷被直接删除，工具要求 `confirm="离职用户"`；改用户没传的字段不能变成清空 |
-| 建/改/删/移动部门 | `feishu_department_manage` | 删部门**不可逆**且要求部门先清空（有人 43011 / 有子部门 43012，只能最深层往上删），工具要求 `confirm="删除部门"` |
-| 建/改/删用户组 | `feishu_user_group` | 删组会让引用它的文档权限/审批流失去主体，要求 `confirm="删除用户组"`；建组硬要求通讯录范围=全部成员 |
 | 增删用户组成员 | `feishu_user_group_members` | 飞书**一次只收一个成员**，工具循环并逐人回报成败；三个 member_* 参数不一致就 41072 |
 | 按手机号/邮箱查人 | `feishu_contact_find` | 是 **POST** 不是 GET；企业邮箱一律查不到；离职的人默认**静默漏掉** |
 | 部门树 / 部门详情 | `feishu_department_tree` / `feishu_department_get` | 递归+分页+去重，且 43010「部门过大」必须暴露出来而不是静默少一层 |
 
 判断方法：先用 `tool_search` 找一下有没有 `feishu_` 开头的对应工具；有就用它。
+
+有些域已经**从工具改成了接口表**：这些端点仍然走 `feishu_api`，但要先读对应的 skill，
+因为不可逆操作的 `confirm` 闸门和静默失败的约束都写在那份 rules 里，发请求前会硬拦：
+
+| 域 | 读哪个 skill | 里面有什么闸门 |
+|---|---|---|
+| 群管理（建群/拉人/踢人/群设置/禁言/转让群主/解散群/群菜单/群标签页） | `feishu-chat` | 解散群要 `confirm="解散群"`；禁言不在群设置那个 body 里 |
+| 通讯录（查人/搜人/建改用户/部门增删改/用户组） | `feishu-contact` | 离职要 `confirm="离职用户"`、删部门 `confirm="删除部门"`、删用户组 `confirm="删除用户组"` |
+| 消息（撤回/表情回应/置顶/转发/消息列表） | `feishu-message` | 撤回时限、置顶权限、合并转发必须同源 |
+| 多维表格（表/字段/记录） | `feishu-bitable` | 列名对不上会被静默丢弃，所以字段先校验再写 |
+| 审批（读定义/查待办/列实例/同意拒绝/订阅） | `feishu-approval` | 同意拒绝要凑齐身份四元组；两张数字状态表在那份技能里 |
+| 云盘与文档评论（列评论/列回复/删文件） | `feishu-drive` | 删文件的 `type` 只认九个值；上传和下载是专用工具 |
+| 考勤（考勤组配置/班次配置） | `feishu-attendance` | `page_size` 上限 50 会硬拦；打卡记录是专用工具 |
+| 云文档协作者权限（加人/列人/移人） | `feishu-permission` | 三个不同的东西都叫 `type`；`member_type` 是 `openid` 不是 `open_id` |
+| 任务与培训（建改任务/完成/列任务/课程报名） | `feishu-task` | 空 `update_fields` 会被硬拦（飞书返回成功但一个字段都不改） |
 
 ## 参数怎么填
 
@@ -108,7 +117,8 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 #### 用户组查询
 
-用户组的增删改和成员增删用 `feishu_user_group` / `feishu_user_group_members`。
+用户组的增删改按 `feishu-contact` 里的接口表走（删组有 `confirm` 闸门），
+成员增删用 `feishu_user_group_members`（飞书一次只收一个成员，工具循环并逐人回报）。
 补充两个只读端点：详情 `GET /open-apis/contact/v3/group/:group_id`、
 列表 `GET /open-apis/contact/v3/group/simplelist`（`query: type` 1 普通 2 动态）——
 注意路径是**单数 `group`**，没有 `/groups`。
@@ -130,7 +140,7 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 | 对方成员详情 | `GET .../collaboration_tenants/:tenant_key/collaboration_users/:user_id` |
 
 `1970011` = page_size 越界，`1970012` = page_token 非法。
-若用户说的「外部联系人」其实是外部群里的人，那是 `feishu_chat_list_members`，不是这套。
+若用户说的「外部联系人」其实是外部群里的人，那是 `feishu-chat` 里的群成员列表接口，不是这套。
 
 #### 通讯录写操作为什么老是失败
 
@@ -144,15 +154,13 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 ### 考勤
 
-| 要什么 | method + uri |
-|---|---|
-| 打卡记录 | `POST /open-apis/attendance/v1/user_tasks/query` — body: `{"user_ids":[...],"check_date_from":20260801,"check_date_to":20260807}`，query: `{"employee_type":"employee_id"}` |
-| 考勤组列表 | `POST /open-apis/attendance/v1/groups/list` |
-| 考勤组配置 | `GET /open-apis/attendance/v1/groups/:group_id` |
-| 班次列表 | `POST /open-apis/attendance/v1/shifts/list` |
-| 班次配置 | `GET /open-apis/attendance/v1/shifts/:shift_id` |
+考勤组和班次的配置**看 `feishu-attendance` 那份接口表**，那里的规则会在发请求之前拦下
+超出上限的 `page_size` 和不认的 id 类型。打卡记录用专用工具 `feishu_attendance_query`
+（它把两层嵌套的打卡数组摊平成一人一天一行，并单独给出查不到的人）。
 
 日期是 **整数** `YYYYMMDD`，不是字符串。`user_ids` 要的是 employee_id 体系，跟 open_id 不同。
+以上都是只读，但除了 scope 之外**还要在考勤管理后台单独授一次数据权限范围**，否则回
+1220004 / 1220005 —— 那不是参数错，别改参数重试。
 
 ### 云文档搜索
 
@@ -184,15 +192,10 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 
 ### 任务 (Task v2)
 
-| 要什么 | method + uri |
-|---|---|
-| 建任务 | `POST /open-apis/task/v2/tasks` — body: `{"summary":"...","due":{"timestamp":"..."},"members":[{"id":"ou_...","role":"assignee"}]}` |
-| 查任务 | `GET /open-apis/task/v2/tasks/:task_guid` |
-| 列任务 | `GET /open-apis/task/v2/tasks` — query: `page_size`, `completed` |
-| 改任务 | `PATCH /open-apis/task/v2/tasks/:task_guid` — body: `{"task":{...},"update_fields":["summary"]}` |
-| 完成任务 | `PATCH` 同上，`update_fields:["completed_at"]`，`completed_at` 为毫秒字符串 |
-
-改任务**必须**带 `update_fields`，不带则什么都不会变。
+任务的建/改/完成/列表**看 `feishu-task` 那份接口表**。挪过去是因为这个域的失败方式是
+静默的：`PATCH` 靠 `update_fields` 决定改什么，空数组时飞书返回成功却一个字段都不改，
+那份 rules 会在发请求之前拦下来。时间戳是**毫秒字符串**（写成秒会落到 1970 年），
+成员对象里的 `type` 填 `open_id` 会报 1470400 —— 这些也都在那份技能里。
 
 ### 群 / 知识库
 
@@ -205,21 +208,63 @@ scope 是 `contact:functional_role`（只读用 `contact:functional_role:readonl
 | 节点详情 | `GET /open-apis/wiki/v2/spaces/get_node` — query: `token`（wiki node_token） |
 
 wiki 节点的 `obj_token` 才是文档 id，读内容要用它而不是 `node_token`。
-建群拉人用 `feishu_chat_create`；建 wiki 文档用 `feishu_wiki_create_doc*`。
+建 wiki 文档用 `feishu_wiki_create_doc*`。
 
-**群的运营几乎都有专用工具了，别手搓**：群列表 `feishu_chat_list`、群公告
-`feishu_chat_announcement`/`_set`/`_clear`、群设置 `feishu_chat_update`、禁言
-`feishu_chat_mute`、转让群主 `feishu_chat_transfer_owner`、解散群
-`feishu_chat_dismiss`、群菜单 `feishu_chat_menu_*`、群标签页 `feishu_chat_tab*`。
-这些端点各自都有一个「照着文档写也会错」的地方（公告是 docx 文档且按 revision 乐观锁、
-禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、解散不可逆），
-所以护栏在工具里，不在这张表里。
+**知识库读的空结果不代表没有**：机器人通常不是任何知识库的成员，这时飞书**返回成功但内容是空的**
+（不是报没权限）。所以上面三个 wiki 读端点拿到空 `items` / 空 `node` 时，别当成「没有知识库」
+或「节点不存在」—— 带上 `user_key` 用 `prefer="user"` 再问一次，以那个人的身份看。第二次
+还是空，才是真的空。
 
-### 培训
+### 电子表格（读工作表清单）
 
 | 要什么 | method + uri |
 |---|---|
-| 课程报名记录 | `GET /open-apis/elearning/v2/course_registrations` — query: `page_size`, `user_id_type` |
+| 列工作表（拿 `sheet_id`） | `GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query` |
+
+返回 `data.sheets[]`，每项里 `sheet_id`、`title`、`index`，行列数在 `grid_properties.row_count` /
+`.column_count`。**每个区间都写成 `"<sheet_id>!A1:B2"`，而 `sheet_id` 在表格网址里是没有的**，
+所以不知道时先打这个端点。`:spreadsheet_token` 是网址 `/sheets/` 后面那段；wiki 里的表格要先
+用节点详情换 `obj_token`。
+
+读区间、写入、套格式都还是专用工具（`feishu_sheet_read` / `_write` / `_append` / `_format`）——
+读要把 @人 和富文本压平成可见文字，写要校验网格坐标，裸 `!A1` 会静默丢数据。
+
+**群的运营看 `feishu-chat` 那份接口表**（建群拉人、群列表、群设置、禁言、转让群主、
+解散群、群菜单、群标签页都在里面）。这些端点各自都有一个「照着文档写也会错」的地方，
+所以护栏在那份 rules 里 —— 禁言不在群设置那个 body 里、加人权限和群名片权限必须成对、
+解散群要 `confirm="解散群"`。群公告是唯一还留着工具的（`feishu_chat_announcement`/`_set`/
+`_clear`），因为公告是 docx 文档且要按 revision 乐观锁。
+
+### 培训
+
+课程报名记录跟着任务一起搬走了，**看 `feishu-task` 那份接口表**。`user_ids` 是
+**重复同名 key** 的查询参数，逗号拼成一个串会得到一页空结果而不是报错。
+
+## 两条有护栏的端点
+
+上面绝大多数端点是纯转发，填错了飞书会报错。这两条不是 —— 它们的错法是静默的，
+所以写成可执行的 `rules`，发请求之前就拦：
+
+```rules
+- endpoint: GET /open-apis/sheets/v3/spreadsheets/:spreadsheet_token/sheets/query
+  token: tenant_then_user
+  pitfalls:
+    - 返回的 sheet_id 才是区间前缀, 表格网址里没有它;区间一律写成 "<sheet_id>!A1:B2"。
+    - 行列数在 grid_properties.row_count / column_count 里, 不在 sheets[] 的顶层。
+    - row_count 是表格的上限而不是有数据的行数, 拿它当数据范围会读回一大片空行。
+    - wiki 里的表格要先用 GET /open-apis/wiki/v2/spaces/get_node 换 obj_token, 别拿 node token 打这里。
+
+- endpoint: GET /open-apis/wiki/v2/spaces/get_node
+  token: tenant_then_user
+  required: [query.token]
+  pitfalls:
+    - token 是网址 /wiki/ 后面那段 node token, 放 query 而不是 uri 占位符(这个端点没有占位符)。
+    - obj_token 才是文档 id, 读正文用它;obj_type 是 docx/sheet/bitable 等, 决定后面用哪个读法。
+    - 机器人不是知识库成员时飞书返回成功但 data.node 是空的, 不是报错。空了要带 user_key 用 prefer=user 再问一次, 别当成节点不存在。
+```
+
+`token: tenant_then_user` 只在**被拒**时回落到用户身份，而空结果不是被拒 —— 所以第二条的
+空结果重试要你自己发起，rules 只负责把这件事讲在你眼前。
 
 ## 分页
 

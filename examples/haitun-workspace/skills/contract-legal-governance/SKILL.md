@@ -29,7 +29,7 @@ category: productivity
 - **对法律条款做定性或风险结论**（是否违法、是否显失公平、违约责任是否过重、能否解除等）——
   且结论**必须带权威出处**（法律名 + 条号 + 官方链接），无出处不得下结论。
 - 对外发出合同、提交盖章/用印审批、代提交任何合同类审批（`feishu_approval_create`）。
-- 删除合同文件（`feishu_drive_delete_file`）、改台账里已确认的关键字段（金额/主体/到期日/状态）。
+- 删除合同文件（`feishu_api` 调 `DELETE /open-apis/drive/v1/files/:file_token`）、改台账里已确认的关键字段（金额/主体/到期日/状态）。
 - 对外广播 / 群发合同或审查结论、触碰他人隐私或商业秘密数据。
 
 ## 默认分档口径（可用 `skill_manage` 改本文件调整）
@@ -66,9 +66,9 @@ category: productivity
 ## 每次动作必须留痕（小事也要）
 
 海豚每做一个动作，必须：
-1. 在合同台账（`feishu_bitable_create_record`）里写一行或更新对应行（事项 / 关键字段 / 判定档位 / 处置 / 依据 / 时间）。
+1. 在合同台账（`feishu_api` POST /open-apis/bitable/v1/apps/:app_token/tables/:table_id/records）里写一行或更新对应行（事项 / 关键字段 / 判定档位 / 处置 / 依据 / 时间）。
 2. 用一句话说明为什么判为该档、依据哪条口径或哪条出处。
-3. 涉及审批放行的，以**真实审批人的 user_id** 通过 `feishu_approval_decide` 执行；
+3. 涉及审批放行的，以**真实审批人的 user_id** 通过 `feishu_api` POST /open-apis/approval/v4/tasks/approve / POST /open-apis/approval/v4/tasks/reject 执行；
    代员工发起合同审批用 `feishu_approval_create` 且申请人记在本人 open_id 名下（见 [`contract-review-sop`]）。
 
 留痕不可省略：没有台账记录的动作视为未完成。
