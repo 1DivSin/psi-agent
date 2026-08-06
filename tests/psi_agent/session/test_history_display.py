@@ -48,6 +48,48 @@ def test_messages_for_ai_rewrites_legacy_schedule_roles() -> None:
     assert not is_displayable_chat_message({"role": "user_schedule", "content": "heartbeat"})
 
 
+def test_messages_for_ai_skips_reasoning_only_assistant_rows() -> None:
+    projected = messages_for_ai(
+        [
+            {"role": "user", "content": "confirm"},
+            {"role": "assistant", "reasoning": "internal only", "kind": KIND_CHAT},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning": "legacy internal only",
+                "tool_calls": [],
+                "kind": KIND_CHAT,
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    assert projected == [
+        {"role": "user", "content": "confirm"},
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_messages_for_ai_keeps_assistant_rows_with_content_or_tool_calls() -> None:
+    tool_calls = [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }
+    ]
+
+    assert messages_for_ai(
+        [
+            {"role": "assistant", "content": "answer", "reasoning": "internal"},
+            {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
+        ]
+    ) == [
+        {"role": "assistant", "content": "answer", "reasoning": "internal"},
+        {"role": "assistant", "reasoning": "internal", "tool_calls": tool_calls},
+    ]
+
+
 def test_is_displayable_filters_by_kind_whitelist() -> None:
     assert is_displayable_chat_message({"role": "user", "content": "hi", "kind": KIND_CHAT})
     assert is_displayable_chat_message({"role": "assistant", "content": "hey"})  # omit → chat
