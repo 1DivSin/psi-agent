@@ -146,6 +146,9 @@ import { ArtifactDrawer } from "./workspace-overlays";
 
 import { NewTaskWorkspace, TemplateLibrary } from "./secondary-views";
 import UserHub from "../components/user-hub/UserHub";
+import FirstRunGuide from "../components/FirstRunGuide";
+import FirstRunSpotlight from "../components/FirstRunSpotlight";
+import TaskStatusTip from "../components/TaskStatusTip";
 import { collectDeliverableFiles } from "../utils/filePreviewUtils";
 
 type Props = {
@@ -168,6 +171,14 @@ export default function HaiTunAgentWorkspace({
   const [bootReady, setBootReady] = useState(false);
   /** Only open Hub models when no AI is available after open-and-use (not on every refresh). */
   const [openModelsOnce, setOpenModelsOnce] = useState(false);
+  /** First-run guide: shows only for a fresh workspace with no historical tasks. */
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
+  const [firstRunSpotlightStep, setFirstRunSpotlightStep] = useState<0 | 1 | 2>(0);
+  const [isFirstRunUser, setIsFirstRunUser] = useState(false);
+  const [taskStatusTipVisible, setTaskStatusTipVisible] = useState(false);
+  const taskStatusTipAcknowledgedRef = useRef(false);
+  const taskStatusTipTaskIdRef = useRef<string | null>(null);
+  const [hubOpenNonce, setHubOpenNonce] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -522,6 +533,21 @@ export default function HaiTunAgentWorkspace({
     };
   }, [workspaceNorm, showToast]);
 
+  // First-run guide: shown only for a fresh workspace with no historical tasks.
+  const hubOpenRequest = useMemo(
+    () => (hubOpenNonce > 0 ? { nonce: hubOpenNonce, panel: "models" as const } : null),
+    [hubOpenNonce],
+  );
+
+  const firstRunEligibilityCheckedRef = useRef(false);
+  useEffect(() => {
+    if (!bootReady || firstRunEligibilityCheckedRef.current) return;
+    firstRunEligibilityCheckedRef.current = true;
+    if (tasks.length > 0) return;
+    setIsFirstRunUser(true);
+    setFirstRunSpotlightStep(1);
+  }, [bootReady, tasks.length]);
+
   // Warm a few recent histories so sidebar → focus matches dialogue-bar snappiness.
   const historyWarmBootRef = useRef(false);
   useEffect(() => {
@@ -718,6 +744,41 @@ export default function HaiTunAgentWorkspace({
     setSidebarPanel(null);
     setSidebarOpen(false);
   }, [collapseChat]);
+
+  const closeFirstRun = useCallback(() => {
+    setFirstRunOpen(false);
+  }, []);
+
+  const confirmFirstRunSpotlight = useCallback((step: 1 | 2) => {
+    if (step === 1) {
+      setFirstRunSpotlightStep(2);
+      return;
+    }
+    setFirstRunSpotlightStep(0);
+    setFirstRunOpen(true);
+  }, []);
+
+  const maybeShowTaskStatusTip = useCallback(() => {
+    if (!isFirstRunUser || taskStatusTipAcknowledgedRef.current) return;
+    window.setTimeout(() => setTaskStatusTipVisible(true), 450);
+  }, [isFirstRunUser]);
+
+  const closeTaskStatusTip = useCallback(() => {
+    taskStatusTipAcknowledgedRef.current = true;
+    setTaskStatusTipVisible(false);
+  }, []);
+
+  const configureFirstRun = useCallback(() => {
+    setFirstRunOpen(false);
+    setHubOpenNonce((n) => n + 1);
+    showToast("模型池已打开：选择模型后即可开始任务");
+  }, [showToast]);
+
+  const startTaskFirstRun = useCallback(() => {
+    setFirstRunOpen(false);
+    openNewTask();
+    showToast("在这里输入任务描述并发送，任务会出现在任务卡中");
+  }, [openNewTask, showToast]);
 
   const applyStreamBodies = (cardId: string, seg: ContentSegments) => {
     const { interimText, text } = streamSegmentBodies(seg);
@@ -1361,6 +1422,8 @@ export default function HaiTunAgentWorkspace({
     setDragX(0);
     setCardTransition(null);
     setChatExpanded(true);
+    taskStatusTipTaskIdRef.current = task.id;
+    maybeShowTaskStatusTip();
   };
 
   const useTemplate = (template: TaskTemplate) => {
@@ -1932,7 +1995,7 @@ export default function HaiTunAgentWorkspace({
           </div>
         </div>
 
-        <button type="button" className="brand-block" onClick={goHome} aria-label="返回 HaiTun Agent">
+        <button type="button" className="brand-block" onClick={() => openNewTask()} aria-label="新建任务/聊天">
           <BrandLogo />
           <div><strong>HaiTun</strong><span>Agent</span></div>
         </button>
@@ -2053,6 +2116,7 @@ export default function HaiTunAgentWorkspace({
             onToast={showToast}
             openModelsOnMount={bootReady && openModelsOnce}
             onModelsAutoOpened={() => setOpenModelsOnce(false)}
+            openPanelRequest={hubOpenRequest}
             onAisChanged={(ais: AiInfo[]) => {
               if (ais.length === 0) {
                 setAiId(null);
@@ -2191,6 +2255,26 @@ export default function HaiTunAgentWorkspace({
           onRevise={reviseArtifact}
         />
       )}
+      {firstRunOpen && (
+        <FirstRunGuide
+          onClose={closeFirstRun}
+          onConfigureModels={configureFirstRun}
+          onStartTask={startTaskFirstRun}
+        />
+      )}
+      {firstRunSpotlightStep === 1 && (
+        <FirstRunSpotlight step={1} onConfirm={() => confirmFirstRunSpotlight(1)} />
+      )}
+      {firstRunSpotlightStep === 2 && (
+        <FirstRunSpotlight step={2} onConfirm={() => confirmFirstRunSpotlight(2)} />
+      )}
+      {taskStatusTipVisible &&
+        mainView === "workspace" &&
+        chatExpanded &&
+        (taskStatusTipTaskIdRef.current == null ||
+          currentTask?.id === taskStatusTipTaskIdRef.current) && (
+          <TaskStatusTip onClose={closeTaskStatusTip} />
+        )}
       {toast && <div className="toast" role="status" aria-live="polite"><Check size={16} /> {toast}</div>}
     </div>
   );

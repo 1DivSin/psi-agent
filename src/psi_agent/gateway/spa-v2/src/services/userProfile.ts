@@ -29,8 +29,8 @@ export function readAvatarDataUrl(file: File): Promise<string> {
       reject(new Error('请选择图片文件'))
       return
     }
-    if (file.size > 512 * 1024) {
-      reject(new Error('图片请小于 512KB'))
+    if (file.size > 3 * 1024 * 1024) {
+      reject(new Error('图片请小于 3MB'))
       return
     }
     const reader = new FileReader()
