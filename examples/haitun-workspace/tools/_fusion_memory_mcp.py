@@ -411,7 +411,30 @@ class MemoryMcpRouter:
     async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         return await self.call_tool_for_session(get_session_id(), name, arguments, retryable=retryable)
 
-    async def call_organization_tool(
+    async def call_organization_read_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        session_id = get_session_id().strip()
+        if _open_id_from_session(session_id) is None:
+            return _error(
+                "memory_user_not_configured",
+                "Organization memory requires a trusted Feishu Session",
+                False,
+            )
+        result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        return await self._retry_organization_binding(
+            session_id,
+            name,
+            arguments,
+            result,
+            retryable=retryable,
+        )
+
+    async def call_organization_write_tool(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -434,12 +457,56 @@ class MemoryMcpRouter:
         result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
         error = result.get("error")
         error_code = error.get("code") if isinstance(error, dict) else None
-        if error_code != "organization_membership_stale":
+        if error_code == "organization_membership_stale":
+            membership = await sync_current_membership(self._config, open_id, force=True)
+            if membership.get("ok") is not True:
+                return membership
+            result = await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        return await self._retry_organization_binding(
+            session_id,
+            name,
+            arguments,
+            result,
+            retryable=retryable,
+        )
+
+    async def _retry_organization_binding(
+        self,
+        session_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        error = result.get("error")
+        error_code = error.get("code") if isinstance(error, dict) else None
+        if error_code != "organization_required" or not self._config.auto_register_feishu:
             return result
-        membership = await sync_current_membership(self._config, open_id, force=True)
-        if membership.get("ok") is not True:
-            return membership
-        return await self.call_tool_for_session(session_id, name, arguments, retryable=retryable)
+        return await self._call_with_refreshed_registration(
+            session_id,
+            name,
+            arguments,
+            retryable=retryable,
+        )
+
+    async def _call_with_refreshed_registration(
+        self,
+        session_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        try:
+            refreshed = await refresh_feishu_registration(session_id, self._config)
+        except MemoryConfigError as exc:
+            return _error(exc.code, str(exc), exc.retryable)
+        client, stale_client = self._client_for(session_id, refreshed)
+        if stale_client is not None:
+            stale_client.request_close()
+        result = await client.call_tool(name, arguments, retryable=retryable)
+        return dict(result) if isinstance(result, _TransportAuthRejectedResult) else result
 
     async def call_tool_for_session(
         self,
@@ -464,15 +531,12 @@ class MemoryMcpRouter:
             return dict(result)
         # HTTP authentication rejects the request before MCP dispatch, so one
         # replay with the replacement token cannot duplicate a tool write.
-        try:
-            refreshed = await refresh_feishu_registration(session_id, self._config)
-        except MemoryConfigError as exc:
-            return _error(exc.code, str(exc), exc.retryable)
-        client, stale_client = self._client_for(session_id, refreshed)
-        if stale_client is not None:
-            stale_client.request_close()
-        result = await client.call_tool(name, arguments, retryable=retryable)
-        return dict(result) if isinstance(result, _TransportAuthRejectedResult) else result
+        return await self._call_with_refreshed_registration(
+            session_id,
+            name,
+            arguments,
+            retryable=retryable,
+        )
 
     async def activate_current_session(self, workspace_root: Any) -> dict[str, Any]:
         session_id = get_session_id().strip()

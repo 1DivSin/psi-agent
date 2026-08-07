@@ -20,6 +20,7 @@ from typing import Any
 
 import anyio
 import httpx
+import pytest
 
 from psi_agent.session.tool_registry import ToolFunction, ToolRegistry
 
@@ -85,7 +86,7 @@ async def test_memory_read_tools_route_one_explicit_visibility(monkeypatch):
     assert organization["ok"] is True
     assert invalid["error"]["code"] == "invalid_argument"
     assert memory.calls == [("memory_search", {"query": "release plan", "limit": 8, "visibility": "personal"}, True)]
-    assert memory.organization_calls == [
+    assert memory.organization_read_calls == [
         ("memory_search", {"query": "release plan", "limit": 8, "visibility": "organization"}, True)
     ]
     search_schema = ToolFunction.from_callable(search_module.memory_search).parameters["properties"]
@@ -136,7 +137,7 @@ async def test_organization_memory_add_exposes_fact_fields_without_identity(monk
 
     assert result["ok"] is True
     assert memory.calls == []
-    name, arguments, retryable = memory.organization_calls[0]
+    name, arguments, retryable = memory.organization_write_calls[0]
     assert name == "organization_memory_add"
     assert retryable is False
     assert arguments == {
@@ -151,7 +152,7 @@ async def test_organization_memory_add_exposes_fact_fields_without_identity(monk
     }
 
 
-async def test_organization_router_refreshes_stale_membership_once(monkeypatch):
+async def test_organization_write_router_refreshes_stale_membership_once(monkeypatch):
     mcp_module = importlib.import_module("_fusion_memory_mcp")
     router = mcp_module.MemoryMcpRouter(SimpleNamespace())
     sync_calls: list[tuple[str, bool]] = []
@@ -172,7 +173,7 @@ async def test_organization_router_refreshes_stale_membership_once(monkeypatch):
     monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
     monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_member1")
 
-    result = await router.call_organization_tool("memory_search", {"query": "project"}, retryable=True)
+    result = await router.call_organization_write_tool("memory_search", {"query": "project"}, retryable=True)
 
     assert result == {"ok": True}
     assert sync_calls == [("ou_member1", True), ("ou_member1", True)]
@@ -182,7 +183,7 @@ async def test_organization_router_refreshes_stale_membership_once(monkeypatch):
     ]
 
 
-async def test_organization_router_rechecks_cached_member_before_memory_access(monkeypatch):
+async def test_organization_write_router_rechecks_cached_member_before_memory_access(monkeypatch):
     mcp_module = importlib.import_module("_fusion_memory_mcp")
     router = mcp_module.MemoryMcpRouter(SimpleNamespace())
     tool_calls: list[str] = []
@@ -208,10 +209,101 @@ async def test_organization_router_rechecks_cached_member_before_memory_access(m
     monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
     monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_former_member")
 
-    result = await router.call_organization_tool("memory_search", {"query": "project"}, retryable=True)
+    result = await router.call_organization_write_tool("memory_search", {"query": "project"}, retryable=True)
 
     assert result["error"]["code"] == "organization_access_denied"
     assert tool_calls == []
+
+
+@pytest.mark.parametrize(
+    ("auto_register", "replay_result", "expected_replays"),
+    [
+        (True, {"ok": True, "result": {"status": "ok"}}, 1),
+        (True, {"ok": False, "error": {"code": "organization_required", "retryable": False}}, 1),
+        (False, {"ok": True}, 0),
+    ],
+)
+async def test_organization_write_router_reregisters_at_most_once(
+    monkeypatch,
+    auto_register,
+    replay_result,
+    expected_replays,
+):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace(auto_register_feishu=auto_register))
+    required = {"ok": False, "error": {"code": "organization_required", "retryable": False}}
+    replay_calls: list[str] = []
+
+    async def sync_membership(_config, _open_id: str, *, force: bool = False):
+        assert force is True
+        return {"ok": True}
+
+    async def call_for_session(_session_id: str, _name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        return required
+
+    async def replay(session_id: str, _name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        replay_calls.append(session_id)
+        return replay_result
+
+    monkeypatch.setattr(mcp_module, "sync_current_membership", sync_membership)
+    monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
+    monkeypatch.setattr(router, "_call_with_refreshed_registration", replay)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_member1")
+
+    result = await router.call_organization_write_tool("memory_search", {"query": "project"}, retryable=True)
+
+    assert result == (replay_result if expected_replays else required)
+    assert replay_calls == ["feishu-ou_member1"] * expected_replays
+
+
+async def test_organization_read_router_skips_membership_sync(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace(auto_register_feishu=False))
+    tool_calls: list[str] = []
+
+    async def unexpected_sync(*_args, **_kwargs):
+        raise AssertionError("organization reads must not require writer-group membership")
+
+    async def call_for_session(_session_id: str, name: str, _arguments: dict[str, Any], *, retryable: bool):
+        del retryable
+        tool_calls.append(name)
+        return {"ok": True}
+
+    monkeypatch.setattr(mcp_module, "sync_current_membership", unexpected_sync)
+    monkeypatch.setattr(router, "call_tool_for_session", call_for_session)
+    monkeypatch.setattr(mcp_module, "get_session_id", lambda: "feishu-ou_reader1")
+
+    result = await router.call_organization_read_tool("memory_search", {"query": "project"}, retryable=True)
+
+    assert result == {"ok": True}
+    assert tool_calls == ["memory_search"]
+
+
+async def test_registration_refresh_returns_safe_configuration_error(monkeypatch):
+    mcp_module = importlib.import_module("_fusion_memory_mcp")
+    router = mcp_module.MemoryMcpRouter(SimpleNamespace(auto_register_feishu=True))
+
+    async def reject_refresh(_session_id: str, _config: Any):
+        raise mcp_module.MemoryConfigError(
+            "registration_failed",
+            "Fusion Memory registration failed",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(mcp_module, "refresh_feishu_registration", reject_refresh)
+
+    result = await router._call_with_refreshed_registration("feishu-ou_member1", "memory_search", {}, retryable=True)
+
+    assert result == {
+        "ok": False,
+        "error": {
+            "code": "registration_failed",
+            "message": "Fusion Memory registration failed",
+            "retryable": True,
+        },
+    }
 
 
 async def test_memory_router_reregisters_once_after_unauthorized(monkeypatch):
@@ -1239,7 +1331,8 @@ class _MemoryStub:
     def __init__(self, **responses: list[dict[str, Any]]) -> None:
         self.responses = {name: list(values) for name, values in responses.items()}
         self.calls: list[tuple[str, dict[str, Any], bool]] = []
-        self.organization_calls: list[tuple[str, dict[str, Any], bool]] = []
+        self.organization_read_calls: list[tuple[str, dict[str, Any], bool]] = []
+        self.organization_write_calls: list[tuple[str, dict[str, Any], bool]] = []
 
     async def call_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
         self.calls.append((name, arguments, retryable))
@@ -1251,8 +1344,22 @@ class _MemoryStub:
             "error": {"code": "not_configured", "message": f"no response for {name}", "retryable": False},
         }
 
-    async def call_organization_tool(self, name: str, arguments: dict[str, Any], *, retryable: bool) -> dict[str, Any]:
-        self.organization_calls.append((name, arguments, retryable))
+    async def call_organization_read_tool(
+        self, name: str, arguments: dict[str, Any], *, retryable: bool
+    ) -> dict[str, Any]:
+        self.organization_read_calls.append((name, arguments, retryable))
+        queue = self.responses.get(name)
+        if queue:
+            return queue.pop(0)
+        return {
+            "ok": False,
+            "error": {"code": "not_configured", "message": f"no response for {name}", "retryable": False},
+        }
+
+    async def call_organization_write_tool(
+        self, name: str, arguments: dict[str, Any], *, retryable: bool
+    ) -> dict[str, Any]:
+        self.organization_write_calls.append((name, arguments, retryable))
         queue = self.responses.get(name)
         if queue:
             return queue.pop(0)
