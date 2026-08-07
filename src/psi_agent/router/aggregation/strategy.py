@@ -12,7 +12,8 @@ from loguru import logger
 
 from ..errors import RouterUpstreamError
 from ..models import CompletionResult, RouterTarget
-from ..request import copy_public_request_body
+from ..privacy import redact_private_sockets
+from ..request import copy_public_request_body, copy_target_request_body
 from .errors import AggregationError
 from .models import AggregationConfig, AggregationFeedback
 from .prompts import build_aggregation_messages
@@ -47,24 +48,17 @@ class AggregationStrategy:
         """Collect ordered branch evidence, then yield validated synthesis events."""
 
         slots: list[AggregationFeedback | None] = [None] * len(self.config.targets)
-        private_socket_representations: set[str] = set()
-        for private_socket in (
+        private_sockets = (
             self.config.aggregator_socket,
             *(item.socket for item in self.config.targets),
-        ):
-            represented_socket = repr(private_socket)
-            private_socket_representations.update((private_socket, represented_socket, represented_socket[1:-1]))
-        ordered_private_socket_representations = sorted(
-            private_socket_representations,
-            key=lambda value: (-len(value), value),
         )
 
         async def collect(index: int, target: RouterTarget) -> None:
             try:
                 result = await self.client.complete(
                     socket=target.socket,
-                    body=copy_public_request_body(body=body),
-                    timeout=self.config.target_timeout,
+                    body=copy_target_request_body(body=body, target=target),
+                    timeout=target.timeout if target.timeout is not None else self.config.target_timeout,
                 )
                 if not result.content.strip() and not result.tool_calls:
                     raise RouterUpstreamError("upstream returned no usable content or tool calls")
@@ -77,15 +71,12 @@ class AggregationStrategy:
                     tool_calls=tuple(deepcopy(result.tool_calls)),
                 )
             except Exception as error:
-                summary = str(error)
-                for representation in ordered_private_socket_representations:
-                    summary = summary.replace(representation, "<private-socket>")
                 slots[index] = AggregationFeedback(
                     candidate_id=target.candidate_id,
                     description=target.description,
                     status="error",
                     error_type=type(error).__name__,
-                    error=summary[:512],
+                    error=redact_private_sockets(text=str(error), sockets=private_sockets),
                 )
 
         async with anyio.create_task_group() as task_group:
@@ -102,8 +93,15 @@ class AggregationStrategy:
             )
         if not any(item.status == "success" for item in feedback):
             raise AggregationError("All aggregation upstreams failed")
+        if self.config.require_all_targets and any(
+            item.status != "success" or item.finish_reason not in {"stop", "tool_calls"} for item in feedback
+        ):
+            raise AggregationError("Strict aggregation requires every target to complete successfully")
 
-        aggregator_body = copy_public_request_body(body=body)
+        aggregator_body = copy_public_request_body(
+            body=body,
+            request_overrides=self.config.aggregator_request_overrides,
+        )
         aggregator_body["messages"] = build_aggregation_messages(
             original_messages=cast(list[dict[str, Any]], body["messages"]),
             feedback=feedback,

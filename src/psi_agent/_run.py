@@ -31,15 +31,33 @@ Config format (``run-config.yml``):
                                    # fire too (an enumerated whitelist misses them).
 
     - type: router
+      mode: fallback
+      session_socket: ./fallback.sock
+      router_socket: null
+      upstream:
+        - [./primary.sock, primary model]
+        - [./backup.sock, backup model]
+      router_timeout: null
+      target_timeout: 60
+      max_context_chars: 12000
+      target_request_overrides:
+        max_tokens: 4096
+      candidate_request_overrides:
+        candidate-2:
+          max_tokens: 8192
+      candidate_timeouts:
+        candidate-2: 120
+
+    - type: router
       mode: aggregation
       session_socket: ./router.sock
       router_socket: ./aggregate-ai.sock
       upstream:
-        - [./code.sock, coding]
-        - [./research.sock, research]
+        - [./fallback.sock, resilient answer, router]
+        - [./research.sock, independent research]
       router_timeout: 30
-      target_timeout: null
-      max_context_chars: 12000
+      control_request_overrides:
+        max_tokens: 2048
 
     - type: channel
       name: repl                    # "cli", "repl", "telegram", or "feishu"
@@ -94,7 +112,7 @@ class Run:
     """Path to a YAML config file listing components to run."""
 
     async def run(self) -> None:
-        setup_logging(verbose=True)
+        setup_logging(verbose=False)
         await _run_config(self.config)
 
 
@@ -154,7 +172,8 @@ async def _run_config(config_path: Path) -> None:
                 upstream = item.get("upstream")
                 if isinstance(upstream, list):
                     item["upstream"] = [
-                        tuple(entry) if isinstance(entry, list) and len(entry) == 2 else entry for entry in upstream
+                        tuple(entry) if isinstance(entry, list) and len(entry) in {2, 3} else entry
+                        for entry in upstream
                     ]
                 c = _build(Router, item)
                 logger.info(
