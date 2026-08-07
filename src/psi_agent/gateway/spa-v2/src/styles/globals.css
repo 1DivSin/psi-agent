@@ -5189,6 +5189,28 @@ button.metric-cell:disabled {
   min-height: 40px;
   padding: 10px 16px;
 }
+.focus-chat-live-thinking {
+  max-height: 220px;
+  overflow: auto;
+  word-break: break-word;
+  color: var(--text-secondary, #4b5563);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+.focus-chat-live-thinking-prose {
+  white-space: pre-wrap;
+}
+.focus-chat-live-thinking-step {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px dashed rgba(11, 47, 91, 0.28);
+  border-radius: 10px;
+  background: rgba(247, 249, 252, 0.92);
+  color: #3d5166;
+}
+.focus-chat-live-thinking-step > :last-child {
+  margin-bottom: 0;
+}
 .focus-chat-progress-log {
   display: flex;
   flex-direction: column;
