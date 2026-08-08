@@ -11,7 +11,7 @@ import HubProfilePanel from './HubProfilePanel'
 import HubSettingsPanel from './HubSettingsPanel'
 import './user-hub.css'
 
-export type HubPanel = 'profile' | 'models' | 'settings' | 'advanced' | null
+export type HubPanel = 'profile' | 'models' | 'settings' | 'settingsAdvanced' | 'advanced' | null
 
 type Props = {
   selectedAiId: string | null
@@ -51,7 +51,6 @@ export default function UserHub({
   const [userAvatar, setUserAvatar] = useState(readStoredAvatar)
   const [aiCount, setAiCount] = useState(0)
   const [freeModelNoticeOpen, setFreeModelNoticeOpen] = useState(false)
-  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
 
   useEffect(() => {
     if (!openModelsOnMount) return
@@ -77,8 +76,8 @@ export default function UserHub({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       if (freeModelNoticeOpen) return
-      if (advancedSettingsOpen) {
-        setAdvancedSettingsOpen(false)
+      if (panel === 'settingsAdvanced') {
+        setPanel('settings')
         return
       }
       if (panel === 'advanced') {
@@ -92,7 +91,7 @@ export default function UserHub({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [advancedSettingsOpen, freeModelNoticeOpen, panel])
+  }, [freeModelNoticeOpen, panel])
 
   const initial = userName.trim().charAt(0).toUpperCase()
   const displayName = userName.trim() || '用户'
@@ -131,7 +130,7 @@ export default function UserHub({
           </button>
           <button
             type="button"
-            className={`user-hub-shortcut${panel === 'settings' ? ' active' : ''}`}
+            className={`user-hub-shortcut${panel === 'settings' || panel === 'settingsAdvanced' ? ' active' : ''}`}
             title="设置"
             aria-label="设置"
             onClick={() => openPanel('settings')}
@@ -168,14 +167,14 @@ export default function UserHub({
         onClose={() => setPanel(null)}
         workspace={workspace}
         onChangeWorkspace={onChangeWorkspace}
-        onOpenAdvancedSettings={() => setAdvancedSettingsOpen(true)}
+        onOpenAdvancedSettings={() => setPanel('settingsAdvanced')}
       />
       <HubAdvancedSettingsPanel
-        show={advancedSettingsOpen}
-        onClose={() => setAdvancedSettingsOpen(false)}
+        show={panel === 'settingsAdvanced'}
+        onClose={() => setPanel(null)}
+        onBackToSettings={() => setPanel('settings')}
         agent={agent}
         onChangeAgent={() => {
-          setAdvancedSettingsOpen(false)
           setPanel(null)
           onChangeAgent?.()
         }}

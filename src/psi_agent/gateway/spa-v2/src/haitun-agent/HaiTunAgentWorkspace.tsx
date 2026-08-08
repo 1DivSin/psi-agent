@@ -64,6 +64,7 @@ import {
   fetchTodoSegment,
   generateSummary,
   generateTitle,
+  listAis,
   listSessions,
   listSummaries,
   listTitles,
@@ -79,7 +80,6 @@ import {
   ensureSessionAi,
   hydrateAiForSessions,
   pickPreferredAi,
-  purgePlaceholderAis,
   readStoredAiId,
   writeStoredAiId,
 } from "../services/bootstrapAi";
@@ -115,7 +115,6 @@ import {
 } from "../services/pendingDeliveries";
 import {
   normalizeWorkspacePath,
-  sessionBackendId,
   sessionMatchesWorkspace,
 } from "../services/workspaceMatch";
 
@@ -199,11 +198,11 @@ export default function HaiTunAgentWorkspace({
   const [chatAttachments, setChatAttachments] = useState<Record<string, File[]>>({});
   const [chatExpanded, setChatExpanded] = useState(false);
   const [contextPanelCollapsed, setContextPanelCollapsed] = useState(true);
-  const [typingCard, setTypingCard] = useState<string | null>(null);
-  /** Growing process lines (规划下一步 + sealed steps); cleared when turn ends. */
-  const [turnProgressLog, setTurnProgressLog] = useState<ProgressLog | null>(null);
+  const [streamingCards, setStreamingCards] = useState<Record<string, boolean>>({});
+  /** Growing process lines (规划下一步 + sealed steps); kept per card so background turns stay live. */
+  const [turnProgressLogs, setTurnProgressLogs] = useState<Record<string, ProgressLog | null>>({});
   /** Raw thinking prose shown live until the final body starts. */
-  const [liveThinkingText, setLiveThinkingText] = useState("");
+  const [liveThinkingByCard, setLiveThinkingByCard] = useState<Record<string, string>>({});
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [cardTransition, setCardTransition] = useState<CardTransition | null>(null);
@@ -222,17 +221,18 @@ export default function HaiTunAgentWorkspace({
   const globalSearchRef = useRef<HTMLInputElement | null>(null);
   const activeChatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const attachInputRef = useRef<HTMLInputElement | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  /** Bumped each runChatTurn so a superseded/aborted turn cannot keep appending deltas. */
-  const streamEpochRef = useRef(0);
+  /** Per-card AbortControllers: starting a new task must not abort another task's stream. */
+  const abortByCardRef = useRef<Record<string, AbortController>>({});
+  /** Bumped per card each runChatTurn so a superseded/aborted turn cannot keep appending deltas. */
+  const streamEpochByCardRef = useRef<Record<string, number>>({});
   /** Accumulate SSE reasoning (thinking + tool markers) for post-turn「已思考」expand. */
-  const turnReasoningRef = useRef("");
+  const turnReasoningByCardRef = useRef<Record<string, string>>({});
   /** Sealed tool one-liners for the current turn (mirrors progress log ``lines``). */
-  const turnToolsRef = useRef<string[]>([]);
+  const turnToolsByCardRef = useRef<Record<string, string[]>>({});
   /** Content segments across tool rounds — interim bubble + last segment as final. */
-  const turnContentSegRef = useRef<ContentSegments>(contentSegmentsStart());
-  /** After Stop, block submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
-  const suppressSubmitUntilRef = useRef(0);
+  const turnContentSegByCardRef = useRef<Record<string, ContentSegments>>({});
+  /** After Stop, block that card's submit briefly — Stop↔Send swap under the same click would re-send the restored draft. */
+  const suppressSubmitUntilByCardRef = useRef<Record<string, number>>({});
   const historyLoadedRef = useRef<Set<string>>(new Set(["overview"]));
   /** Task ids with an in-flight GET /history (sidebar → focus empty-state spinner). */
   const [historyLoadingIds, setHistoryLoadingIds] = useState(() => new Set<string>());
@@ -462,15 +462,20 @@ export default function HaiTunAgentWorkspace({
   // While Agent runs, poll todos so middle step updates mid-turn (tool writes file).
   // Pass streaming=true so 「产出与确认」 stays working until the turn ends.
   useEffect(() => {
-    if (!typingCard || typingCard === "overview") return;
-    void refreshTodos(typingCard, true);
-    void refreshTodoSegments(typingCard);
+    const streamingIds = Object.keys(streamingCards);
+    if (!streamingIds.length) return;
+    for (const cardId of streamingIds) {
+      void refreshTodos(cardId, true);
+      void refreshTodoSegments(cardId);
+    }
     const id = window.setInterval(() => {
-      void refreshTodos(typingCard, true);
-      void refreshTodoSegments(typingCard);
+      for (const cardId of streamingIds) {
+        void refreshTodos(cardId, true);
+        void refreshTodoSegments(cardId);
+      }
     }, 2500);
     return () => window.clearInterval(id);
-  }, [typingCard, refreshTodos, refreshTodoSegments]);
+  }, [streamingCards, refreshTodos, refreshTodoSegments]);
 
   const openArtifact = useCallback((task: Task, fileName?: string, listMode?: "new" | "history") => {
     void ensureHistory(task.id);
@@ -493,7 +498,7 @@ export default function HaiTunAgentWorkspace({
       setOpenModelsOnce(false);
       try {
         // One hydrate pipeline: sessions → revive dangling AI → titles/summaries → tasks.
-        // Empty AI must not skip sessions; missing Session backends must not survive refresh.
+        // Empty AI must not skip sessions.
         const [sessions, titles, summaries] = await Promise.all([
           listSessions(),
           listTitles(),
@@ -503,10 +508,7 @@ export default function HaiTunAgentWorkspace({
         const inWs = sessions.filter((s) =>
           sessionMatchesWorkspace(s.workspace, workspaceNorm),
         );
-        const { preferred, openModels } = await hydrateAiForSessions(
-          inWs.map((s) => sessionBackendId(s)),
-          readStoredAiId(),
-        );
+        const { preferred, openModels } = await hydrateAiForSessions(readStoredAiId());
         if (cancelled) return;
         setAiId(preferred?.id ?? null);
         setOpenModelsOnce(openModels);
@@ -532,7 +534,7 @@ export default function HaiTunAgentWorkspace({
     })();
     return () => {
       cancelled = true;
-      abortRef.current?.abort();
+      for (const controller of Object.values(abortByCardRef.current)) controller.abort();
     };
   }, [workspaceNorm, showToast]);
 
@@ -712,10 +714,15 @@ export default function HaiTunAgentWorkspace({
     const ok = window.confirm(`确认删除任务「${task.title}」？\n删除后 Session 与对话历史将无法恢复。`);
     if (!ok) return;
 
-    if (typingCard === task.id) {
-      abortRef.current?.abort();
-      abortRef.current = null;
-      setTypingCard(null);
+    if (streamingCards[task.id]) {
+      abortByCardRef.current[task.id]?.abort();
+      delete abortByCardRef.current[task.id];
+      setStreamingCards((current) => {
+        if (!current[task.id]) return current;
+        const next = { ...current };
+        delete next[task.id];
+        return next;
+      });
     }
 
     try {
@@ -770,7 +777,7 @@ export default function HaiTunAgentWorkspace({
     }
 
     showToast(`已删除任务「${task.shortTitle}」`);
-  }, [artifactTask?.id, currentIndex, goHome, showToast, tasks, typingCard]);
+  }, [artifactTask?.id, currentIndex, goHome, showToast, tasks, streamingCards]);
 
   const openNewTask = useCallback((draft?: string, category = "自由任务", returnView: MainView = "workspace") => {
     setNewTaskReturnExpanded(chatExpanded);
@@ -889,7 +896,7 @@ export default function HaiTunAgentWorkspace({
     files: Array<File | ChatFile> = [],
     titleSource?: string,
   ) => {
-    // 「使用免费模型」会 clearAiPool，但 Session 仍挂着旧 ai_id → 复活同 id 免费后端。
+    // 免费切换/模型删除都不级联删 Session；旧 ai_id 缺失时用当前模型配置重绑旧 id。
     try {
       const sessions = await listSessions();
       const sess = sessions.find((s) => s.id === cardId);
@@ -940,18 +947,19 @@ export default function HaiTunAgentWorkspace({
       return;
     }
 
-    abortRef.current?.abort();
+    abortByCardRef.current[cardId]?.abort();
     const controller = new AbortController();
-    abortRef.current = controller;
-    const epoch = ++streamEpochRef.current;
-    const live = () => epoch === streamEpochRef.current && !controller.signal.aborted;
+    abortByCardRef.current[cardId] = controller;
+    const epoch = (streamEpochByCardRef.current[cardId] ?? 0) + 1;
+    streamEpochByCardRef.current[cardId] = epoch;
+    const live = () => epoch === streamEpochByCardRef.current[cardId] && !controller.signal.aborted;
 
-    setTypingCard(cardId);
-    setTurnProgressLog(progressLogStart());
-    turnReasoningRef.current = "";
-    turnToolsRef.current = [];
-    turnContentSegRef.current = contentSegmentsStart();
-    setLiveThinkingText("");
+    setStreamingCards((current) => ({ ...current, [cardId]: true }));
+    setTurnProgressLogs((current) => ({ ...current, [cardId]: progressLogStart() }));
+    turnReasoningByCardRef.current[cardId] = "";
+    turnToolsByCardRef.current[cardId] = [];
+    turnContentSegByCardRef.current[cardId] = contentSegmentsStart();
+    setLiveThinkingByCard((current) => ({ ...current, [cardId]: "" }));
     setTodoSegmentSelection((current) => ({ ...current, [cardId]: "live" }));
     const userVisible = titleSource ?? (text.trim() || "附件");
     let turnOk = false;
@@ -974,8 +982,11 @@ export default function HaiTunAgentWorkspace({
         {
           onText: (delta) => {
             if (!live()) return;
-            turnContentSegRef.current = appendContentSegment(turnContentSegRef.current, delta);
-            applyStreamBodies(cardId, turnContentSegRef.current);
+            turnContentSegByCardRef.current[cardId] = appendContentSegment(
+              turnContentSegByCardRef.current[cardId],
+              delta,
+            );
+            applyStreamBodies(cardId, turnContentSegByCardRef.current[cardId]);
           },
           onBlob: (name, data, path) => {
             if (!live()) return;
@@ -1005,32 +1016,37 @@ export default function HaiTunAgentWorkspace({
           onReasoning: (delta, kind) => {
             if (!live()) return;
             if (kind === "tool_call") {
-              turnContentSegRef.current = sealContentBeforeTools(turnContentSegRef.current);
-              applyStreamBodies(cardId, turnContentSegRef.current);
+              turnContentSegByCardRef.current[cardId] = sealContentBeforeTools(
+                turnContentSegByCardRef.current[cardId],
+              );
+              applyStreamBodies(cardId, turnContentSegByCardRef.current[cardId]);
             }
-            if (delta) turnReasoningRef.current += delta;
+            if (delta) turnReasoningByCardRef.current[cardId] += delta;
             if (
               delta
               && kind !== "tool_call"
               && kind !== "tool_result"
             ) {
-              setLiveThinkingText((current) => current + delta);
+              setLiveThinkingByCard((current) => ({
+                ...current,
+                [cardId]: (current[cardId] ?? "") + delta,
+              }));
             }
-            setTurnProgressLog((prev) => {
-              const next = applyProgressEvent(prev ?? progressLogStart(), kind, delta);
-              turnToolsRef.current = next.lines;
-              return next;
+            setTurnProgressLogs((prev) => {
+              const next = applyProgressEvent(prev[cardId] ?? progressLogStart(), kind, delta);
+              turnToolsByCardRef.current[cardId] = next.lines;
+              return { ...prev, [cardId]: next };
             });
           },
         },
       );
       // Some browsers end the body with done instead of throwing AbortError.
       if (!live()) {
-        if (epoch === streamEpochRef.current) restoreStoppedTurn(cardId, text, files);
+        if (epoch === streamEpochByCardRef.current[cardId]) restoreStoppedTurn(cardId, text, files);
         return;
       }
       turnOk = true;
-      assistantFull = settleContentSegments(turnContentSegRef.current).finalText || full.trim();
+      assistantFull = settleContentSegments(turnContentSegByCardRef.current[cardId]).finalText || full.trim();
       const hasBlob = blobs.length > 0;
       if (!full.trim() && !hasBlob && !assistantFull) {
         // No displayable reply — mark orphan user failed (same as history normalize).
@@ -1081,10 +1097,10 @@ export default function HaiTunAgentWorkspace({
       }
     } catch (e) {
       if (isAbortError(e) || controller.signal.aborted) {
-        if (epoch === streamEpochRef.current) restoreStoppedTurn(cardId, text, files);
+        if (epoch === streamEpochByCardRef.current[cardId]) restoreStoppedTurn(cardId, text, files);
         return;
       }
-      if (epoch !== streamEpochRef.current) return;
+      if (epoch !== streamEpochByCardRef.current[cardId]) return;
       const err = e instanceof Error ? e.message : String(e);
       setMessages((current) => {
         const list = [...(current[cardId] ?? [])];
@@ -1107,10 +1123,10 @@ export default function HaiTunAgentWorkspace({
       });
       showToast(err);
     } finally {
-      if (epoch === streamEpochRef.current) {
-        const reasoningRaw = turnReasoningRef.current.trim();
-        const tools = [...turnToolsRef.current];
-        const { finalText } = settleContentSegments(turnContentSegRef.current);
+      if (epoch === streamEpochByCardRef.current[cardId]) {
+        const reasoningRaw = (turnReasoningByCardRef.current[cardId] ?? "").trim();
+        const tools = [...(turnToolsByCardRef.current[cardId] ?? [])];
+        const { finalText } = settleContentSegments(turnContentSegByCardRef.current[cardId]);
         // Settle: drop temporary step bubble; keep only the last segment as body.
         if (!controller.signal.aborted) {
           setMessages((current) => {
@@ -1129,15 +1145,33 @@ export default function HaiTunAgentWorkspace({
             return current;
           });
         }
-        setTypingCard((current) => (current === cardId ? null : current));
-        setTurnProgressLog(null);
-        setLiveThinkingText("");
-        if (abortRef.current === controller) abortRef.current = null;
+        setStreamingCards((current) => {
+          if (!current[cardId]) return current;
+          const next = { ...current };
+          delete next[cardId];
+          return next;
+        });
+        setTurnProgressLogs((current) => {
+          if (!(cardId in current)) return current;
+          const next = { ...current };
+          delete next[cardId];
+          return next;
+        });
+        setLiveThinkingByCard((current) => {
+          if (!(cardId in current)) return current;
+          const next = { ...current };
+          delete next[cardId];
+          return next;
+        });
+        delete turnReasoningByCardRef.current[cardId];
+        delete turnToolsByCardRef.current[cardId];
+        delete turnContentSegByCardRef.current[cardId];
+        if (abortByCardRef.current[cardId] === controller) delete abortByCardRef.current[cardId];
       }
       void (async () => {
         const todosAfter = await refreshTodos(cardId, false);
         await refreshTodoSegments(cardId);
-        if (epoch !== streamEpochRef.current) return;
+        if (epoch !== streamEpochByCardRef.current[cardId]) return;
         if (!turnOk) {
           historyLoadedRef.current.delete(cardId);
           return;
@@ -1160,15 +1194,15 @@ export default function HaiTunAgentWorkspace({
     }
   };
 
-  const stopChat = useCallback(() => {
+  const stopChat = useCallback((cardId: string) => {
     // Same pointer gesture must not land on the Send button that replaces Stop
-    // after typingCard clears — especially once we restore the draft text.
-    suppressSubmitUntilRef.current = Date.now() + 400;
-    abortRef.current?.abort();
+    // after the card's busy state clears — especially once we restore the draft text.
+    suppressSubmitUntilByCardRef.current[cardId] = Date.now() + 400;
+    abortByCardRef.current[cardId]?.abort();
   }, []);
 
   const sendMessage = async (text: string, cardId = currentCard.id, files: File[] = []) => {
-    if (Date.now() < suppressSubmitUntilRef.current) return;
+    if (Date.now() < (suppressSubmitUntilByCardRef.current[cardId] ?? 0)) return;
     const clean = text.trim();
     const pendingFiles = files.length ? files : (chatAttachments[cardId] ?? []);
     if (!clean && !pendingFiles.length) return;
@@ -1212,7 +1246,7 @@ export default function HaiTunAgentWorkspace({
   };
 
   const regenerateAgentMessage = async (cardId: string, agentIndex: number) => {
-    if (typingCard === cardId || cardId === "overview") return;
+    if (streamingCards[cardId] || cardId === "overview") return;
     const list = messages[cardId] ?? [];
     const agent = list[agentIndex];
     if (!agent || agent.role !== "agent") return;
@@ -1243,7 +1277,7 @@ export default function HaiTunAgentWorkspace({
    * (replacing any half-typed draft) and remove the bubble(s) from the thread.
    */
   const retryFailedMessage = (cardId: string, userIndex: number) => {
-    if (typingCard === cardId || cardId === "overview") return;
+    if (streamingCards[cardId] || cardId === "overview") return;
     const list = messages[cardId] ?? [];
     const userMsg = list[userIndex];
     if (!userMsg || userMsg.role !== "user" || !userMsg.failed) return;
@@ -1273,8 +1307,8 @@ export default function HaiTunAgentWorkspace({
 
   const handleChatSubmit = (event: FormEvent) => {
     event.preventDefault();
-    if (typingCard) return;
-    if (Date.now() < suppressSubmitUntilRef.current) return;
+    if (streamingCards[currentCard.id]) return;
+    if (Date.now() < (suppressSubmitUntilByCardRef.current[currentCard.id] ?? 0)) return;
     const files = chatAttachments[currentCard.id] ?? [];
     if (!currentChatDraft.trim() && !files.length) return;
     if (!chatExpanded) setChatExpanded(true);
@@ -1380,8 +1414,9 @@ export default function HaiTunAgentWorkspace({
       clean || (pendingFiles.length ? `已上传：${pendingFiles.map((file) => file.name).join("、")}` : "");
     if (!userVisible) throw new Error("empty task");
 
-    // Always re-resolve against the live pool so leftover haitun-default never wins.
-    const ais = await purgePlaceholderAis();
+    // Always re-resolve against the live pool; pickPreferredAi keeps real keys
+    // ahead of unselected placeholders without deleting any connected model.
+    const ais = await listAis();
     let resolvedAiId = pickPreferredAi(ais, aiId)?.id ?? null;
     if (!resolvedAiId) {
       // Empty pool (free mode) → resolve remote defaults only when a task needs an AI.
@@ -1442,7 +1477,7 @@ export default function HaiTunAgentWorkspace({
   const sendQuickAction = async (action: string, cardId: string) => {
     const clean = action.trim();
     if (!clean) return;
-    if (typingCard === cardId) return;
+    if (streamingCards[cardId]) return;
 
     if (cardId === "overview") {
       // Overview has no Session — create a task and jump into its dialog.
@@ -1624,7 +1659,7 @@ export default function HaiTunAgentWorkspace({
     const unitMessages = messages[unitCard.id] ?? [];
     const unitDraft = chatDrafts[unitCard.id] ?? "";
     const expanded = interactive ? chatExpanded : visualExpanded;
-    const unitBusy = typingCard === unitCard.id;
+    const unitBusy = !!streamingCards[unitCard.id];
     const unitHasDelivery = !!unitTask && unitTask.newDeliverables.length > 0;
     const openUnitChest = () => {
       if (!unitHasDelivery || !unitTask) {
@@ -1850,10 +1885,10 @@ export default function HaiTunAgentWorkspace({
                 <button
                   type="button"
                   key={action}
-                  disabled={!interactive || typingCard === unitCard.id}
+                  disabled={!interactive || unitBusy}
                   onClick={(event) => {
                     event.stopPropagation();
-                    if (!interactive || typingCard === unitCard.id) return;
+                    if (!interactive || unitBusy) return;
                     void sendQuickAction(action, unitCard.id);
                   }}
                 >
@@ -1867,10 +1902,10 @@ export default function HaiTunAgentWorkspace({
             <>
               <FocusChatThread
                 messages={unitMessages}
-                typing={typingCard === unitCard.id}
+                typing={unitBusy}
                 title={unitCard.title}
-                progressLog={typingCard === unitCard.id ? turnProgressLog : null}
-                liveThinking={typingCard === unitCard.id ? liveThinkingText : ""}
+                progressLog={unitBusy ? (turnProgressLogs[unitCard.id] ?? null) : null}
+                liveThinking={unitBusy ? (liveThinkingByCard[unitCard.id] ?? "") : ""}
                 workspaceRoot={workspace}
                 loadingHistory={historyLoadingIds.has(unitCard.id)}
                 onFeedback={(index, kind) => setMessageFeedback(unitCard.id, index, kind)}
@@ -1887,7 +1922,7 @@ export default function HaiTunAgentWorkspace({
             {unitMessages.slice(-1).map((message, messageIndex) => (
               <span key={`${message.role}-${messageIndex}`} className={message.role}>{message.text}</span>
             ))}
-            {typingCard === unitCard.id && <span className="typing"><i /><i /><i /></span>}
+            {unitBusy && <span className="typing"><i /><i /><i /></span>}
           </div>}
 
           {(chatAttachments[unitCard.id] ?? []).length > 0 && (
@@ -1971,7 +2006,7 @@ export default function HaiTunAgentWorkspace({
               aria-label="对话内容"
               readOnly={!interactive}
             />
-            {typingCard === unitCard.id ? (
+            {unitBusy ? (
               <button
                 type="button"
                 className="send-button stop-button"
@@ -1981,7 +2016,7 @@ export default function HaiTunAgentWorkspace({
                   // preventDefault: avoid mouseup activating the Send that replaces this button.
                   event.preventDefault();
                   event.stopPropagation();
-                  if (interactive) stopChat();
+                  if (interactive) stopChat(unitCard.id);
                 }}
                 aria-label="停止生成"
                 title="停止生成"

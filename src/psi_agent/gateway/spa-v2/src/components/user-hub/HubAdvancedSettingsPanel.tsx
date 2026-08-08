@@ -4,6 +4,7 @@ import HubDialog from './HubDialog'
 type Props = {
   show: boolean
   onClose: () => void
+  onBackToSettings?: () => void
   agent?: string
   onChangeAgent?: () => void
 }
@@ -14,20 +15,41 @@ function pathLabel(path: string): string {
   return parts[parts.length - 1] || p || '未选择'
 }
 
-/** Advanced settings dialog: Agent package path switch. */
+/** Advanced settings page of the settings dialog: Agent package path switch. */
 export default function HubAdvancedSettingsPanel({
   show,
   onClose,
+  onBackToSettings,
   agent,
   onChangeAgent,
 }: Props) {
+  const backToSettings = () => {
+    if (onBackToSettings) {
+      onBackToSettings()
+      return
+    }
+    onClose()
+  }
+
   return (
     <HubDialog
       show={show}
-      title="高级设置"
+      title={(
+        <div className="hub-models-title">
+          <span>高级设置</span>
+          <button type="button" className="hub-link" onClick={backToSettings}>
+            返回设置
+          </button>
+        </div>
+      )}
       width={480}
       onClose={onClose}
-      actions={<button type="button" className="hub-btn primary" onClick={onClose}>关闭</button>}
+      actions={(
+        <>
+          <button type="button" className="hub-btn ghost" onClick={backToSettings}>返回设置</button>
+          <button type="button" className="hub-btn primary" onClick={onClose}>关闭</button>
+        </>
+      )}
     >
       <section className="hub-settings-section">
         {onChangeAgent ? (
