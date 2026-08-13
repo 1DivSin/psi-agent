@@ -1,0 +1,130 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
+AI_FIELDS = [
+    "姓名",
+    "评级",
+    "学历",
+    "毕业院校/背景",
+    "简历摘要",
+    "总分",
+    "匹配岗位",
+    "匹配点",
+    "不匹配点",
+    "面试建议",
+    "面试建议理由",
+]
+ALL_FIELDS = [
+    "姓名",
+    "评级",
+    "学历",
+    "毕业院校/背景",
+    "总分",
+    "备注",
+    "匹配岗位",
+    "匹配点",
+    "不匹配点",
+    "面试建议",
+    "面试建议理由",
+    "初审状态",
+    "简历摘要",
+]
+
+
+def _schema_table() -> dict:
+    schema = json.loads((WORKFLOW_ROOT / "feishu-schema.json").read_text(encoding="utf-8"))
+    return next(table for table in schema["tables"] if table["config_key"] == "talent_pool_table_id")
+
+
+def test_public_contract_uses_runtime_table_ids_without_deployment_values() -> None:
+    """The reusable bundle must obtain deployment resources from runtime configuration."""
+    example = json.loads((WORKFLOW_ROOT / "resume-approval.defaults.inputs.example.json").read_text(encoding="utf-8"))
+    schema = json.loads((WORKFLOW_ROOT / "feishu-schema.json").read_text(encoding="utf-8"))
+    prompt = (WORKFLOW_ROOT / "instructions" / "stage-initial-review.md").read_text(encoding="utf-8")
+
+    assert example["feishu_config"]["talent_pool_table_id"] == "tblExampleTalentPool001"
+    assert example["feishu_config"]["interview_table_id"] == "tblExampleInterview001"
+    required = [table for table in schema["tables"] if table["required_by_workflow"]]
+    assert required
+    assert all("table_id" not in table for table in required)
+    assert "non-empty runtime `feishu_config.talent_pool_table_id`" in prompt
+    assert '"table_id": "exact feishu_config.talent_pool_table_id"' in prompt
+    assert "=tbl" not in prompt
+
+
+def test_schema_matches_the_reusable_13_field_table_contract() -> None:
+    """Field drift must be visible before an Agent attempts a create call."""
+    table = _schema_table()
+
+    assert table["table_name"] == "候选人才库"
+    assert "table_id" not in table
+    assert table["default_view_name"] == "候选人看板"
+    assert [field["field_name"] for field in table["fields"]] == ALL_FIELDS
+    assert [field["type"] for field in table["fields"]] == [1, 3, 1, 1, 2, 1, 1, 1, 1, 3, 1, 3, 1]
+    by_name = {field["field_name"]: field for field in table["fields"]}
+    assert [item["name"] for item in by_name["评级"]["property"]["options"]] == list("ABCDEF")
+    assert [item["name"] for item in by_name["面试建议"]["property"]["options"]] == [
+        "建议面试",
+        "不建议面试",
+    ]
+    assert [item["name"] for item in by_name["初审状态"]["property"]["options"]] == [
+        "待审批",
+        "通过",
+        "不通过",
+    ]
+    assert "岗位方向" not in by_name
+
+
+def test_stage_prompt_maps_13_fields_and_fingerprints_only_11_ai_fields() -> None:
+    """Human notes/status must never cause duplicate rows or be overwritten on reuse."""
+    prompt = (WORKFLOW_ROOT / "instructions" / "stage-initial-review.md").read_text(encoding="utf-8")
+
+    for field in ALL_FIELDS:
+        assert f"`{field}`" in prompt
+    assert "11 个 AI 所有字段" in prompt
+    assert "`备注` 和 `初审状态` 不进入指纹" in prompt
+    assert "`备注`: 新记录留空" in prompt
+    assert "`初审状态`: 新记录固定为 `待审批`" in prompt
+    assert "岗位方向" not in prompt
+    assert "`简历摘要`: `resume_summary`" in prompt
+    assert '"\\n".join(resume_summary)' in prompt
+    assert "`- 要求\uff1a…\uff1b证据\uff1a…`" in prompt
+    assert "`- 风险\uff1a…\uff1b依据\uff1a…`" in prompt
+    assert "use an empty string for an empty list" not in prompt
+    assert "候选人看板" in prompt
+    for legacy in ("`评分`", "`学校`", "`基础画像`", "`能力画像`", "`面试状态`"):
+        assert legacy not in prompt
+
+
+def test_collect_prompt_joins_exact_record_ids_and_accepts_only_two_decisions() -> None:
+    """A chat reply or same-name row must never substitute for the stored Feishu record id."""
+    prompt = (
+        WORKFLOW_ROOT.parent / "resume-interview-preparation" / "instructions" / "collect-initial-decisions.md"
+    ).read_text(encoding="utf-8")
+
+    assert "exact Feishu `record_id`" in prompt
+    assert "Never join by name" in prompt
+    assert "`通过` or `不通过`" in prompt
+    assert "11-field" in prompt
+    assert "chat" not in prompt.lower()
+
+
+def test_talent_agent_and_stage_step_drop_legacy_ten_column_language() -> None:
+    """The short system prompt and graph must not reintroduce the old talent-pool model."""
+    workflow = (WORKFLOW_ROOT / "resume-approval.workflow").read_text(encoding="utf-8")
+    system_line = next(
+        line for line in workflow.splitlines() if line.startswith("    agent_system_prompt(talent_pool_agent)")
+    )
+    start = workflow.index("step_name(stage_initial_review_step)")
+    end = workflow.index("step_name(persist_initial_review_handoff_step)", start)
+    block = workflow[start:end]
+
+    assert "13-field" in system_line
+    assert "11-field" in system_line
+    for forbidden in ("12-field", "10-field", "role direction", "ten-column", "面试状态", "基础画像", "能力画像"):
+        assert forbidden not in system_line
+    assert "target_role" not in block
+    assert "consumes(stage_initial_review_step) == [validated_candidate_assessments, batch_id, feishu_config];" in block
