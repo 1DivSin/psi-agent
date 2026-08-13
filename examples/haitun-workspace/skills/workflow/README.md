@@ -18,7 +18,10 @@ Every active G4 run also writes each materialized Artifact to the workflow
 bundle's `runs/<run-id>/artifacts/` directory. Text values remain Markdown;
 objects, arrays, numbers, booleans, and null are represented by a fenced
 `json` block. This user-visible history is separate from private Human resume
-state under `.psi/fusion-flow/runs/`.
+state under `.psi/fusion-flow/runs/`. Agent and Program Steps also publish a
+resumable `step-timings.json` sidecar in the same run directory. It records
+wall-clock duration, terminal status, retry attempts, and per-item timings for
+foreach Steps; a running sidecar is merged when a Human workflow resumes.
 
 ## Workspace integration
 
