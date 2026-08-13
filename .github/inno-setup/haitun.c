@@ -285,6 +285,25 @@ static void configure_updater(void)
     }
 }
 
+static void launch_installer_file(const WCHAR *path)
+{
+    WCHAR cmd[1024];
+    STARTUPINFOW si = {sizeof(si)};
+    PROCESS_INFORMATION pi = {0};
+
+    if (!path || !path[0])
+        return;
+    wsprintfW(cmd, L"\"%s\"", path);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        if (pi.hThread) CloseHandle(pi.hThread);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        return;
+    }
+    ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
+}
+
 static DWORD WINAPI update_check_thread(LPVOID unused)
 {
     (void)unused;
@@ -306,21 +325,23 @@ static DWORD WINAPI update_check_thread(LPVOID unused)
                 WCHAR temp_dir[MAX_PATH];
                 WCHAR temp_path[MAX_PATH];
                 HRESULT hr;
+                MessageBoxW(NULL, L"正在下载新版本，请稍候……", L"正在更新",
+                            MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
                 if (GetTempPathW(MAX_PATH, temp_dir) && temp_dir[0]) {
                     wsprintfW(temp_path, L"%sHaiTun-Agent-Setup-%s.exe", temp_dir, latest);
                     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
                     hr = URLDownloadToFileW(NULL, g_installer_url, temp_path, 0, NULL);
                     CoUninitialize();
                     if (hr == S_OK) {
-                        if ((INT_PTR)ShellExecuteW(NULL, L"open", temp_path, NULL, NULL,
-                                                   SW_SHOWNORMAL) <= 32) {
-                            ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL,
-                                          SW_SHOWNORMAL);
-                        }
+                        launch_installer_file(temp_path);
                     } else {
+                        MessageBoxW(NULL, L"自动下载失败，将打开浏览器下载页面。", L"更新失败",
+                                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
                         ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
                     }
                 } else {
+                    MessageBoxW(NULL, L"自动下载失败，将打开浏览器下载页面。", L"更新失败",
+                                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
                     ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
                 }
             }

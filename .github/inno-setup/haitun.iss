@@ -49,7 +49,7 @@ var
 begin
   Result := '';
   NeedsRestart := False;
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM haitun.exe',
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM haitun.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM psi-agent.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
