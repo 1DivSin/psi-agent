@@ -75,12 +75,13 @@ HAITUN_UPDATE_INTERVAL_HOURS=24
 HAITUN_UPDATE_INSTALLER_NAME=HaiTun_Agent_Setup.exe
 ```
 
-`haitun.exe` 启动后会开启一个后台线程，每 24 小时请求 `<base>/version.txt`。发现远端版本与本地 `HAITUN_VERSION` 不一致时弹窗询问，用户确认后自动下载并启动 `<base>/HaiTun_Agent_Setup.exe`；下载失败时回退为用浏览器打开下载链接。
+`haitun.exe` 启动后会开启一个后台线程，每 24 小时请求 `<base>/version.txt`。发现远端版本与本地 `HAITUN_VERSION` 不一致时弹窗询问，用户确认后弹出“正在下载安装包”的持续提示窗口并自动下载，下载完成后窗口自动关闭并启动 `<base>/HaiTun_Agent_Setup.exe`；下载失败时窗口自动关闭并回退为用浏览器打开下载链接。
 
 ## 上线前检查
 
 - 确认 `haitun.iss` 版本号已递增；
 - 确认 OSS 上 `version.txt` 内容是纯版本号（例如 `1.0.1`）；
 - 确认下载文件名是 `HaiTun_Agent_Setup.exe`，与 `HAITUN_UPDATE_INSTALLER_NAME` 一致；
+- 确认 launcher（`haitun.c`）包含“下载中提示窗口”的最新实现；1.0.1 及更早版本安装包不含下载中提示；
 - 首次发布时如果 OSS 还没有 `version.txt`，workflow 会直接上传；
 - 确认 bucket 公共读权限已开启，浏览器能直接下载。
