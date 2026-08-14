@@ -50,7 +50,17 @@ _AI_FINGERPRINT_FIELDS = {
     "不匹配点",
     "面试建议",
     "面试建议理由",
+    "问题库",
 }
+_QUESTION_FIELDS = {
+    "question",
+    "category",
+    "evidence_anchor",
+    "purpose",
+    "positive_signal",
+    "risk_signal",
+}
+_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
 _HANDOFF_PREFIX = os.path.join(".psi", "resume-approval", "initial-review-handoffs")
 _DEFAULTS_PATH = os.path.join("flows", "workflows", "resume-approval", "resume-approval.defaults.json")
 
@@ -93,12 +103,40 @@ def _valid_revision(value: Any) -> bool:
 
 def _validate_row_fingerprint(value: Any, path: str) -> None:
     if not isinstance(value, dict) or set(value) != _AI_FINGERPRINT_FIELDS:
-        raise ValueError(f"{path}.row_fingerprint must contain the exact 11 AI-owned fields")
+        raise ValueError(f"{path}.row_fingerprint must contain the exact 12 AI-owned fields")
     score = value["总分"]
     if isinstance(score, bool) or not isinstance(score, (int, float)):
         raise TypeError(f"{path}.row_fingerprint.总分 must be numeric")
     for field in _AI_FINGERPRINT_FIELDS - {"总分"}:
         _required_text(value[field], f"{path}.row_fingerprint.{field}")
+
+
+def _render_questions(value: Any, path: str, *, require_risk: bool) -> str:
+    if not isinstance(value, list) or not 3 <= len(value) <= 6:
+        raise ValueError(f"{path} must contain 3 to 6 questions")
+    lines: list[str] = []
+    categories: set[str] = set()
+    seen_questions: set[str] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
+            raise ValueError(f"{item_path} fields do not match the question-bank contract")
+        for field in _QUESTION_FIELDS:
+            _required_text(item.get(field), f"{item_path}.{field}")
+        category = item["category"]
+        if category not in _QUESTION_CATEGORIES:
+            raise ValueError(f"{item_path}.category is invalid")
+        normalized_question = item["question"].strip()
+        if normalized_question in seen_questions:
+            raise ValueError(f"{item_path}.question is duplicated")
+        seen_questions.add(normalized_question)
+        categories.add(category)
+        lines.append(f"{index + 1}. [{category}] {normalized_question}")
+    if not {"真实性核验", "岗位匹配"} <= categories:
+        raise ValueError(f"{path} must cover authenticity and role-match categories")
+    if require_risk and "风险澄清" not in categories:
+        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
+    return "\n".join(lines)
 
 
 def _require_descriptor(value: Any) -> dict[str, Any]:
@@ -188,6 +226,11 @@ def _validate_source(document: dict[str, Any], expected_count: int) -> None:
             or not all(_valid_revision(revision) for revision in revisions.values())
         ):
             raise ValueError(f"{path}.document_revisions is invalid")
+        _render_questions(
+            assessment.get("verification_questions"),
+            f"{path}.verification_questions",
+            require_risk=bool(assessment.get("mismatch_points")),
+        )
         by_candidate[candidate_id] = assessment
 
     manifest = document.get("talent_pool_manifest")
@@ -219,6 +262,13 @@ def _validate_source(document: dict[str, Any], expected_count: int) -> None:
         if record.get("assessment_revision") != by_candidate[candidate_id]["assessment_revision"]:
             raise ValueError(f"{path}.assessment_revision does not match the validated revision")
         _validate_row_fingerprint(record.get("row_fingerprint"), path)
+        expected_questions = _render_questions(
+            by_candidate[candidate_id].get("verification_questions"),
+            f"validated_candidate_assessments.assessments[{candidate_id}].verification_questions",
+            require_risk=bool(by_candidate[candidate_id].get("mismatch_points")),
+        )
+        if record["row_fingerprint"]["问题库"] != expected_questions:
+            raise ValueError(f"{path}.row_fingerprint.问题库 does not match the validated assessment")
         seen_candidates.add(candidate_id)
         seen_records.add(record_id)
     if seen_candidates != set(by_candidate):

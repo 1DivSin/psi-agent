@@ -18,6 +18,41 @@ ROLE_KEY = "role-0123456789abcdef01234567"
 TALENT_RECORD_ID = "recTalent00001"
 
 
+def _questions() -> list[dict]:
+    return [
+        {
+            "question": "请说明 Python 项目中你个人负责的关键工作。",
+            "category": "真实性核验",
+            "evidence_anchor": "项目使用 Python",
+            "purpose": "核实项目真实性和个人贡献。",
+            "positive_signal": "能够说明个人职责和结果。",
+            "risk_signal": "回答缺少个人职责或结果。",
+        },
+        {
+            "question": "针对 Python 要求\uff0c请说明一次复杂问题的解决过程。",
+            "category": "岗位匹配",
+            "evidence_anchor": "Python",
+            "purpose": "判断岗位所需的 Python 工程深度。",
+            "positive_signal": "能够说明方案、取舍和结果。",
+            "risk_signal": "回答仅列技术名词。",
+        },
+        {
+            "question": "请澄清生产经验的具体范围和验证结果。",
+            "category": "风险澄清",
+            "evidence_anchor": "生产经验",
+            "purpose": "澄清生产经验的证据缺口。",
+            "positive_signal": "能够提供可验证案例。",
+            "risk_signal": "案例缺少可验证结果。",
+        },
+    ]
+
+
+def _rendered_questions() -> str:
+    return "\n".join(
+        f"{index}. [{item['category']}] {item['question']}" for index, item in enumerate(_questions(), start=1)
+    )
+
+
 def _row_fingerprint() -> dict:
     return {
         "姓名": "测试候选人",
@@ -31,6 +66,7 @@ def _row_fingerprint() -> dict:
         "不匹配点": '["- 要求\uff1a生产经验\uff1b证据\uff1a简历未体现"]',
         "面试建议": "建议面试",
         "面试建议理由": "核心技能基本匹配。",
+        "问题库": _rendered_questions(),
     }
 
 
@@ -51,6 +87,7 @@ def _assessment() -> dict:
         "candidate_name": "测试候选人",
         "matched_role_key": ROLE_KEY,
         "matched_role_name": "AI应用开发工程师",
+        "verification_questions": _questions(),
         "document_revisions": {
             "resume_scoring_sha256": "b" * 64,
             "role_information_sha256": ROLE_REVISION,
@@ -174,6 +211,7 @@ def test_persists_review_source_and_returns_launch_contract(tmp_path: Path) -> N
     assert "只回复\uff1a初审完成" in request
     assert "workflow:resume-interview-preparation" in request
     assert "待审批" in request and "拒绝执行" in request
+    assert "问题库" in request
     assert "已完成初审\uff0c继续" not in request
 
 
@@ -217,6 +255,18 @@ def test_conflicting_publication_is_not_overwritten(tmp_path: Path) -> None:
         (
             lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].pop("面试建议理由"),
             "row_fingerprint",
+        ),
+        (
+            lambda data: data["validated_candidate_assessments"]["assessments"][0][
+                "verification_questions"
+            ].pop(),
+            "3 to 6",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+                问题库="1. [真实性核验] 被篡改的问题"
+            ),
+            "问题库",
         ),
         (
             lambda data: data["talent_pool_manifest"]["records"][0].update(attachment_persisted=False),

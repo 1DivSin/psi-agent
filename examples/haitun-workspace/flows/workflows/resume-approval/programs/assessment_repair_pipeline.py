@@ -106,6 +106,18 @@ def _expected_contract(inputs: dict[str, Any]) -> dict[str, Any]:
             "mismatch_content": "resume-supported shortfalls, contradictions, or material evidence gaps",
             "table_format": "one '- ' bullet line per point",
         },
+        "verification_question_rules": {
+            "type": "array of {question, category, evidence_anchor, purpose, positive_signal, risk_signal} objects",
+            "min_items": 3,
+            "max_items": 6,
+            "categories": list(validator._QUESTION_CATEGORIES),
+            "required_coverage": ["真实性核验", "岗位匹配", "风险澄清 when mismatch_points is non-empty"],
+            "evidence_anchor": (
+                "exact selected-role requirement or exact resume evidence from match_points/mismatch_points"
+            ),
+            "public_rendering": "<index>. [<category>] <question> in source order",
+            "safety": "exclude protected attributes and unsupported negative claims",
+        },
         "active_roles": _safe_active_roles(inputs.get("role_catalog")),
         "recommendations": ["建议面试", "不建议面试"],
     }
@@ -236,6 +248,29 @@ def _assert_repair_identity(request: dict[str, Any], original: dict[str, Any], r
         raise ValueError("repair must preserve candidate_name")
 
 
+def _assert_question_only_repair_scope(
+    request: dict[str, Any], original: dict[str, Any], repaired: dict[str, Any]
+) -> None:
+    diagnostics = request.get("validation_errors")
+    if not isinstance(diagnostics, list) or not diagnostics:
+        return
+    paths = [item.get("path") for item in diagnostics if isinstance(item, dict)]
+    if len(paths) != len(diagnostics) or not all(
+        isinstance(path, str)
+        and (
+            path == "verification_questions"
+            or path == "missing_fields:verification_questions"
+            or path.startswith("verification_questions[")
+        )
+        for path in paths
+    ):
+        return
+    original_without_questions = {key: value for key, value in original.items() if key != "verification_questions"}
+    repaired_without_questions = {key: value for key, value in repaired.items() if key != "verification_questions"}
+    if repaired_without_questions != original_without_questions:
+        raise ValueError("question-only repair must preserve every unrelated assessment field")
+
+
 def merge_repairs(
     inputs: dict[str, Any],
     *,
@@ -272,6 +307,7 @@ def merge_repairs(
         if not isinstance(original, dict):
             raise ValueError("original assessment is invalid")
         _assert_repair_identity(request, original, repaired)
+        _assert_question_only_repair_scope(request, original, repaired)
         merged[index] = repaired
         modified_indices.append(index)
     return merged, {

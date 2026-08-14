@@ -101,6 +101,10 @@ def test_prompts_enforce_read_only_generation_and_exact_content_writing() -> Non
     assert "面试前摘要" in draft and "面试重点" in draft and "风险提示" in draft and "建议问题" in draft
     assert "feishu_bitable_create_records" not in draft
     assert "same-role" in draft
+    assert "not newly generated" in draft
+    assert "exact source order" in draft
+    assert "The write-batch Program rejects any mismatch" in draft
+    assert all(field in draft for field in ("evidence_anchor", "purpose", "positive_signal", "risk_signal"))
 
     assert "must not rewrite" in writer
     assert "six-field fingerprint" in writer

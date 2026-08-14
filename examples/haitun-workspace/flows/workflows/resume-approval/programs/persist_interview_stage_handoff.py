@@ -19,6 +19,15 @@ _DESTINATION_FIELDS = (
     "talent_pool_table_id",
     "interview_table_id",
 )
+_QUESTION_FIELDS = {
+    "question",
+    "category",
+    "evidence_anchor",
+    "purpose",
+    "positive_signal",
+    "risk_signal",
+}
+_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
 
 
 def _load_inputs() -> dict[str, Any]:
@@ -68,6 +77,30 @@ def _canonical_text(value: Any) -> str:
 
 def _valid_revision(value: Any) -> bool:
     return isinstance(value, str) and _REVISION.fullmatch(value) is not None
+
+
+def _validate_questions(value: Any, path: str, *, require_risk: bool) -> None:
+    if not isinstance(value, list) or not 3 <= len(value) <= 6:
+        raise ValueError(f"{path} must contain 3 to 6 questions")
+    categories: set[str] = set()
+    seen_questions: set[str] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
+            raise ValueError(f"{item_path} fields do not match the question-bank contract")
+        for field in _QUESTION_FIELDS:
+            _required_text(item.get(field), f"{item_path}.{field}")
+        if item["category"] not in _QUESTION_CATEGORIES:
+            raise ValueError(f"{item_path}.category is invalid")
+        normalized_question = item["question"].strip()
+        if normalized_question in seen_questions:
+            raise ValueError(f"{item_path}.question is duplicated")
+        seen_questions.add(normalized_question)
+        categories.add(item["category"])
+    if not {"真实性核验", "岗位匹配"} <= categories:
+        raise ValueError(f"{path} must cover authenticity and role-match categories")
+    if require_risk and "风险澄清" not in categories:
+        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
 
 
 def _validate_manifest(manifest: Any, batch_id: str) -> dict[tuple[str, str, str], dict[str, Any]]:
@@ -135,6 +168,11 @@ def _validate_assessment(assessment: Any, batch_id: str, path: str) -> tuple[str
         or not all(_valid_revision(value) for value in revisions.values())
     ):
         raise ValueError(f"{path}.document_revisions is invalid")
+    _validate_questions(
+        assessment.get("verification_questions"),
+        f"{path}.verification_questions",
+        require_risk=bool(assessment.get("mismatch_points")),
+    )
     return candidate_id, revision, role_key
 
 

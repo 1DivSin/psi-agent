@@ -16,6 +16,7 @@ AI_FIELDS = [
     "不匹配点",
     "面试建议",
     "面试建议理由",
+    "问题库",
 ]
 ALL_FIELDS = [
     "姓名",
@@ -30,6 +31,7 @@ ALL_FIELDS = [
     "不匹配点",
     "面试建议",
     "面试建议理由",
+    "问题库",
     "初审状态",
     "简历摘要",
 ]
@@ -56,7 +58,7 @@ def test_public_contract_uses_runtime_table_ids_without_deployment_values() -> N
     assert "=tbl" not in prompt
 
 
-def test_schema_matches_the_reusable_14_field_attachment_contract() -> None:
+def test_schema_matches_the_reusable_15_field_attachment_contract() -> None:
     """Field drift must be visible before an Agent attempts a create call."""
     table = _schema_table()
 
@@ -64,7 +66,7 @@ def test_schema_matches_the_reusable_14_field_attachment_contract() -> None:
     assert "table_id" not in table
     assert table["default_view_name"] == "候选人看板"
     assert [field["field_name"] for field in table["fields"]] == ALL_FIELDS
-    assert [field["type"] for field in table["fields"]] == [1, 17, 3, 1, 1, 2, 1, 1, 1, 1, 3, 1, 3, 1]
+    assert [field["type"] for field in table["fields"]] == [1, 17, 3, 1, 1, 2, 1, 1, 1, 1, 3, 1, 1, 3, 1]
     by_name = {field["field_name"]: field for field in table["fields"]}
     assert [item["name"] for item in by_name["评级"]["property"]["options"]] == list("ABCDEF")
     assert [item["name"] for item in by_name["面试建议"]["property"]["options"]] == [
@@ -79,14 +81,18 @@ def test_schema_matches_the_reusable_14_field_attachment_contract() -> None:
     assert "岗位方向" not in by_name
 
 
-def test_stage_prompt_maps_14_fields_but_keeps_attachment_out_of_ai_fingerprint() -> None:
+def test_stage_prompt_maps_15_fields_and_fingerprints_only_12_ai_fields() -> None:
     """Human fields and unstable attachment tokens must stay outside row identity."""
     prompt = (WORKFLOW_ROOT / "instructions" / "stage-initial-review.md").read_text(encoding="utf-8")
 
     for field in ALL_FIELDS:
         assert f"`{field}`" in prompt
-    assert "11 个 AI 所有字段" in prompt
+    assert len(AI_FIELDS) == 12
+    assert "问题库" in AI_FIELDS
+    assert {"简历附件", "备注", "初审状态"}.isdisjoint(AI_FIELDS)
+    assert "12 个 AI 所有字段" in prompt
     assert "`简历附件` does not enter the fingerprint" in prompt
+    assert "`备注` and `初审状态` do not enter the fingerprint" in prompt
     assert "set `备注` to an empty string" in prompt
     assert "`初审状态` to `待审批`" in prompt
     assert "岗位方向" not in prompt
@@ -94,6 +100,8 @@ def test_stage_prompt_maps_14_fields_but_keeps_attachment_out_of_ai_fingerprint(
     assert '"\\n".join(resume_summary)' in prompt
     assert "`- 要求\uff1a…\uff1b证据\uff1a…`" in prompt
     assert "`- 风险\uff1a…\uff1b依据\uff1a…`" in prompt
+    assert "<1-based index>. [<category>] <question>" in prompt
+    assert "Never expose `evidence_anchor`, `purpose`, `positive_signal`, or `risk_signal`" in prompt
     assert "use an empty string for an empty list" not in prompt
     assert "候选人看板" in prompt
     for legacy in ("`评分`", "`学校`", "`基础画像`", "`能力画像`", "`面试状态`"):
@@ -131,7 +139,7 @@ def test_collect_prompt_joins_exact_record_ids_and_accepts_only_two_decisions() 
     assert "exact Feishu `record_id`" in prompt
     assert "Never join by name" in prompt
     assert "`通过` or `不通过`" in prompt
-    assert "11-field" in prompt
+    assert "12-field" in prompt
     assert "chat" not in prompt.lower()
 
 
@@ -145,9 +153,19 @@ def test_talent_agent_receives_staged_files_and_cleanup_waits_for_persistence() 
     end = workflow.index("step_name(persist_initial_review_handoff_step)", start)
     block = workflow[start:end]
 
-    assert "14-field" in system_line
-    assert "11-field" in system_line
-    for forbidden in ("13-field", "12-field", "10-field", "role direction", "ten-column"):
+    assert "15-field" in system_line
+    assert "12-field" in system_line
+    for forbidden in (
+        "14-field",
+        "13-field",
+        "11-field",
+        "10-field",
+        "role direction",
+        "ten-column",
+        "面试状态",
+        "基础画像",
+        "能力画像",
+    ):
         assert forbidden not in system_line
     assert "target_role" not in block
     assert (
