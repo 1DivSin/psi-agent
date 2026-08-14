@@ -48,7 +48,28 @@ def test_actual_runner_attachment_path_string_is_staged(tmp_path: Path) -> None:
     assert len(staged) == 1
     assert staged[0]["original_name"] == "候选人.pdf"
     assert staged[0]["format"] == ".pdf"
+    assert staged[0]["size_bytes"] == len(b"resume")
     assert (workspace / staged[0]["path"]).read_bytes() == b"resume"
+
+
+@pytest.mark.parametrize("suffix", [".pdf", ".docx", ".md", ".txt"])
+def test_every_supported_attachment_format_is_upload_ready(tmp_path: Path, suffix: str) -> None:
+    module = _load_module()
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads" / ".psi"
+    workspace.mkdir()
+    attachment = _write(downloads / "2026-08-09" / f"candidate{suffix}", suffix.encode())
+
+    staged = module.run(
+        {"resume_files": [str(attachment)], "batch_id": f"batch-{suffix[1:]}"},
+        str(workspace),
+        str(downloads),
+    )
+
+    assert staged[0]["format"] == suffix
+    assert staged[0]["name"] == f"resume{suffix}"
+    assert staged[0]["size_bytes"] == len(suffix.encode())
+    assert staged[0]["temporary"] is True
 
 
 def test_workspace_path_descriptor_remains_supported(tmp_path: Path) -> None:
@@ -149,6 +170,41 @@ def test_path_outside_workspace_and_attachment_root_is_rejected(tmp_path: Path) 
             str(workspace),
             str(downloads),
         )
+
+
+def test_file_larger_than_single_request_upload_limit_is_rejected_before_staging(tmp_path: Path) -> None:
+    module = _load_module()
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads" / ".psi"
+    workspace.mkdir()
+    attachment = downloads / "2026-08-09" / "oversized.pdf"
+    attachment.parent.mkdir(parents=True)
+    with attachment.open("wb") as stream:
+        stream.seek(module._MAX_SOURCE_BYTES)
+        stream.write(b"x")
+
+    with pytest.raises(ValueError, match=str(module._MAX_SOURCE_BYTES)):
+        module.run(
+            {"resume_files": [str(attachment)], "batch_id": "batch-oversized"},
+            str(workspace),
+            str(downloads),
+        )
+
+
+def test_staging_manifest_omits_local_paths_and_original_names(tmp_path: Path) -> None:
+    module = _load_module()
+    workspace = tmp_path / "workspace"
+    downloads = tmp_path / "Downloads" / ".psi"
+    workspace.mkdir()
+    attachment = _write(downloads / "2026-08-09" / "private-name.pdf")
+    inputs = {"resume_files": [str(attachment)], "batch_id": "batch-manifest"}
+
+    outputs = module._program_outputs(inputs, module.run(inputs, str(workspace), str(downloads)))
+    manifest_text = str(outputs["resume_staging_manifest"])
+
+    assert "private-name.pdf" not in manifest_text
+    assert str(workspace) not in manifest_text
+    assert "path" not in outputs["resume_staging_manifest"]
 
 
 def test_empty_resume_list_is_rejected(tmp_path: Path) -> None:
