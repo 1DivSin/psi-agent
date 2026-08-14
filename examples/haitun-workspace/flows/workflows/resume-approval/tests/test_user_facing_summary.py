@@ -223,7 +223,7 @@ def test_required_stage_or_validation_status_cannot_be_bypassed() -> None:
 
 def test_all_recruitment_workflows_publish_summary_after_the_last_business_step() -> None:
     contracts = {
-        "resume-approval/resume-approval.workflow": "assert_initial_review_handoff_ready_step",
+        "resume-approval/resume-approval.workflow": "assert_cleanup_program_ready_step",
         (
             "resume-interview-preparation/resume-interview-preparation.workflow"
         ): "assert_interview_handoff_ready_step",

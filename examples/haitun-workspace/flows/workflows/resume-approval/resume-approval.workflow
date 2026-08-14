@@ -56,6 +56,8 @@ const read:Tool;
 const read_pdf:Tool;
 const feishu_bitable_search_records:Tool;
 const feishu_bitable_create_records:Tool;
+const feishu_bitable_update_record:Tool;
+const feishu_drive_upload:Tool;
 const high:ReasoningEffort;
 const medium:ReasoningEffort;
 
@@ -341,20 +343,6 @@ workflow resume_approval {
     ];
     step_timeout(validate_assessments_step) == 180;
 
-    step_name(cleanup_temporary_files_step) == "Delete temporary resume and extracted-text copies";
-    step_instruction(cleanup_temporary_files_step) == "Delete only SHA-addressed temporary files declared by the staging and extraction outputs after the complete batch has been analyzed.";
-    step_executor(cleanup_temporary_files_step) == temporary_file_cleaner;
-    consumes(cleanup_temporary_files_step) == [staged_resume_files, extracted_resumes, candidate_assessments_repaired];
-    depends_on(cleanup_temporary_files_step, assert_repair_merge_round_2_program_ready_step) == True;
-    produces(cleanup_temporary_files_step) == [cleanup_receipt, cleanup_scope_manifest];
-    step_timeout(cleanup_temporary_files_step) == 180;
-
-    step_name(assert_cleanup_program_ready_step) == "Stop when temporary cleanup returned a Program error";
-    step_instruction(assert_cleanup_program_ready_step) == "Fail on any Program error-valued input and otherwise produce no stdout.";
-    step_executor(assert_cleanup_program_ready_step) == program_error_assertion;
-    consumes(assert_cleanup_program_ready_step) == [cleanup_receipt, cleanup_scope_manifest];
-    step_timeout(assert_cleanup_program_ready_step) == 180;
-
     step_name(assert_initial_review_ready_step) == "Stop non-writeable batches before Feishu or Human review";
     step_instruction(assert_initial_review_ready_step) == "Exit successfully when final assessment JSON is table-writeable and contains at least one assessable candidate, even when business-constraint warnings remain. Produce no stdout.";
     step_executor(assert_initial_review_ready_step) == workflow_ready_assertion;
@@ -362,13 +350,13 @@ workflow resume_approval {
         validated_candidate_assessments,
         assessment_validation_manifest
     ];
-    depends_on(assert_initial_review_ready_step, assert_cleanup_program_ready_step) == True;
+    depends_on(assert_initial_review_ready_step, validate_assessments_step) == True;
     step_timeout(assert_initial_review_ready_step) == 180;
 
     step_name(stage_initial_review_step) == "Create talent-pool initial snapshots";
     step_instruction(stage_initial_review_step) == "./instructions/stage-initial-review.md";
     step_executor(stage_initial_review_step) == talent_pool_agent;
-    consumes(stage_initial_review_step) == [validated_candidate_assessments, batch_id, feishu_config];
+    consumes(stage_initial_review_step) == [validated_candidate_assessments, staged_resume_files, batch_id, feishu_config];
     depends_on(stage_initial_review_step, assert_initial_review_ready_step) == True;
     produces(stage_initial_review_step) == [talent_pool_manifest];
     step_timeout(stage_initial_review_step) == 600;
@@ -389,11 +377,26 @@ workflow resume_approval {
     depends_on(assert_initial_review_handoff_ready_step, persist_initial_review_handoff_step) == True;
     step_timeout(assert_initial_review_handoff_ready_step) == 180;
 
+    step_name(cleanup_temporary_files_step) == "Delete persisted resume and extracted-text copies";
+    step_instruction(cleanup_temporary_files_step) == "Delete only SHA-addressed temporary files after every talent row attachment has been uploaded or reused, read back, and accepted by the immutable handoff guard.";
+    step_executor(cleanup_temporary_files_step) == temporary_file_cleaner;
+    consumes(cleanup_temporary_files_step) == [staged_resume_files, extracted_resumes, candidate_assessments_repaired];
+    depends_on(cleanup_temporary_files_step, assert_initial_review_handoff_ready_step) == True;
+    produces(cleanup_temporary_files_step) == [cleanup_receipt, cleanup_scope_manifest];
+    step_timeout(cleanup_temporary_files_step) == 180;
+
+    step_name(assert_cleanup_program_ready_step) == "Stop when temporary cleanup returned a Program error";
+    step_instruction(assert_cleanup_program_ready_step) == "Fail on any Program error-valued input and otherwise produce no stdout.";
+    step_executor(assert_cleanup_program_ready_step) == program_error_assertion;
+    consumes(assert_cleanup_program_ready_step) == [cleanup_receipt, cleanup_scope_manifest];
+    depends_on(assert_cleanup_program_ready_step, cleanup_temporary_files_step) == True;
+    step_timeout(assert_cleanup_program_ready_step) == 180;
+
     step_name(build_user_facing_summary_step) == "Build safe user-facing initial-review summary";
     step_instruction(build_user_facing_summary_step) == "Build the deterministic privacy-conscious business summary exposed to the invoking user.";
     step_executor(build_user_facing_summary_step) == user_facing_summary_builder;
     consumes(build_user_facing_summary_step) == [validated_candidate_assessments, talent_pool_manifest, initial_review_request, feishu_config];
-    depends_on(build_user_facing_summary_step, assert_initial_review_handoff_ready_step) == True;
+    depends_on(build_user_facing_summary_step, assert_cleanup_program_ready_step) == True;
     produces(build_user_facing_summary_step) == [user_facing_summary];
     step_timeout(build_user_facing_summary_step) == 180;
 
@@ -416,7 +419,9 @@ workflow resume_approval {
 
     allowed_tool(talent_pool_agent, feishu_bitable_search_records);
     allowed_tool(talent_pool_agent, feishu_bitable_create_records);
-    agent_system_prompt(talent_pool_agent) == "You maintain the 14-field Chinese initial-review table using an exact 12-field AI-owned visible fingerprint, including the deterministic verification question bank. Write concise Simplified Chinese, preserve Human-owned notes and decisions, join checkpoint rows only by exact Feishu record_id, and fail closed on duplicates, ambiguity, schema drift, or untranslated internal values.";
+    allowed_tool(talent_pool_agent, feishu_bitable_update_record);
+    allowed_tool(talent_pool_agent, feishu_drive_upload);
+    agent_system_prompt(talent_pool_agent) == "You maintain the 15-field Chinese initial-review table using an exact 12-field AI-owned visible fingerprint, including the deterministic verification question bank, plus one native resume attachment. Bind each assessment to exactly one staged file only by source SHA-256, upload or backfill before cleanup, preserve Human-owned notes and decisions, and fail closed on duplicates, ambiguity, schema drift, unsafe question content, attachment readback mismatch, or untranslated internal values. Never expose question evidence metadata, file tokens, local paths, or temporary URLs; keep required technical IDs only inside the private manifest and out of error text.";
     reasoning_effort(talent_pool_agent) == high;
     max_output_tokens(talent_pool_agent) == 32768;
     max_turns(talent_pool_agent) == 24;

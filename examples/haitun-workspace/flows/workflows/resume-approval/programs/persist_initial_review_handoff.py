@@ -42,6 +42,14 @@ _QUESTION_FIELDS = {
     "risk_signal",
 }
 _QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
+_MANIFEST_RECORD_FIELDS = {
+    "record_id",
+    "candidate_id",
+    "assessment_revision",
+    "row_fingerprint",
+    "attachment_persisted",
+    "created",
+}
 
 
 def _load_inputs() -> dict[str, Any]:
@@ -199,6 +207,12 @@ def _validate_manifest(
         path = f"talent_pool_manifest.records[{index}]"
         if not isinstance(record, dict):
             raise TypeError(f"{path} must be an object")
+        if set(record) != _MANIFEST_RECORD_FIELDS:
+            raise ValueError(f"{path} must contain only the private attachment-safe manifest fields")
+        if record.get("attachment_persisted") is not True:
+            raise ValueError(f"{path}.attachment_persisted must be true")
+        if not isinstance(record.get("created"), bool):
+            raise TypeError(f"{path}.created must be boolean")
         candidate_id = record.get("candidate_id")
         record_id = record.get("record_id")
         if not isinstance(candidate_id, str) or _CANDIDATE_ID.fullmatch(candidate_id) is None:
