@@ -97,6 +97,22 @@ def _resolve_prefix() -> str:
 # 整个 Gateway 请求。
 _TIMEOUT_SECONDS = 30.0
 
+# 连接保活时长。aiohttp 默认 15s, 撑不过登录任一步的间隔: 输手机号 5-20s、
+# 等短信 30-90s。默认值下每一步都是冷连接 (TCP 1 RTT + TLS 1 RTT + 请求 1 RTT),
+# 境外云 RTT 约 210ms, 每步白付约 420ms —— 代码里复用 self._session 成立,
+# 网络层一次也没复用上。
+# 取值须比服务端空闲超时短, 否则池里会攒着对端已关的连接。2026-08-14 实测:
+# 空闲 10/30/60/90/120/180s 全部复用, 服务端超时比 180s 还长 —— 于是 120s 稳在
+# 安全侧, 客户端先于服务端回收。不再往上加: 登录全程最大间隔约 90s (等短信),
+# 120s 已完整覆盖, 再加只是让空闲连接多占资源。
+_KEEPALIVE_SECONDS = 120.0
+
+# DNS 缓存。默认 10s, 云端地址不变, 没必要反复解析。
+_DNS_CACHE_SECONDS = 600
+
+# 预热节流。SPA 挂载登录面板时可能连发几次 /auth/status, 没必要每次都热一遍。
+_WARM_THROTTLE_SECONDS = 5.0
+
 
 @dataclass
 class AuthManager:
@@ -114,10 +130,17 @@ class AuthManager:
     _platform: str = ""
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _session: aiohttp.ClientSession | None = None
+    _tg: Any = None  # anyio.TaskGroup (ty不识别的第三方类型)
+    """Gateway 的 task group, 只用来调度连接预热。没注入就不预热, 功能不受影响。"""
+    _warming: bool = False
+    _last_warm: float = 0.0
 
     @classmethod
-    async def create(cls, endpoint: str, appdata_root: str = "", platform: str = "") -> AuthManager:
-        """建一个 manager 并从磁盘恢复登录态 (满足 R3: 跨重启保持)。"""
+    async def create(cls, endpoint: str, appdata_root: str = "", platform: str = "", *, tg: Any = None) -> AuthManager:
+        """建一个 manager 并从磁盘恢复登录态 (满足 R3: 跨重启保持)。
+
+        ``tg`` 是 Gateway 的 anyio task group, 只用于连接预热; 不传则不预热。
+        """
         store = await AuthStore.from_appdata(appdata_root)
         token = await store.load_token()
         device_key = await store.device_key()
@@ -128,6 +151,7 @@ class AuthManager:
             _token=token,
             _device_key=device_key,
             _platform=_resolve_platform(platform),
+            _tg=tg,
         )
         if token:
             logger.info("已从本机凭证恢复登录态 (未回验, 首次请求 401 时再清)")
@@ -142,53 +166,131 @@ class AuthManager:
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS))
+            # 必须显式传 connector: 默认值的 keepalive 15s 撑不过登录步距,
+            # 见 _KEEPALIVE_SECONDS。不加 enable_cleanup_closed —— Python 3.14.7
+            # 下它已是 no-op 且抛 DeprecationWarning, 而本仓库禁止 noqa 抑制。
+            connector = aiohttp.TCPConnector(
+                keepalive_timeout=_KEEPALIVE_SECONDS,
+                ttl_dns_cache=_DNS_CACHE_SECONDS,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS),
+            )
         return self._session
 
-    async def _call(
+    async def _attempt(
         self, method: str, path: str, payload: dict[str, Any] | None = None, *, auth: bool = False
     ) -> tuple[int, dict[str, Any]]:
-        """发一次云端请求, 返回 ``(状态码, 响应体)``。
+        """发一次请求并把响应改造成前端契约。
 
-        网络异常收敛成 ``(0, {"error": ...})`` —— 调用方 (HTTP 路由) 据此回 502,
-        而不是让异常冒到 aiohttp 中间件变成 500。
+        连接异常**不在这里吞**, 往上抛给 ``_call`` 决定要不要重试。
         """
-        if not self.endpoint:
-            return 0, {"error": "auth_endpoint_not_configured"}
         headers: dict[str, str] = {}
         if auth:
             if not self._token:
                 return _UNAUTHORIZED, {"error": "unauthorized"}
             headers["Authorization"] = f"Bearer {self._token}"
         url = f"{self.endpoint}{self.prefix}{path}"
+        session = self._ensure_session()
+        async with session.request(method, url, json=payload, headers=headers) as resp:
+            body: dict[str, Any]
+            try:
+                body = await resp.json()
+            except Exception:
+                text = await resp.text()
+                body = {"error": "bad_response", "detail": text[:200]}
+            if isinstance(body, list):
+                # 云端 ``GET /sessions`` 回**裸数组**。这里的返回类型契约是 dict,
+                # 但不能因此把数据丢掉 —— 装进信封转交, 由路由层原样下发。
+                # (曾经这一支落到下面的 bad_response, 设备列表恒为空。)
+                body = {"items": body}
+            elif not isinstance(body, dict):
+                body = {"error": "bad_response"}
+            # 云端把重试间隔放在 ``Retry-After`` **响应头**里, 响应体里没有。
+            # 而 SPA 的 fetch 封装只读 body —— 于是「请 60 秒后再试」的倒计时
+            # 永远拿不到秒数, 只能不显示或瞎猜。在此抄进 body, 前端契约保持
+            # 「所有信息都在 body」一条, 不必让每个调用点都去摸 headers。
+            if "retryAfter" not in body:
+                raw_retry = resp.headers.get("Retry-After", "")
+                if raw_retry.strip().isdigit():
+                    body["retryAfter"] = int(raw_retry.strip())
+            return resp.status, body
+
+    async def _call(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        auth: bool = False,
+        retry: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        """发一次云端请求, 返回 ``(状态码, 响应体)``。
+
+        网络异常收敛成 ``(0, {"error": ...})`` —— 调用方 (HTTP 路由) 据此回 502,
+        而不是让异常冒到 aiohttp 中间件变成 500。
+
+        ``retry`` 只对幂等 GET 生效, 且必须在**调用点显式开启** —— 这样将来给新
+        端点加方法时, 默认落在「不重试」那一侧。业务 POST 永不重试: 验证码被消耗
+        两次后, 前端 D1 兜底屏会说「验证码不正确」, 而码是对的。
+        """
+        if not self.endpoint:
+            return 0, {"error": "auth_endpoint_not_configured"}
+        attempts = 2 if (retry and method == "GET") else 1
+        last: Exception | None = None
+        for i in range(attempts):
+            try:
+                return await self._attempt(method, path, payload, auth=auth)
+            except aiohttp.ServerDisconnectedError as e:
+                # 只认这一种: keepalive 拉长后, 池里的连接可能在「取出」与「发出」
+                # 之间被对端关掉。不能捕 ClientOSError 或 ClientConnectionError ——
+                # ServerDisconnectedError 与 ClientConnectorError (DNS 失败、连接
+                # 被拒) 都是它们的子类, 罩上去会把真正连不通的情况也重试一遍,
+                # 白等一个超时周期。
+                last = e
+                if i + 1 < attempts:
+                    logger.info(f"连接已被对端关闭, 重试一次 {method} {path}")
+                    continue
+            except Exception as e:
+                last = e
+                break
+        logger.warning(f"认证服务请求失败 {method} {path}: {last!r}")
+        return 0, {"error": "upstream_unreachable", "detail": repr(last)[:200]}
+
+    async def nudge_warm(self) -> None:
+        """请求把连接焐热。不阻塞调用方 —— 只往 task group 里塞个任务就返回。
+
+        连接池只在**发过一次请求之后**才有连接可复用, 而用户点「获取验证码」是
+        这个进程里的第一次请求, 必然是冷的。趁用户还在看界面时先建好连接, 那一
+        次点击就能落在热连接上。
+        """
+        if self._tg is None or self._warming:
+            return
+        now = anyio.current_time()
+        if now - self._last_warm < _WARM_THROTTLE_SECONDS:
+            return
+        # 从「检查」到「置位」之间没有 await, 协作式调度下不会被抢占, 不需要锁。
+        self._warming = True
+        self._last_warm = now
+        self._tg.start_soon(self._warm)
+
+    async def _warm(self) -> None:
+        """发一次无副作用的 ``GET /me`` 把 TCP+TLS 建好。
+
+        **不带 token** (``auth=False``): 云端回 401, 而这里不调 ``_on_response``,
+        因此不会把已登录用户踢下线。
+
+        异常必须在这里吞掉 —— 逃出 ``start_soon`` 会拆掉整个 task group, 连带杀死
+        Gateway。``_call`` 目前自己收敛异常, 但预热的代价太高, 不赌它将来不变。
+        """
         try:
-            session = self._ensure_session()
-            async with session.request(method, url, json=payload, headers=headers) as resp:
-                body: dict[str, Any]
-                try:
-                    body = await resp.json()
-                except Exception:
-                    text = await resp.text()
-                    body = {"error": "bad_response", "detail": text[:200]}
-                if isinstance(body, list):
-                    # 云端 ``GET /sessions`` 回**裸数组**。这里的返回类型契约是 dict,
-                    # 但不能因此把数据丢掉 —— 装进信封转交, 由路由层原样下发。
-                    # (曾经这一支落到下面的 bad_response, 设备列表恒为空。)
-                    body = {"items": body}
-                elif not isinstance(body, dict):
-                    body = {"error": "bad_response"}
-                # 云端把重试间隔放在 ``Retry-After`` **响应头**里, 响应体里没有。
-                # 而 SPA 的 fetch 封装只读 body —— 于是「请 60 秒后再试」的倒计时
-                # 永远拿不到秒数, 只能不显示或瞎猜。在此抄进 body, 前端契约保持
-                # 「所有信息都在 body」一条, 不必让每个调用点都去摸 headers。
-                if "retryAfter" not in body:
-                    raw_retry = resp.headers.get("Retry-After", "")
-                    if raw_retry.strip().isdigit():
-                        body["retryAfter"] = int(raw_retry.strip())
-                return resp.status, body
+            await self._call("GET", "/me", retry=True)
         except Exception as e:
-            logger.warning(f"认证服务请求失败 {method} {path}: {e!r}")
-            return 0, {"error": "upstream_unreachable", "detail": repr(e)[:200]}
+            logger.debug(f"连接预热失败, 忽略: {e!r}")
+        finally:
+            # 必须复位, 否则一次失败就永久堵死后续预热。
+            self._warming = False
 
     async def _on_response(self, status: int) -> None:
         """401 即清本地凭证 —— 云端撤销设备后, 本机不该继续显示已登录。"""
@@ -297,7 +399,7 @@ class AuthManager:
 
     # ---- 已登录接口 ----
     async def me(self) -> tuple[int, dict[str, Any]]:
-        status, body = await self._call("GET", "/me", auth=True)
+        status, body = await self._call("GET", "/me", auth=True, retry=True)
         await self._on_response(status)
         return status, body
 
@@ -307,7 +409,7 @@ class AuthManager:
         云端回裸数组, ``_call`` 会装进 ``items`` 信封; 在此拆回并落到页面契约的
         ``devices`` 键, 页面不必再猜三种形状。
         """
-        status, body = await self._call("GET", "/sessions", auth=True)
+        status, body = await self._call("GET", "/sessions", auth=True, retry=True)
         await self._on_response(status)
         if status == 200:
             items = body.get("items")
@@ -317,6 +419,8 @@ class AuthManager:
         return status, body
 
     async def revoke_device(self, device_id: str) -> tuple[int, dict[str, Any]]:
+        # 不开 retry。DELETE 按 HTTP 语义算幂等, 但重试拿到的 404 会让界面说
+        # 「设备不存在」—— 而第一次其实已经删成功了。误导比省一个 RTT 重要。
         if not device_id:
             return 400, {"error": "device_id_required"}
         status, body = await self._call("DELETE", f"/sessions/{device_id}", auth=True)
