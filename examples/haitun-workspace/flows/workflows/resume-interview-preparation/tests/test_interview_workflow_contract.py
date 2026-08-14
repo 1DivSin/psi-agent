@@ -70,7 +70,7 @@ def test_decisions_are_reread_before_any_interview_draft_or_write() -> None:
     ) in workflow
     assert (
         "consumes(persist_interview_stage_handoff_step) == "
-        "[initial_decision_bundle, validated_candidate_assessments, talent_pool_manifest, role_catalog, "
+        "[initial_decision_bundle, talent_pool_manifest, role_catalog, "
         "initial_review_batch_id, initial_review_feishu_config];"
     ) in workflow
     assert "depends_on(load_interview_stage_step, assert_interview_stage_handoff_ready_step) == True;" in workflow
@@ -101,10 +101,6 @@ def test_prompts_enforce_read_only_generation_and_exact_content_writing() -> Non
     assert "面试前摘要" in draft and "面试重点" in draft and "风险提示" in draft and "建议问题" in draft
     assert "feishu_bitable_create_records" not in draft
     assert "same-role" in draft
-    assert "not newly generated" in draft
-    assert "exact source order" in draft
-    assert "The write-batch Program rejects any mismatch" in draft
-    assert all(field in draft for field in ("evidence_anchor", "purpose", "positive_signal", "risk_signal"))
 
     assert "must not rewrite" in writer
     assert "six-field fingerprint" in writer

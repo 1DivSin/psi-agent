@@ -17,35 +17,6 @@ TALENT_RECORD_ID = "recTalent00001"
 REJECTED_RECORD_ID = "recTalent00002"
 
 
-def _questions() -> list[dict]:
-    return [
-        {
-            "question": "请说明 Python 项目中你个人负责的关键工作。",
-            "category": "真实性核验",
-            "evidence_anchor": "使用 Python",
-            "purpose": "核实项目真实性和个人贡献。",
-            "positive_signal": "能够说明个人职责和结果。",
-            "risk_signal": "回答缺少个人职责或结果。",
-        },
-        {
-            "question": "针对 Python 要求\uff0c请说明一次复杂问题的解决过程。",
-            "category": "岗位匹配",
-            "evidence_anchor": "Python",
-            "purpose": "判断岗位所需的 Python 工程深度。",
-            "positive_signal": "能够说明方案、取舍和结果。",
-            "risk_signal": "回答仅列技术名词。",
-        },
-        {
-            "question": "请澄清生产经验的证据范围。",
-            "category": "风险澄清",
-            "evidence_anchor": "生产经验",
-            "purpose": "澄清生产经验的证据缺口。",
-            "positive_signal": "能够提供可验证案例。",
-            "risk_signal": "案例缺少可验证结果。",
-        },
-    ]
-
-
 def _load_module():
     spec = importlib.util.spec_from_file_location("persist_interview_stage_handoff", PROGRAM_PATH)
     assert spec is not None and spec.loader is not None
@@ -72,7 +43,6 @@ def _assessment(candidate_id: str, candidate_name: str, revision: str) -> dict:
         "resume_summary": ["- 完成 AI 应用项目"],
         "interview_recommendation": "建议面试",
         "interview_recommendation_reason": "岗位证据明确。",
-        "verification_questions": _questions(),
         "document_revisions": {
             "resume_scoring_sha256": "b" * 64,
             "role_information_sha256": ROLE_REVISION,
@@ -122,13 +92,6 @@ def _inputs() -> dict:
             "pending": [],
             "errors": [],
         },
-        "validated_candidate_assessments": {
-            "schema_version": "3.0",
-            "status": "complete",
-            "batch_id": BATCH_ID,
-            "assessments": [copy.deepcopy(approved), copy.deepcopy(rejected)],
-            "errors": [],
-        },
         "talent_pool_manifest": {
             "schema_version": "4.0",
             "status": "complete",
@@ -162,22 +125,6 @@ def _inputs() -> dict:
             "identity": "bot",
         },
     }
-
-
-def _remove_one_of_four_questions(data: dict) -> None:
-    fourth_question = {
-        "question": "请说明一次 Python 方案取舍及最终结果。",
-        "category": "岗位匹配",
-        "evidence_anchor": "Python",
-        "purpose": "补充核验工程决策能力。",
-        "positive_signal": "能够说明约束、取舍和结果。",
-        "risk_signal": "只能描述方案且无法解释取舍。",
-    }
-    source_questions = data["validated_candidate_assessments"]["assessments"][0]["verification_questions"]
-    decision_questions = data["initial_decision_bundle"]["approved"][0]["assessment"]["verification_questions"]
-    source_questions.append(copy.deepcopy(fourth_question))
-    decision_questions.append(copy.deepcopy(fourth_question))
-    decision_questions.pop(1)
 
 
 def _canonical_text(value: object) -> str:
@@ -289,24 +236,14 @@ def test_conflicting_existing_handoff_is_not_overwritten(tmp_path: Path) -> None
             "approved.*通过",
         ),
         (
-            lambda data: (
-                data["validated_candidate_assessments"]["assessments"][0].update(
-                    matched_role_key="role-missing"
-                ),
-                data["initial_decision_bundle"]["approved"][0]["assessment"].update(
-                    matched_role_key="role-missing"
-                ),
+            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"].update(
+                matched_role_key="role-missing"
             ),
             "active role",
         ),
         (
-            lambda data: (
-                data["validated_candidate_assessments"]["assessments"][0]["document_revisions"].update(
-                    role_information_sha256="9" * 64
-                ),
-                data["initial_decision_bundle"]["approved"][0]["assessment"]["document_revisions"].update(
-                    role_information_sha256="9" * 64
-                ),
+            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"]["document_revisions"].update(
+                role_information_sha256="9" * 64
             ),
             "role document revision",
         ),
@@ -336,32 +273,6 @@ def test_conflicting_existing_handoff_is_not_overwritten(tmp_path: Path) -> None
                 data["initial_decision_bundle"]["rejected"][0]["assessment"].update(candidate_id="a" * 16),
             ),
             "duplicate candidate",
-        ),
-        (
-            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"][
-                "verification_questions"
-            ].pop(),
-            "3 to 6",
-        ),
-        (
-            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"][
-                "verification_questions"
-            ][0].update(question="请介绍一个与岗位无关的项目。"),
-            "immutable validated assessment",
-        ),
-        (
-            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"].update(total_score=99),
-            "immutable validated assessment",
-        ),
-        (
-            _remove_one_of_four_questions,
-            "immutable validated assessment",
-        ),
-        (
-            lambda data: data["initial_decision_bundle"]["approved"][0]["assessment"][
-                "verification_questions"
-            ].reverse(),
-            "immutable validated assessment",
         ),
     ],
 )

@@ -29,11 +29,6 @@ Channel 层新增 Feishu（飞书）通道，通过 `lark-channel-sdk` 将飞书
 
 **批量消息**：多份文件是**多条**飞书消息，被 SDK 合并成一条虚拟消息后，上表两行都必须**逐条源消息**（`ctx.batched_sources`）遍历、各用自己的 `message_id` 下载，而非读合并后的 `ctx.resources` / `content_text`。见 §5.1。
 
-生产必须显式使用 `SafetyConfig(media_batch=MediaBatchConfig(enabled=True))`。
-SDK 默认关闭媒体批处理；未开启时，一次多选的文件不会进入同一合并回合，
-因此不能依赖 `batched_sources` 来接收完整简历批次。分多条消息逐步收集的
-`workflow-input-collections` 协议不依赖这个 SDK 时间窗口。
-
 ---
 
 ## 4. ChannelFeishu

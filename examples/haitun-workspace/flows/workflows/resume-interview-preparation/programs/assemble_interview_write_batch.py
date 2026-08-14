@@ -12,15 +12,6 @@ _CANDIDATE_ID = re.compile(r"^[0-9a-f]{16}$")
 _RECORD_ID = re.compile(r"^rec[A-Za-z0-9]{8,64}$")
 _REVISION = re.compile(r"^[0-9a-f]{64}$")
 _GENERATED_FIELDS = ("面试前摘要", "面试重点", "风险提示", "建议问题")
-_QUESTION_FIELDS = {
-    "question",
-    "category",
-    "evidence_anchor",
-    "purpose",
-    "positive_signal",
-    "risk_signal",
-}
-_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
 
 
 def _load_inputs() -> dict[str, Any]:
@@ -66,34 +57,6 @@ def _normalize_text(value: Any, path: str) -> tuple[str, bool]:
     raise TypeError(f"{path} must be text or a text array")
 
 
-def _render_questions(value: Any, path: str, *, require_risk: bool) -> str:
-    if not isinstance(value, list) or not 3 <= len(value) <= 6:
-        raise ValueError(f"{path} must contain 3 to 6 questions")
-    lines: list[str] = []
-    categories: set[str] = set()
-    seen_questions: set[str] = set()
-    for index, item in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
-            raise ValueError(f"{item_path} fields do not match the question-bank contract")
-        for field in _QUESTION_FIELDS:
-            _required_text(item.get(field), f"{item_path}.{field}")
-        category = item["category"]
-        if category not in _QUESTION_CATEGORIES:
-            raise ValueError(f"{item_path}.category is invalid")
-        normalized_question = item["question"].strip()
-        if normalized_question in seen_questions:
-            raise ValueError(f"{item_path}.question is duplicated")
-        seen_questions.add(normalized_question)
-        categories.add(category)
-        lines.append(f"{index + 1}. [{category}] {normalized_question}")
-    if not {"真实性核验", "岗位匹配"} <= categories:
-        raise ValueError(f"{path} must cover authenticity and role-match categories")
-    if require_risk and "风险澄清" not in categories:
-        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
-    return "\n".join(lines)
-
-
 def _validate_task(task: Any, batch_id: str, index: int) -> tuple[str, dict[str, Any]]:
     path = f"approved_interview_tasks[{index}]"
     if not isinstance(task, dict):
@@ -129,11 +92,6 @@ def _validate_task(task: Any, batch_id: str, index: int) -> tuple[str, dict[str,
         "matched_role_name"
     ):
         raise ValueError(f"{path}.matched role does not match its assessment")
-    _render_questions(
-        assessment.get("verification_questions"),
-        f"{path}.assessment.verification_questions",
-        require_risk=bool(assessment.get("mismatch_points")),
-    )
     return candidate_id, task
 
 
@@ -248,16 +206,6 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
         warnings.extend(_style_warnings(candidate_id, normalized))
 
         assessment = task["assessment"]
-        expected_questions = _render_questions(
-            assessment["verification_questions"],
-            f"approved_interview_tasks[{index}].assessment.verification_questions",
-            require_risk=bool(assessment.get("mismatch_points")),
-        )
-        if normalized["建议问题"] != expected_questions:
-            raise ValueError(
-                f"interview_drafts[{index}].建议问题 must exactly reuse the assessment verification questions"
-            )
-        normalized["建议问题"] = expected_questions
         records.append(
             {
                 "candidate_id": candidate_id,

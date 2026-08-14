@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import sys
@@ -32,24 +31,6 @@ _AI_FINGERPRINT_FIELDS = {
     "不匹配点",
     "面试建议",
     "面试建议理由",
-    "问题库",
-}
-_QUESTION_FIELDS = {
-    "question",
-    "category",
-    "evidence_anchor",
-    "purpose",
-    "positive_signal",
-    "risk_signal",
-}
-_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
-_MANIFEST_RECORD_FIELDS = {
-    "record_id",
-    "candidate_id",
-    "assessment_revision",
-    "row_fingerprint",
-    "attachment_persisted",
-    "created",
 }
 
 
@@ -84,41 +65,12 @@ def _valid_revision(value: Any) -> bool:
 
 def _validate_row_fingerprint(value: Any, path: str) -> None:
     if not isinstance(value, dict) or set(value) != _AI_FINGERPRINT_FIELDS:
-        raise ValueError(f"{path}.row_fingerprint must contain the exact 12 AI-owned fields")
+        raise ValueError(f"{path}.row_fingerprint must contain the exact 11 AI-owned fields")
     score = value["总分"]
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-        raise TypeError(f"{path}.row_fingerprint.总分 must be a finite number")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise TypeError(f"{path}.row_fingerprint.总分 must be numeric")
     for field in _AI_FINGERPRINT_FIELDS - {"总分"}:
-        if not isinstance(value[field], str):
-            raise TypeError(f"{path}.row_fingerprint.{field} must be text")
-
-
-def _render_questions(value: Any, path: str, *, require_risk: bool) -> str:
-    if not isinstance(value, list) or not 3 <= len(value) <= 6:
-        raise ValueError(f"{path} must contain 3 to 6 questions")
-    lines: list[str] = []
-    categories: set[str] = set()
-    seen_questions: set[str] = set()
-    for index, item in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
-            raise ValueError(f"{item_path} fields do not match the question-bank contract")
-        for field in _QUESTION_FIELDS:
-            _required_text(item.get(field), f"{item_path}.{field}")
-        category = item["category"]
-        if category not in _QUESTION_CATEGORIES:
-            raise ValueError(f"{item_path}.category is invalid")
-        normalized_question = item["question"].strip()
-        if normalized_question in seen_questions:
-            raise ValueError(f"{item_path}.question is duplicated")
-        seen_questions.add(normalized_question)
-        categories.add(category)
-        lines.append(f"{index + 1}. [{category}] {normalized_question}")
-    if not {"真实性核验", "岗位匹配"} <= categories:
-        raise ValueError(f"{path} must cover authenticity and role-match categories")
-    if require_risk and "风险澄清" not in categories:
-        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
-    return "\n".join(lines)
+        _required_text(value[field], f"{path}.row_fingerprint.{field}")
 
 
 def _inside(child: str, parent: str) -> bool:
@@ -139,72 +91,6 @@ def _canonical_bytes(value: Any) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
-
-
-def _render_points(value: Any, path: str, *, mismatch: bool) -> str:
-    if not isinstance(value, list):
-        raise TypeError(f"{path} must be a table-writeable list")
-    lines: list[str] = []
-    for index, point in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if not isinstance(point, dict):
-            raise TypeError(f"{item_path} must be a table-writeable object")
-        requirement = point.get("requirement")
-        if not isinstance(requirement, str):
-            raise TypeError(f"{item_path}.requirement must be table-writeable text")
-        evidence = point.get("resume_evidence")
-        if not isinstance(evidence, list) or any(not isinstance(item, str) for item in evidence):
-            raise TypeError(f"{item_path}.resume_evidence must be a table-writeable text list")
-        evidence_text = "、".join(evidence)
-        if mismatch:
-            lines.append(f"- 风险\uff1a{requirement}\uff1b依据\uff1a{evidence_text}")
-        else:
-            lines.append(f"- 要求\uff1a{requirement}\uff1b证据\uff1a{evidence_text}")
-    return "\n".join(lines)
-
-
-def _expected_row_fingerprint(assessment: dict[str, Any], path: str) -> dict[str, Any]:
-    text_fields = {
-        "姓名": "candidate_name",
-        "评级": "grade",
-        "学历": "education",
-        "毕业院校/背景": "education_background",
-        "匹配岗位": "matched_role_name",
-        "面试建议": "interview_recommendation",
-        "面试建议理由": "interview_recommendation_reason",
-    }
-    fingerprint: dict[str, Any] = {}
-    for visible_field, assessment_field in text_fields.items():
-        value = assessment.get(assessment_field)
-        if not isinstance(value, str):
-            raise TypeError(f"{path}.{assessment_field} must be table-writeable text")
-        fingerprint[visible_field] = value
-
-    summary = assessment.get("resume_summary")
-    if not isinstance(summary, list) or any(not isinstance(item, str) for item in summary):
-        raise TypeError(f"{path}.resume_summary must be a table-writeable JSON string array")
-    score = assessment.get("total_score")
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-        raise TypeError(f"{path}.total_score must be a finite number")
-
-    fingerprint.update(
-        {
-            "简历摘要": "\n".join(summary),
-            "总分": score,
-            "匹配点": _render_points(assessment.get("match_points"), f"{path}.match_points", mismatch=False),
-            "不匹配点": _render_points(
-                assessment.get("mismatch_points"),
-                f"{path}.mismatch_points",
-                mismatch=True,
-            ),
-            "问题库": _render_questions(
-                assessment.get("verification_questions"),
-                f"{path}.verification_questions",
-                require_risk=bool(assessment.get("mismatch_points")),
-            ),
-        }
-    )
-    return fingerprint
 
 
 def _validate_assessments(value: Any, batch_id: str) -> dict[str, dict[str, Any]]:
@@ -242,11 +128,6 @@ def _validate_assessments(value: Any, batch_id: str) -> dict[str, dict[str, Any]
             or not all(_valid_revision(revision) for revision in revisions.values())
         ):
             raise ValueError(f"{path}.document_revisions is invalid")
-        _render_questions(
-            assessment.get("verification_questions"),
-            f"{path}.verification_questions",
-            require_risk=bool(assessment.get("mismatch_points")),
-        )
         indexed[candidate_id] = assessment
     return indexed
 
@@ -275,12 +156,6 @@ def _validate_manifest(
         path = f"talent_pool_manifest.records[{index}]"
         if not isinstance(record, dict):
             raise TypeError(f"{path} must be an object")
-        if set(record) != _MANIFEST_RECORD_FIELDS:
-            raise ValueError(f"{path} must contain only the private attachment-safe manifest fields")
-        if record.get("attachment_persisted") is not True:
-            raise ValueError(f"{path}.attachment_persisted must be true")
-        if not isinstance(record.get("created"), bool):
-            raise TypeError(f"{path}.created must be boolean")
         candidate_id = record.get("candidate_id")
         record_id = record.get("record_id")
         if not isinstance(candidate_id, str) or _CANDIDATE_ID.fullmatch(candidate_id) is None:
@@ -294,21 +169,7 @@ def _validate_manifest(
             raise ValueError("talent_pool_manifest must exactly cover validated assessments")
         if record.get("assessment_revision") != assessment["assessment_revision"]:
             raise ValueError(f"{path}.assessment_revision does not match the validated revision")
-        fingerprint = record.get("row_fingerprint")
-        _validate_row_fingerprint(fingerprint, path)
-        expected_fingerprint = _expected_row_fingerprint(
-            assessment,
-            f"validated_candidate_assessments.assessments[{candidate_id}]",
-        )
-        mismatched_fields = sorted(
-            field
-            for field in _AI_FINGERPRINT_FIELDS
-            if _canonical_bytes(fingerprint[field]) != _canonical_bytes(expected_fingerprint[field])
-        )
-        if mismatched_fields:
-            raise ValueError(
-                f"{path}.row_fingerprint does not match the validated assessment: {','.join(mismatched_fields)}"
-            )
+        _validate_row_fingerprint(record.get("row_fingerprint"), path)
         indexed[candidate_id] = record
         record_ids.add(record_id)
     if set(indexed) != set(assessments):
@@ -360,7 +221,7 @@ def _review_request(batch_id: str, count: int, base_url: str, view_name: str) ->
         f"**请打开**\uff1a{base_url} → 数据表「候选人才库」→ 视图「{view_name}」\n"
         f"**本次建档**\uff1a{count} 名候选人\n"
         "**你的操作**\uff1a逐行查看简历摘要、总分、评级、匹配岗位、匹配点、不匹配点、"
-        "面试建议、面试建议理由和问题库\uff0c然后只修改「初审状态」为「通过」或「不通过」。"
+        "面试建议和面试建议理由\uff0c然后只修改「初审状态」为「通过」或「不通过」。"
         "全部完成后\uff0c请回到聊天并只回复\uff1a初审完成\n"
         "收到后将直接启动下一阶段 workflow:resume-interview-preparation。"
         "只要仍存在「待审批」\uff0c下一阶段会拒绝执行。"

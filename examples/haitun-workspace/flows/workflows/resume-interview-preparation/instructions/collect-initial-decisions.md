@@ -5,7 +5,7 @@ Re-read the talent-pool table after the external Human review and join every dec
 - Require `talent_pool_manifest.status=complete` and `validated_candidate_assessments.status=complete`.
 - Query the configured talent table with pagination and retrieve every exact Feishu `record_id` stored in `talent_pool_manifest.records`. Never join by name.
 - Require exactly one live row for every stored `record_id`; missing or duplicate records block the whole batch.
-- Compare the complete 12-field AI-owned `row_fingerprint`, including `问题库`, from the manifest with the live row. Human-owned `备注` and `初审状态` are excluded. Any other changed, missing, or malformed visible field blocks the whole batch.
+- Compare the complete 11-field AI-owned `row_fingerprint` from the manifest with the live row. Human-owned `备注` and `初审状态` are excluded. Any other changed, missing, or malformed visible field blocks the whole batch.
 - Accept only `通过` or `不通过` from `初审状态`; `待审批`, missing, or malformed decisions block the whole batch.
 - Preserve the complete validated assessment, exact `record_id`, and decision. Do not write, update, or delete any Feishu row.
 

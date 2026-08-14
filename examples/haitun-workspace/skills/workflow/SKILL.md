@@ -68,7 +68,7 @@ The skill's job is to:
 2. Save reusable source at the fixed path with existing file tools when requested.
 3. Start it through `run_flow`.
 4. If it reaches a Human Step, pass the nested `$fusion_flow/control.request` fields to the existing `clarify` tool, end the turn, and resume from the next user message.
-5. Deliver the final business result without reproducing the raw output Artifact mapping. When the result contains `user_facing_summary`, use only its explicit `text` field for the user-facing completion.
+5. Return only the final workflow output Artifact mapping.
 
 ## Intent Routing
 
@@ -136,7 +136,7 @@ Pass named workflow inputs through `inputs_json`. Do not rewrite the G4 source j
 
 Pass run-local resource pools through `resource_capacities_json` only when the workflow declares `resource_requirement`.
 
-Call `run_flow` once. If it returns output Artifacts, use them as the result. If an explicit `user_facing_summary.text` is present, show that text rather than the tool JSON or full Artifact mapping. If it returns a `$fusion_flow/control` object with `status == "waiting_for_human"`, follow the Human protocol below. A Human wait is not a completed result. This reserved key cannot be a G4 Artifact ID, so an ordinary output Artifact named `status` is never control state.
+Call `run_flow` once. If it returns output Artifacts, use them as the result. If it returns a `$fusion_flow/control` object with `status == "waiting_for_human"`, follow the Human protocol below. This reserved key cannot be a G4 Artifact ID, so an ordinary output Artifact named `status` is never control state.
 
 ### Human wait and resume
 
@@ -149,7 +149,7 @@ When `run_flow` or `run_flow_resume` returns a sole top-level `$fusion_flow/cont
 3. On the next user message, map a numbered choice to its option label. If the user selected the generated `Other` line without supplying text, ask for that text first. For an open-ended request with a non-empty `default`, map an affirmative acceptance such as “可以” or “ok” to that exact default. Preserve other free text or structured content.
 4. For a single-output Human Step, JSON-encode every mapped option label or default as a JSON string. Pass other ordinary non-empty free text directly, except JSON-encode it as a JSON string when its trimmed spelling is valid JSON, starts with `{`, `[`, or `"`, or equals `NaN`, `Infinity`, or `-Infinity`. JSON-encode non-string structured content. Multiple output Artifacts require a JSON object keyed exactly by those Artifact IDs; JSON-encode that object without dropping or adding keys.
 5. Call `run_flow_resume` with the exact `$fusion_flow/control.run_id` and `.request.request_id`.
-6. If another Human request is returned, repeat this protocol. Otherwise deliver the final business result; prefer the explicit `user_facing_summary.text` and never reproduce the raw output mapping.
+6. If another Human request is returned, repeat this protocol. Otherwise report the final output Artifact mapping.
 
 Never invent, reuse, or guess a run/request ID. A changed workflow source, stale request, or conflicting duplicate response is a stop-and-report error.
 
@@ -163,7 +163,7 @@ Before executing a G4 workflow:
 
 ### Running is the runtime's job, not yours
 
-Resolve the workspace-relative G4 path and submit it to `run_flow`. Deliver its explicit safe summary or a concise business result, never the raw output mapping. Do not reproduce parsing, dependency scheduling, resource leasing, or Step execution in the parent Session.
+Resolve the workspace-relative G4 path, submit it to `run_flow`, and report the returned output mapping. Do not reproduce parsing, dependency scheduling, resource leasing, or Step execution in the parent Session.
 
 Agent-backed Steps must never invoke `run_flow` or start another workflow. A
 Step may save a self-contained child declaration to the fixed reusable folder;
@@ -199,9 +199,7 @@ The tool does not expose intermediate progress. Do not invent node status while 
 
 ## Reading a Run
 
-When a call returns output Artifacts, use `user_facing_summary.text` when that
-explicit field exists; otherwise summarize only the necessary business result.
-Never paste the tool JSON or raw output mapping into chat. The runtime has already
+When a call returns output Artifacts, summarize them. The runtime has already
 persisted every materialized input, intermediate, selected, and final Artifact
 as one Markdown file under the workflow bundle's
 `runs/<run-id>/artifacts/` directory. String values are written verbatim;
@@ -661,7 +659,7 @@ This manual source review is not a second tool or CLI invocation. Inside `run_fl
 
 1. Call `run_flow(flow_path=..., inputs_json=..., resource_capacities_json=...)` once. Omit resource capacities when the graph declares no resource requirement.
 2. If it returns a `$fusion_flow/control` Human-wait envelope, follow the Human wait/resume protocol exactly. Do not present that envelope as the workflow result.
-3. When a call returns output Artifacts, use its explicit `user_facing_summary.text` when present; otherwise summarize the necessary business result without exposing the raw mapping.
+3. When a call returns output Artifacts, summarize them in plain language.
 4. On error, report the compiler diagnostic or failed Step without creating a second workflow or bypassing the runner.
 
 ### What Authoring Mode is NOT
