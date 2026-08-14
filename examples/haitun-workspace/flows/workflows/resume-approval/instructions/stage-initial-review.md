@@ -4,7 +4,7 @@ Create or reuse one 14-field initial-review row in the configured `候选人才�
 
 ## Fail-closed guard and SHA binding
 
-- Before any Feishu call, require `validated_candidate_assessments.status=complete`, a non-empty `assessments` list, the validator-generated `assessment_revision`, a non-empty `staged_resume_files` list, and non-empty runtime `feishu_config.app_token` and `feishu_config.talent_pool_table_id`. `constraint_warnings` do not block a row whose mapped fields remain writeable. Otherwise perform no Feishu read, upload, or write.
+- Before any Feishu call, require `validated_candidate_assessments.status=complete`, a non-empty `assessments` list, the validator-generated `assessment_revision`, a non-empty `staged_resume_files` list, non-empty runtime `feishu_config.app_token`, and non-empty runtime `feishu_config.talent_pool_table_id`. `constraint_warnings` do not block a row whose mapped fields remain writeable. Otherwise perform no Feishu read, upload, or write.
 - Validate every staged descriptor before making a Feishu call. It must have a 64-character lowercase `sha256`, an allowed `format` (`.pdf`, `.docx`, `.md`, or `.txt`), a neutral `name` equal to `resume<format>`, a non-empty internal `path`, `temporary=true`, and integer `size_bytes` from 1 through 20971520. Never upload `original_name` as the remote filename.
 - For each assessment, match `assessment.source.sha256` to `staged_resume_file.sha256`. Require exactly one matching descriptor for every assessment. A zero match, duplicate SHA match, malformed descriptor, or reused staged descriptor blocks the whole batch before any Feishu call.
 - SHA-256 is the only attachment join key. Never associate a file by candidate name, local filename, `original_name`, list position, or fuzzy similarity.
