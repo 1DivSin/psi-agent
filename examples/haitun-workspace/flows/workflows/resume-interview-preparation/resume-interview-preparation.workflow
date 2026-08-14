@@ -15,6 +15,7 @@ const assert_write_batch_ready_step:Step;
 const write_interview_records_step:Step;
 const persist_interview_handoffs_step:Step;
 const assert_interview_handoff_ready_step:Step;
+const build_user_facing_summary_step:Step;
 
 const initial_review_handoff_loader:Program,Executor;
 const interview_stage_handoff_persister:Program,Executor;
@@ -22,6 +23,7 @@ const interview_stage_loader:Program,Executor;
 const interview_write_batch_assembler:Program,Executor;
 const interview_handoff_persister:Program,Executor;
 const program_error_assertion:Program,Executor;
+const user_facing_summary_builder:Program,Executor;
 const initial_decision_agent:Agent,Executor;
 const interview_draft_agent:Agent,Executor;
 const interview_write_agent:Agent,Executor;
@@ -53,13 +55,15 @@ const draft_validation_manifest:Artifact;
 const interview_manifest:Artifact;
 const interview_record_ids:Artifact,List;
 const interview_handoff_receipt:Artifact;
+const user_facing_summary:Artifact;
 
 workflow resume_interview_preparation {
     input_workflow(resume_interview_preparation) == [initial_review_handoff];
     output_workflow(resume_interview_preparation) == [
         interview_manifest,
         interview_record_ids,
-        interview_handoff_receipt
+        interview_handoff_receipt,
+        user_facing_summary
     ];
     max_concurrency(resume_interview_preparation) == 4;
     workflow_timeout(resume_interview_preparation) == 1800;
@@ -70,6 +74,7 @@ workflow resume_interview_preparation {
     program_path(interview_write_batch_assembler) == "./flows/workflows/resume-interview-preparation/programs/assemble_interview_write_batch.py";
     program_path(interview_handoff_persister) == "./flows/workflows/resume-approval/programs/persist_interview_handoffs.py";
     program_path(program_error_assertion) == "./flows/workflows/resume-approval/programs/assert_no_program_errors.py";
+    program_path(user_facing_summary_builder) == "./flows/workflows/resume-approval/programs/build_user_facing_summary.py";
 
     step_name(load_initial_review_handoff_step) == "Load immutable initial-review source";
     step_instruction(load_initial_review_handoff_step) == "Verify the strict descriptor, exact file hash and path, assessment-to-talent-record coverage, role provenance, and unchanged local Feishu destination before reading Human decisions.";
@@ -170,6 +175,14 @@ workflow resume_interview_preparation {
     consumes(assert_interview_handoff_ready_step) == [interview_record_ids, interview_handoff_receipt];
     depends_on(assert_interview_handoff_ready_step, persist_interview_handoffs_step) == True;
     step_timeout(assert_interview_handoff_ready_step) == 180;
+
+    step_name(build_user_facing_summary_step) == "Build safe user-facing interview-preparation summary";
+    step_instruction(build_user_facing_summary_step) == "Build the deterministic privacy-conscious business summary exposed to the invoking user.";
+    step_executor(build_user_facing_summary_step) == user_facing_summary_builder;
+    consumes(build_user_facing_summary_step) == [interview_stage_bundle, interview_manifest, interview_handoff_receipt, feishu_config];
+    depends_on(build_user_facing_summary_step, assert_interview_handoff_ready_step) == True;
+    produces(build_user_facing_summary_step) == [user_facing_summary];
+    step_timeout(build_user_facing_summary_step) == 180;
 
     allowed_tool(initial_decision_agent, feishu_bitable_search_records);
     agent_system_prompt(initial_decision_agent) == "Read the exact talent records from the immutable initial-review source, verify the complete AI-owned fingerprint and one final Human decision per record, and return exactly one valid JSON object with initial_decision_bundle as its sole top-level key. Never join by name or write any Feishu row.";

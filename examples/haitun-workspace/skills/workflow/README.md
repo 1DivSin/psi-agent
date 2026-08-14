@@ -46,6 +46,22 @@ launcher process CWD.
 This Skill ships no runnable workflow registry. Workspace owners may commit
 canonical reusable declarations under `flows/workflows/<slug>/`.
 
+## User-facing completion
+
+Final Artifact mappings remain runtime data, not chat output. A workflow that
+needs deterministic user-visible completion publishes a
+`user_facing_summary` Artifact with schema `1.0` and an explicit `text` field.
+The parent Session presents only that text; it does not expose private handoff
+objects, technical IDs, destination configuration, or the full output mapping.
+
+For an ordinary `kind=chat` turn, Session has a narrow fallback when the model
+returns an empty final `stop`: only `run_flow` and `run_flow_resume` results can
+supply `user_facing_summary.text`, and the fallback is persisted as an ordinary
+assistant reply. A `$fusion_flow/control.status=waiting_for_human` envelope is
+never completion. Background `schedule.*` and `trigger.*` turns retain their
+silent semantics, even if a workflow result contains a summary. Tool failures
+use a fixed sanitized failure receipt rather than exception text.
+
 ## Modules
 
 - `grammar/FusionFlow.g4`: the syntax grammar; ordinary preset/external-operator arity remains checker-owned.

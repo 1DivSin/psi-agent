@@ -30,6 +30,7 @@ const assert_initial_review_ready_step:Step;
 const stage_initial_review_step:Step;
 const persist_initial_review_handoff_step:Step;
 const assert_initial_review_handoff_ready_step:Step;
+const build_user_facing_summary_step:Step;
 
 const defaults_loader:Program,Executor;
 const reference_document_fetcher:Program,Executor;
@@ -45,6 +46,7 @@ const assessment_validator:Program,Executor;
 const workflow_ready_assertion:Program,Executor;
 const program_error_assertion:Program,Executor;
 const initial_review_handoff_persister:Program,Executor;
+const user_facing_summary_builder:Program,Executor;
 const role_catalog_agent:Agent,Executor;
 const resume_analyzer:Agent,Executor;
 const assessment_repair_agent:Agent,Executor;
@@ -94,6 +96,7 @@ const talent_pool_manifest:Artifact;
 const initial_review_handoff:Artifact;
 const initial_review_handoff_manifest:Artifact;
 const initial_review_request:Artifact;
+const user_facing_summary:Artifact;
 
 workflow resume_approval {
     input_workflow(resume_approval) == [resume_files];
@@ -101,7 +104,8 @@ workflow resume_approval {
         validated_candidate_assessments,
         talent_pool_manifest,
         initial_review_handoff,
-        initial_review_request
+        initial_review_request,
+        user_facing_summary
     ];
     max_concurrency(resume_approval) == 4;
     workflow_timeout(resume_approval) == 3600;
@@ -120,6 +124,7 @@ workflow resume_approval {
     program_path(workflow_ready_assertion) == "./flows/workflows/resume-approval/programs/assert_workflow_ready.py";
     program_path(program_error_assertion) == "./flows/workflows/resume-approval/programs/assert_no_program_errors.py";
     program_path(initial_review_handoff_persister) == "./flows/workflows/resume-approval/programs/persist_initial_review_handoff.py";
+    program_path(user_facing_summary_builder) == "./flows/workflows/resume-approval/programs/build_user_facing_summary.py";
 
     step_name(load_defaults_step) == "Load role, batch, reference sources, and Feishu configuration";
     step_instruction(load_defaults_step) == "Load local configuration and select one explicit active job requirement. Never infer the role from a resume.";
@@ -383,6 +388,14 @@ workflow resume_approval {
     consumes(assert_initial_review_handoff_ready_step) == [initial_review_handoff, initial_review_handoff_manifest, initial_review_request];
     depends_on(assert_initial_review_handoff_ready_step, persist_initial_review_handoff_step) == True;
     step_timeout(assert_initial_review_handoff_ready_step) == 180;
+
+    step_name(build_user_facing_summary_step) == "Build safe user-facing initial-review summary";
+    step_instruction(build_user_facing_summary_step) == "Build the deterministic privacy-conscious business summary exposed to the invoking user.";
+    step_executor(build_user_facing_summary_step) == user_facing_summary_builder;
+    consumes(build_user_facing_summary_step) == [validated_candidate_assessments, talent_pool_manifest, initial_review_request, feishu_config];
+    depends_on(build_user_facing_summary_step, assert_initial_review_handoff_ready_step) == True;
+    produces(build_user_facing_summary_step) == [user_facing_summary];
+    step_timeout(build_user_facing_summary_step) == 180;
 
     allowed_tool(resume_analyzer, read);
     allowed_tool(resume_analyzer, read_pdf);

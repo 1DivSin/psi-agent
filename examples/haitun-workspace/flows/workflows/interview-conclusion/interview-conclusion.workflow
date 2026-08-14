@@ -14,11 +14,13 @@ const final_human_review_step:Step;
 const collect_final_decisions_step:Step;
 const persist_final_results_step:Step;
 const append_report_step:Step;
+const build_user_facing_summary_step:Step;
 
 const interview_defaults_loader:Program,Executor;
 const interview_evidence_validator:Program,Executor;
 const hiring_conclusion_validator:Program,Executor;
 const workflow_ready_assertion:Program,Executor;
+const user_facing_summary_builder:Program,Executor;
 const interview_evidence_agent:Agent,Executor;
 const conclusion_agent:Agent,Executor;
 const final_review_agent:Agent,Executor;
@@ -50,6 +52,7 @@ const final_human_response:Artifact;
 const final_decisions:Artifact;
 const result_write_receipt:Artifact;
 const report_result:Artifact;
+const user_facing_summary:Artifact;
 
 workflow interview_conclusion {
     input_workflow(interview_conclusion) == [interview_record_ids];
@@ -58,7 +61,8 @@ workflow interview_conclusion {
         validated_hiring_conclusions,
         final_decisions,
         result_write_receipt,
-        report_result
+        report_result,
+        user_facing_summary
     ];
     max_concurrency(interview_conclusion) == 4;
     workflow_timeout(interview_conclusion) == 3600;
@@ -67,6 +71,7 @@ workflow interview_conclusion {
     program_path(interview_evidence_validator) == "./flows/workflows/resume-approval/programs/validate_interview_evidence.py";
     program_path(hiring_conclusion_validator) == "./flows/workflows/resume-approval/programs/validate_hiring_conclusions.py";
     program_path(workflow_ready_assertion) == "./flows/workflows/resume-approval/programs/assert_workflow_ready.py";
+    program_path(user_facing_summary_builder) == "./flows/workflows/resume-approval/programs/build_user_facing_summary.py";
 
     step_name(load_interview_defaults_step) == "Load interview conclusion configuration";
     step_instruction(load_interview_defaults_step) == "Validate unique interview business keys, load Feishu destinations, and derive a deterministic conclusion run id.";
@@ -171,6 +176,14 @@ workflow interview_conclusion {
     produces(append_report_step) == [report_result];
     step_timeout(append_report_step) == 600;
     max_attempts(append_report_step) == 2;
+
+    step_name(build_user_facing_summary_step) == "Build safe user-facing final-decision summary";
+    step_instruction(build_user_facing_summary_step) == "Build the deterministic privacy-conscious business summary exposed to the invoking user.";
+    step_executor(build_user_facing_summary_step) == user_facing_summary_builder;
+    consumes(build_user_facing_summary_step) == [validated_hiring_conclusions, final_decisions, result_write_receipt, report_result, feishu_config];
+    depends_on(build_user_facing_summary_step, append_report_step) == True;
+    produces(build_user_facing_summary_step) == [user_facing_summary];
+    step_timeout(build_user_facing_summary_step) == 180;
 
     allowed_tool(interview_evidence_agent, feishu_bitable_search_records);
     allowed_tool(interview_evidence_agent, read);
