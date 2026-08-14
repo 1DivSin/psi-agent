@@ -20,11 +20,11 @@ Build the 12-field AI fingerprint deterministically before deciding whether to u
 - `评级`: `grade`;
 - `学历`: `education`;
 - `毕业院校/背景`: `education_background`;
-- `简历摘要`: `resume_summary` must be a JSON string array; convert it deterministically to `"\n".join(resume_summary)` before writing the text field;
+- `简历摘要`: `resume_summary` must be a JSON string array; convert it deterministically to `"\n".join(resume_summary)` before writing the text field, and use an empty string for an empty list;
 - `总分`: numeric `total_score`;
 - `匹配岗位`: `matched_role_name`;
-- `匹配点`: convert the required non-empty `match_points` list to source-ordered lines, exactly `- 要求：…；证据：…` per point;
-- `不匹配点`: convert the required non-empty `mismatch_points` list to source-ordered lines, exactly `- 风险：…；依据：…` per point; preserve cautious evidence-gap wording;
+- `匹配点`: convert the table-writeable `match_points` list to source-ordered lines, exactly `- 要求：…；证据：…` per point; join multiple `resume_evidence` entries with `、` in source order, and use an empty string for an empty point list;
+- `不匹配点`: convert the table-writeable `mismatch_points` list to source-ordered lines, exactly `- 风险：…；依据：…` per point; join multiple `resume_evidence` entries with `、` in source order, use an empty string for an empty point list, and preserve cautious evidence-gap wording;
 - `面试建议`: exact `interview_recommendation` enum;
 - `面试建议理由`: `interview_recommendation_reason` as concise Chinese text;
 - `问题库`: render `verification_questions` in exact source order with no evidence metadata, exactly one line per item as `<1-based index>. [<category>] <question>`; for example `1. [真实性核验] 请说明 Python 项目中你个人负责的关键工作。`. Never expose `evidence_anchor`, `purpose`, `positive_signal`, or `risk_signal` in the table;

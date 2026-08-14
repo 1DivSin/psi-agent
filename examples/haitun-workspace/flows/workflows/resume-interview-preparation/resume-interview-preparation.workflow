@@ -95,9 +95,9 @@ workflow resume_interview_preparation {
     max_attempts(collect_initial_decisions_step) == 2;
 
     step_name(persist_interview_stage_handoff_step) == "Persist immutable reviewed interview-stage snapshot";
-    step_instruction(persist_interview_stage_handoff_step) == "Require every expected talent row to have exactly one final 通过 or 不通过 decision, then persist the canonical reviewed snapshot used by all downstream interview Steps.";
+    step_instruction(persist_interview_stage_handoff_step) == "Require every expected talent row to have exactly one final 通过 or 不通过 decision and every assessment to exactly match the immutable validated source, then persist the canonical reviewed snapshot used by all downstream interview Steps.";
     step_executor(persist_interview_stage_handoff_step) == interview_stage_handoff_persister;
-    consumes(persist_interview_stage_handoff_step) == [initial_decision_bundle, talent_pool_manifest, role_catalog, initial_review_batch_id, initial_review_feishu_config];
+    consumes(persist_interview_stage_handoff_step) == [initial_decision_bundle, validated_candidate_assessments, talent_pool_manifest, role_catalog, initial_review_batch_id, initial_review_feishu_config];
     depends_on(persist_interview_stage_handoff_step, collect_initial_decisions_step) == True;
     produces(persist_interview_stage_handoff_step) == [interview_stage_handoff, interview_stage_handoff_manifest];
     step_timeout(persist_interview_stage_handoff_step) == 180;

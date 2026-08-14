@@ -57,11 +57,17 @@ def _row_fingerprint() -> dict:
         "评级": "B",
         "学历": "硕士",
         "毕业院校/背景": "硕士\uff1a测试大学",
-        "简历摘要": '["- 有相关项目经验"]',
+        "简历摘要": "- 有相关项目经验\n- 完成可验证交付",
         "总分": 82,
         "匹配岗位": "AI应用开发工程师",
-        "匹配点": '["- 要求\uff1aPython\uff1b证据\uff1a项目使用 Python"]',
-        "不匹配点": '["- 要求\uff1a生产经验\uff1b证据\uff1a简历未体现"]',
+        "匹配点": (
+            "- 要求\uff1aPython\uff1b证据\uff1a项目使用 Python、独立交付\n"
+            "- 要求\uff1aAI 应用\uff1b证据\uff1a完成应用原型"
+        ),
+        "不匹配点": (
+            "- 风险\uff1a生产经验\uff1b依据\uff1a简历未体现、需要核实\n"
+            "- 风险\uff1a规模化\uff1b依据\uff1a缺少规模数据"
+        ),
         "面试建议": "建议面试",
         "面试建议理由": "核心技能基本匹配。",
         "问题库": _rendered_questions(),
@@ -83,8 +89,23 @@ def _assessment() -> dict:
         "batch_id": BATCH_ID,
         "candidate_id": CANDIDATE_ID,
         "candidate_name": "测试候选人",
+        "grade": "B",
+        "education": "硕士",
+        "education_background": "硕士\uff1a测试大学",
+        "resume_summary": ["- 有相关项目经验", "- 完成可验证交付"],
+        "total_score": 82,
         "matched_role_key": ROLE_KEY,
         "matched_role_name": "AI应用开发工程师",
+        "match_points": [
+            {"requirement": "Python", "resume_evidence": ["项目使用 Python", "独立交付"]},
+            {"requirement": "AI 应用", "resume_evidence": ["完成应用原型"]},
+        ],
+        "mismatch_points": [
+            {"requirement": "生产经验", "resume_evidence": ["简历未体现", "需要核实"]},
+            {"requirement": "规模化", "resume_evidence": ["缺少规模数据"]},
+        ],
+        "interview_recommendation": "建议面试",
+        "interview_recommendation_reason": "核心技能基本匹配。",
         "verification_questions": _questions(),
         "document_revisions": {
             "resume_scoring_sha256": "b" * 64,
@@ -147,6 +168,29 @@ def _document() -> dict:
             "errors": [],
         },
     }
+
+
+def _apply_warning_only_values(document: dict) -> None:
+    assessment = document["validated_candidate_assessments"]["assessments"][0]
+    assessment.update(
+        education="",
+        education_background="",
+        resume_summary=[],
+        match_points=[],
+        mismatch_points=[{"requirement": "", "resume_evidence": []}],
+        interview_recommendation_reason="",
+    )
+    document["validated_candidate_assessments"]["constraint_warnings"] = ["content remains table-writeable"]
+    document["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+        学历="",
+        **{
+            "毕业院校/背景": "",
+            "简历摘要": "",
+            "匹配点": "",
+            "不匹配点": "- 风险\uff1a\uff1b依据\uff1a",
+            "面试建议理由": "",
+        },
+    )
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -214,6 +258,18 @@ def test_loads_verified_review_source_for_live_decision_collection(tmp_path: Pat
     }
 
 
+def test_loads_warning_only_table_writeable_values(tmp_path: Path) -> None:
+    module = _load_module()
+    document = _document()
+    _apply_warning_only_values(document)
+    descriptor, _ = _write_case(tmp_path, document)
+
+    result = module.run({"initial_review_handoff": descriptor}, str(tmp_path))
+
+    assert result["validated_candidate_assessments"] == document["validated_candidate_assessments"]
+    assert result["talent_pool_manifest"] == document["talent_pool_manifest"]
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
@@ -258,6 +314,10 @@ def test_rejects_invalid_descriptor(tmp_path: Path, mutation, message: str) -> N
                 问题库="1. [真实性核验] 被篡改的问题"
             ),
             "问题库",
+        ),
+        (
+            lambda doc: doc["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(总分=99),
+            "总分",
         ),
         (
             lambda doc: doc["validated_candidate_assessments"].update(assessments=[]),

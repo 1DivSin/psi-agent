@@ -176,10 +176,44 @@ def _validate_assessment(assessment: Any, batch_id: str, path: str) -> tuple[str
     return candidate_id, revision, role_key
 
 
+def _validate_source_assessments(
+    value: Any,
+    batch_id: str,
+    manifest_rows: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict) or value.get("status") != "complete":
+        raise ValueError("validated_candidate_assessments must be complete")
+    if value.get("schema_version") != "3.0" or value.get("batch_id") != batch_id:
+        raise ValueError("validated_candidate_assessments must use schema 3.0 and the workflow batch_id")
+    if value.get("errors") != []:
+        raise ValueError("validated_candidate_assessments.errors must be empty")
+    assessments = value.get("assessments")
+    if not isinstance(assessments, list):
+        raise TypeError("validated_candidate_assessments.assessments must be a list")
+
+    indexed: dict[str, dict[str, Any]] = {}
+    for index, assessment in enumerate(assessments):
+        path = f"validated_candidate_assessments.assessments[{index}]"
+        candidate_id, _, _ = _validate_assessment(assessment, batch_id, path)
+        if candidate_id in indexed:
+            raise ValueError("validated_candidate_assessments contains a duplicate candidate")
+        indexed[candidate_id] = assessment
+
+    source_keys = {
+        (candidate_id, assessment["assessment_revision"])
+        for candidate_id, assessment in indexed.items()
+    }
+    manifest_keys = {(candidate_id, revision) for candidate_id, _, revision in manifest_rows}
+    if source_keys != manifest_keys:
+        raise ValueError("validated_candidate_assessments must exactly cover the talent manifest")
+    return indexed
+
+
 def _validate_decisions(
     decisions: Any,
     batch_id: str,
     manifest_rows: dict[tuple[str, str, str], dict[str, Any]],
+    source_assessments: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not isinstance(decisions, dict) or decisions.get("status") != "complete":
         raise ValueError("initial_decision_bundle must be complete")
@@ -209,7 +243,11 @@ def _validate_decisions(
                 raise TypeError(f"{path} must be an object")
             if item.get("initial_status") != expected_status:
                 raise ValueError(f"{group_name}[{index}] initial_status must equal {expected_status}")
-            candidate_id, revision, _ = _validate_assessment(item.get("assessment"), batch_id, f"{path}.assessment")
+            assessment = item.get("assessment")
+            candidate_id, revision, _ = _validate_assessment(assessment, batch_id, f"{path}.assessment")
+            source_assessment = source_assessments.get(candidate_id)
+            if source_assessment is None or _canonical_text(assessment) != _canonical_text(source_assessment):
+                raise ValueError(f"{path}.assessment must exactly match the immutable validated assessment")
             record_id = item.get("record_id")
             if not isinstance(record_id, str) or _RECORD_ID.fullmatch(record_id) is None:
                 raise ValueError(f"{path}.record_id is invalid")
@@ -279,6 +317,7 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
         raise ValueError("batch_id is invalid")
     manifest = _decode(inputs.get("talent_pool_manifest"))
     decisions = _decode(inputs.get("initial_decision_bundle"))
+    source_assessments = _decode(inputs.get("validated_candidate_assessments"))
     role_catalog = _decode(inputs.get("role_catalog"))
     raw_feishu_config = (
         inputs.get("feishu_config") if "feishu_config" in inputs else inputs.get("initial_review_feishu_config")
@@ -286,7 +325,8 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
     feishu_config = _decode(raw_feishu_config)
 
     manifest_rows = _validate_manifest(manifest, batch_id)
-    approved, rejected = _validate_decisions(decisions, batch_id, manifest_rows)
+    indexed_assessments = _validate_source_assessments(source_assessments, batch_id, manifest_rows)
+    approved, rejected = _validate_decisions(decisions, batch_id, manifest_rows, indexed_assessments)
     role_subset = _validated_role_subset(role_catalog, approved)
     destination_config = _destination(feishu_config)
 
