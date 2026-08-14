@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -105,10 +106,11 @@ def _validate_row_fingerprint(value: Any, path: str) -> None:
     if not isinstance(value, dict) or set(value) != _AI_FINGERPRINT_FIELDS:
         raise ValueError(f"{path}.row_fingerprint must contain the exact 12 AI-owned fields")
     score = value["总分"]
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        raise TypeError(f"{path}.row_fingerprint.总分 must be numeric")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise TypeError(f"{path}.row_fingerprint.总分 must be a finite number")
     for field in _AI_FINGERPRINT_FIELDS - {"总分"}:
-        _required_text(value[field], f"{path}.row_fingerprint.{field}")
+        if not isinstance(value[field], str):
+            raise TypeError(f"{path}.row_fingerprint.{field} must be text")
 
 
 def _render_questions(value: Any, path: str, *, require_risk: bool) -> str:
@@ -137,6 +139,82 @@ def _render_questions(value: Any, path: str, *, require_risk: bool) -> str:
     if require_risk and "风险澄清" not in categories:
         raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
     return "\n".join(lines)
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _render_points(value: Any, path: str, *, mismatch: bool) -> str:
+    if not isinstance(value, list):
+        raise TypeError(f"{path} must be a table-writeable list")
+    lines: list[str] = []
+    for index, point in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(point, dict):
+            raise TypeError(f"{item_path} must be a table-writeable object")
+        requirement = point.get("requirement")
+        if not isinstance(requirement, str):
+            raise TypeError(f"{item_path}.requirement must be table-writeable text")
+        evidence = point.get("resume_evidence")
+        if not isinstance(evidence, list) or any(not isinstance(item, str) for item in evidence):
+            raise TypeError(f"{item_path}.resume_evidence must be a table-writeable text list")
+        evidence_text = "、".join(evidence)
+        if mismatch:
+            lines.append(f"- 风险\uff1a{requirement}\uff1b依据\uff1a{evidence_text}")
+        else:
+            lines.append(f"- 要求\uff1a{requirement}\uff1b证据\uff1a{evidence_text}")
+    return "\n".join(lines)
+
+
+def _expected_row_fingerprint(assessment: dict[str, Any], path: str) -> dict[str, Any]:
+    text_fields = {
+        "姓名": "candidate_name",
+        "评级": "grade",
+        "学历": "education",
+        "毕业院校/背景": "education_background",
+        "匹配岗位": "matched_role_name",
+        "面试建议": "interview_recommendation",
+        "面试建议理由": "interview_recommendation_reason",
+    }
+    fingerprint: dict[str, Any] = {}
+    for visible_field, assessment_field in text_fields.items():
+        value = assessment.get(assessment_field)
+        if not isinstance(value, str):
+            raise TypeError(f"{path}.{assessment_field} must be table-writeable text")
+        fingerprint[visible_field] = value
+
+    summary = assessment.get("resume_summary")
+    if not isinstance(summary, list) or any(not isinstance(item, str) for item in summary):
+        raise TypeError(f"{path}.resume_summary must be a table-writeable JSON string array")
+    score = assessment.get("total_score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+        raise TypeError(f"{path}.total_score must be a finite number")
+
+    fingerprint.update(
+        {
+            "简历摘要": "\n".join(summary),
+            "总分": score,
+            "匹配点": _render_points(assessment.get("match_points"), f"{path}.match_points", mismatch=False),
+            "不匹配点": _render_points(
+                assessment.get("mismatch_points"),
+                f"{path}.mismatch_points",
+                mismatch=True,
+            ),
+            "问题库": _render_questions(
+                assessment.get("verification_questions"),
+                f"{path}.verification_questions",
+                require_risk=bool(assessment.get("mismatch_points")),
+            ),
+        }
+    )
+    return fingerprint
 
 
 def _require_descriptor(value: Any) -> dict[str, Any]:
@@ -261,14 +339,21 @@ def _validate_source(document: dict[str, Any], expected_count: int) -> None:
             raise ValueError("talent_pool_manifest contains a duplicate candidate or record")
         if record.get("assessment_revision") != by_candidate[candidate_id]["assessment_revision"]:
             raise ValueError(f"{path}.assessment_revision does not match the validated revision")
-        _validate_row_fingerprint(record.get("row_fingerprint"), path)
-        expected_questions = _render_questions(
-            by_candidate[candidate_id].get("verification_questions"),
-            f"validated_candidate_assessments.assessments[{candidate_id}].verification_questions",
-            require_risk=bool(by_candidate[candidate_id].get("mismatch_points")),
+        fingerprint = record.get("row_fingerprint")
+        _validate_row_fingerprint(fingerprint, path)
+        expected_fingerprint = _expected_row_fingerprint(
+            by_candidate[candidate_id],
+            f"validated_candidate_assessments.assessments[{candidate_id}]",
         )
-        if record["row_fingerprint"]["问题库"] != expected_questions:
-            raise ValueError(f"{path}.row_fingerprint.问题库 does not match the validated assessment")
+        mismatched_fields = sorted(
+            field
+            for field in _AI_FINGERPRINT_FIELDS
+            if _canonical_bytes(fingerprint[field]) != _canonical_bytes(expected_fingerprint[field])
+        )
+        if mismatched_fields:
+            raise ValueError(
+                f"{path}.row_fingerprint does not match the validated assessment: {','.join(mismatched_fields)}"
+            )
         seen_candidates.add(candidate_id)
         seen_records.add(record_id)
     if seen_candidates != set(by_candidate):

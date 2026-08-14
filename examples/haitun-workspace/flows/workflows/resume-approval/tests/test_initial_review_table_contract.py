@@ -100,9 +100,11 @@ def test_stage_prompt_maps_15_fields_and_fingerprints_only_12_ai_fields() -> Non
     assert '"\\n".join(resume_summary)' in prompt
     assert "`- 要求\uff1a…\uff1b证据\uff1a…`" in prompt
     assert "`- 风险\uff1a…\uff1b依据\uff1a…`" in prompt
+    assert "join multiple `resume_evidence` entries with `、` in source order" in prompt
     assert "<1-based index>. [<category>] <question>" in prompt
     assert "Never expose `evidence_anchor`, `purpose`, `positive_signal`, or `risk_signal`" in prompt
-    assert "use an empty string for an empty list" not in prompt
+    assert "use an empty string for an empty list" in prompt
+    assert prompt.count("use an empty string for an empty point list") == 2
     assert "候选人看板" in prompt
     for legacy in ("`评分`", "`学校`", "`基础画像`", "`能力画像`", "`面试状态`"):
         assert legacy not in prompt

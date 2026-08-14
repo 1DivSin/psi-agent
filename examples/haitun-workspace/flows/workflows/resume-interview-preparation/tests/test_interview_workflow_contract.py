@@ -70,7 +70,7 @@ def test_decisions_are_reread_before_any_interview_draft_or_write() -> None:
     ) in workflow
     assert (
         "consumes(persist_interview_stage_handoff_step) == "
-        "[initial_decision_bundle, talent_pool_manifest, role_catalog, "
+        "[initial_decision_bundle, validated_candidate_assessments, talent_pool_manifest, role_catalog, "
         "initial_review_batch_id, initial_review_feishu_config];"
     ) in workflow
     assert "depends_on(load_interview_stage_step, assert_interview_stage_handoff_ready_step) == True;" in workflow

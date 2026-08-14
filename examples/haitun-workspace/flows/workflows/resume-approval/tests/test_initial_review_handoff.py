@@ -59,11 +59,17 @@ def _row_fingerprint() -> dict:
         "评级": "B",
         "学历": "硕士",
         "毕业院校/背景": "硕士\uff1a测试大学",
-        "简历摘要": '["- 有相关项目经验"]',
+        "简历摘要": "- 有相关项目经验\n- 完成可验证交付",
         "总分": 82,
         "匹配岗位": "AI应用开发工程师",
-        "匹配点": '["- 要求\uff1aPython\uff1b证据\uff1a项目使用 Python"]',
-        "不匹配点": '["- 要求\uff1a生产经验\uff1b证据\uff1a简历未体现"]',
+        "匹配点": (
+            "- 要求\uff1aPython\uff1b证据\uff1a项目使用 Python、独立交付\n"
+            "- 要求\uff1aAI 应用\uff1b证据\uff1a完成应用原型"
+        ),
+        "不匹配点": (
+            "- 风险\uff1a生产经验\uff1b依据\uff1a简历未体现、需要核实\n"
+            "- 风险\uff1a规模化\uff1b依据\uff1a缺少规模数据"
+        ),
         "面试建议": "建议面试",
         "面试建议理由": "核心技能基本匹配。",
         "问题库": _rendered_questions(),
@@ -85,8 +91,23 @@ def _assessment() -> dict:
         "batch_id": BATCH_ID,
         "candidate_id": CANDIDATE_ID,
         "candidate_name": "测试候选人",
+        "grade": "B",
+        "education": "硕士",
+        "education_background": "硕士\uff1a测试大学",
+        "resume_summary": ["- 有相关项目经验", "- 完成可验证交付"],
+        "total_score": 82,
         "matched_role_key": ROLE_KEY,
         "matched_role_name": "AI应用开发工程师",
+        "match_points": [
+            {"requirement": "Python", "resume_evidence": ["项目使用 Python", "独立交付"]},
+            {"requirement": "AI 应用", "resume_evidence": ["完成应用原型"]},
+        ],
+        "mismatch_points": [
+            {"requirement": "生产经验", "resume_evidence": ["简历未体现", "需要核实"]},
+            {"requirement": "规模化", "resume_evidence": ["缺少规模数据"]},
+        ],
+        "interview_recommendation": "建议面试",
+        "interview_recommendation_reason": "核心技能基本匹配。",
         "verification_questions": _questions(),
         "document_revisions": {
             "resume_scoring_sha256": "b" * 64,
@@ -153,6 +174,29 @@ def _inputs() -> dict:
     }
 
 
+def _apply_warning_only_values(data: dict) -> None:
+    assessment = data["validated_candidate_assessments"]["assessments"][0]
+    assessment.update(
+        education="",
+        education_background="",
+        resume_summary=[],
+        match_points=[],
+        mismatch_points=[{"requirement": "", "resume_evidence": []}],
+        interview_recommendation_reason="",
+    )
+    data["validated_candidate_assessments"]["constraint_warnings"] = ["content remains table-writeable"]
+    data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+        学历="",
+        **{
+            "毕业院校/背景": "",
+            "简历摘要": "",
+            "匹配点": "",
+            "不匹配点": "- 风险\uff1a\uff1b依据\uff1a",
+            "面试建议理由": "",
+        },
+    )
+
+
 def test_persists_review_source_and_returns_launch_contract(tmp_path: Path) -> None:
     module = _load_module()
     inputs = _inputs()
@@ -215,6 +259,19 @@ def test_persists_review_source_and_returns_launch_contract(tmp_path: Path) -> N
     assert "已完成初审\uff0c继续" not in request
 
 
+def test_persists_warning_only_table_writeable_values(tmp_path: Path) -> None:
+    module = _load_module()
+    inputs = _inputs()
+    _apply_warning_only_values(inputs)
+
+    result = module.run(inputs, str(tmp_path))
+
+    assert result["initial_review_handoff"]["status"] == "ready_for_review"
+    payload = json.loads((tmp_path / result["initial_review_handoff"]["path"]).read_bytes())
+    assert payload["validated_candidate_assessments"] == inputs["validated_candidate_assessments"]
+    assert payload["talent_pool_manifest"] == inputs["talent_pool_manifest"]
+
+
 def test_identical_publication_reuses_exact_bytes(tmp_path: Path) -> None:
     module = _load_module()
     first = module.run(_inputs(), str(tmp_path))["initial_review_handoff"]
@@ -267,6 +324,28 @@ def test_conflicting_publication_is_not_overwritten(tmp_path: Path) -> None:
                 问题库="1. [真实性核验] 被篡改的问题"
             ),
             "问题库",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(总分=99),
+            "总分",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+                简历摘要="- 被篡改的摘要"
+            ),
+            "简历摘要",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+                匹配点="- 要求\uff1aPython\uff1b证据\uff1a被篡改"
+            ),
+            "匹配点",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].update(
+                不匹配点="- 风险\uff1a生产经验\uff1b依据\uff1a被篡改"
+            ),
+            "不匹配点",
         ),
         (
             lambda data: data["talent_pool_manifest"]["records"][0].update(attachment_persisted=False),

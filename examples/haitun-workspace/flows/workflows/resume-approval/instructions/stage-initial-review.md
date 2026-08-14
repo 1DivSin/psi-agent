@@ -4,7 +4,7 @@ Create or reuse one 15-field initial-review row in the configured `候选人才�
 
 ## Fail-closed guard and SHA binding
 
-- Before any Feishu call, require `validated_candidate_assessments.status=complete`, a non-empty `assessments` list, the validator-generated `assessment_revision`, a non-empty `staged_resume_files` list, and non-empty runtime `feishu_config.app_token` and `feishu_config.talent_pool_table_id`. `constraint_warnings` do not block a row whose mapped fields remain writeable. Otherwise perform no Feishu read, upload, or write.
+- Before any Feishu call, require `validated_candidate_assessments.status=complete`, a non-empty `assessments` list, the validator-generated `assessment_revision`, a non-empty `staged_resume_files` list, non-empty runtime `feishu_config.app_token`, and non-empty runtime `feishu_config.talent_pool_table_id`. `constraint_warnings` do not block a row whose mapped fields remain writeable. Otherwise perform no Feishu read, upload, or write.
 - Validate every staged descriptor before making a Feishu call. It must have a 64-character lowercase `sha256`, an allowed `format` (`.pdf`, `.docx`, `.md`, or `.txt`), a neutral `name` equal to `resume<format>`, a non-empty internal `path`, `temporary=true`, and integer `size_bytes` from 1 through 20971520. Never upload `original_name` as the remote filename.
 - For each assessment, match `assessment.source.sha256` to `staged_resume_file.sha256`. Require exactly one matching descriptor for every assessment. A zero match, duplicate SHA match, malformed descriptor, or reused staged descriptor blocks the whole batch before any Feishu call.
 - SHA-256 is the only attachment join key. Never associate a file by candidate name, local filename, `original_name`, list position, or fuzzy similarity.
@@ -20,11 +20,11 @@ Build the 12-field AI fingerprint deterministically before deciding whether to u
 - `评级`: `grade`;
 - `学历`: `education`;
 - `毕业院校/背景`: `education_background`;
-- `简历摘要`: `resume_summary` must be a JSON string array; convert it deterministically to `"\n".join(resume_summary)` before writing the text field;
+- `简历摘要`: `resume_summary` must be a JSON string array; convert it deterministically to `"\n".join(resume_summary)` before writing the text field, and use an empty string for an empty list;
 - `总分`: numeric `total_score`;
 - `匹配岗位`: `matched_role_name`;
-- `匹配点`: convert the required non-empty `match_points` list to source-ordered lines, exactly `- 要求：…；证据：…` per point;
-- `不匹配点`: convert the required non-empty `mismatch_points` list to source-ordered lines, exactly `- 风险：…；依据：…` per point; preserve cautious evidence-gap wording;
+- `匹配点`: convert the table-writeable `match_points` list to source-ordered lines, exactly `- 要求：…；证据：…` per point; join multiple `resume_evidence` entries with `、` in source order, and use an empty string for an empty point list;
+- `不匹配点`: convert the table-writeable `mismatch_points` list to source-ordered lines, exactly `- 风险：…；依据：…` per point; join multiple `resume_evidence` entries with `、` in source order, use an empty string for an empty point list, and preserve cautious evidence-gap wording;
 - `面试建议`: exact `interview_recommendation` enum;
 - `面试建议理由`: `interview_recommendation_reason` as concise Chinese text;
 - `问题库`: render `verification_questions` in exact source order with no evidence metadata, exactly one line per item as `<1-based index>. [<category>] <question>`; for example `1. [真实性核验] 请说明 Python 项目中你个人负责的关键工作。`. Never expose `evidence_anchor`, `purpose`, `positive_signal`, or `risk_signal` in the table;
