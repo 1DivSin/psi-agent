@@ -47,7 +47,6 @@ def test_assessed_output_uses_the_dynamic_business_contract() -> None:
         "mismatch_points",
         "interview_recommendation",
         "interview_recommendation_reason",
-        "verification_questions",
         "document_revisions",
     }
     assert assessed["schema_version"] == "3.0"
@@ -57,15 +56,6 @@ def test_assessed_output_uses_the_dynamic_business_contract() -> None:
     }
     assert set(assessed["match_points"][0]) == {"requirement", "resume_evidence"}
     assert set(assessed["mismatch_points"][0]) == {"requirement", "resume_evidence"}
-    assert 3 <= len(assessed["verification_questions"]) <= 6
-    assert set(assessed["verification_questions"][0]) == {
-        "question",
-        "category",
-        "evidence_anchor",
-        "purpose",
-        "positive_signal",
-        "risk_signal",
-    }
     assert assessed["resume_summary"] == [
         "- 独立交付生产级 Agent 系统",
         "- RAG 检索指标有量化提升",
@@ -164,17 +154,6 @@ def test_prompt_requires_both_structured_role_point_lists() -> None:
     assert set(assessed["mismatch_points"][0]) == {"requirement", "resume_evidence"}
 
 
-def test_prompt_requires_evidence_backed_safe_verification_questions() -> None:
-    prompt = PROMPT_PATH.read_text(encoding="utf-8")
-
-    assert "3\u20136" in prompt
-    assert all(category in prompt for category in ("真实性核验", "岗位匹配", "风险澄清"))
-    assert "evidence_anchor" in prompt
-    assert "positive_signal" in prompt and "risk_signal" in prompt
-    assert "受保护属性" in prompt
-    assert "不得把未知信息断言为负面事实" in prompt
-
-
 def test_analyzer_consumes_fixed_online_documents_and_runtime_roles() -> None:
     """Reintroducing local standards or a configured target role must fail graph validation."""
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -204,6 +183,5 @@ def test_analyzer_system_prompt_names_the_dynamic_authorities() -> None:
     assert "online scoring document" in line
     assert "validated runtime role catalog" in line
     assert "normalized education level and institution names only" in line
-    assert "safe evidence-backed verification question bank" in line
     assert "deterministic interview gate" in line
     assert "configured role" not in line

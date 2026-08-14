@@ -36,7 +36,6 @@ _ASSESSMENT_FIELDS = {
     "mismatch_points",
     "interview_recommendation",
     "interview_recommendation_reason",
-    "verification_questions",
     "document_revisions",
 }
 _FAILURE_FIELDS = {
@@ -58,43 +57,12 @@ _SOURCE_FIELDS = {
     "extraction_warnings",
 }
 _POINT_FIELDS = {"requirement", "resume_evidence"}
-_QUESTION_FIELDS = {
-    "question",
-    "category",
-    "evidence_anchor",
-    "purpose",
-    "positive_signal",
-    "risk_signal",
-}
 _REVISION_FIELDS = {"resume_scoring_sha256", "role_information_sha256"}
 _FORMATS = {".pdf", ".docx", ".md", ".txt"}
 _EXTRACTION_MODES = {"workspace_text", "read_pdf_tool"}
 _EDUCATION_LEVELS = ("博士", "硕士", "本科", "专科", "高中及以下", "unknown")
 _EDUCATION_STAGES = ("专科", "本科", "硕士", "博士")
 _INTERVIEW_RECOMMENDATION_GRADES = ("A", "B")
-_QUESTION_CATEGORIES = ("真实性核验", "岗位匹配", "风险澄清")
-_PROTECTED_ATTRIBUTE = re.compile(
-    r"(?:年龄|周岁|出生日期|生日|性别|婚姻|已婚|未婚|结婚|生育|备孕|怀孕|民族|宗教|"
-    r"信仰|健康状况|身体健康|病史|疾病|残疾|残障|家庭住址|家庭地址|详细地址|现住址|"
-    r"居住地址|户籍|籍贯|\bage\b|date\s+of\s+birth|\bmarital\b|\bpregnan(?:t|cy)\b|"
-    r"\bfertility\b|\bethnicity\b|\breligion\b|health\s+condition|medical\s+history|"
-    r"\bdisab(?:ility|led)\b|home\s+address|residential\s+address)",
-    re.IGNORECASE,
-)
-_DEFINITIVE_NEGATIVE = re.compile(
-    r"(?:没有|不具备|缺乏|无法|不能|不会|从未|未做过|does\s+not\s+have|doesn't\s+have|"
-    r"\blacks?\b|\bcannot\b|\bcan't\b|\bnever\b)",
-    re.IGNORECASE,
-)
-_UNKNOWN_WORDING = re.compile(
-    r"(?:unknown|not\s+mentioned|未体现|未提及|未说明|未知|不详|无法判断|无相关信息|信息缺失|证据不足)",
-    re.IGNORECASE,
-)
-_CAUTIOUS_VERIFICATION = re.compile(
-    r"(?:需|需要|请|待)(?:在面试中)?(?:核实|确认|澄清|补充)|是否|能否|请说明|请举例|"
-    r"核实|确认|澄清|verify|confirm|clarify|ask\s+about",
-    re.IGNORECASE,
-)
 _INSTITUTION_STAGE = re.compile(r"^(专科|本科|硕士|博士)\uFF1A(.+)$")
 _MULTI_INSTITUTION_SEPARATORS = re.compile(r"[/\uFF0F+\uFF0B→]|;")
 _INSTITUTION_NOISE = re.compile(
@@ -278,170 +246,6 @@ def _normalize_assessment(value: Any) -> Any:
 
 def _non_empty_text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
-
-
-def _normalized_link_text(value: str) -> str:
-    return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff+#]+", "", value).lower()
-
-
-def _exact_source_link(value: str, sources: set[str]) -> bool:
-    normalized = _normalized_link_text(value)
-    return bool(normalized) and normalized in {_normalized_link_text(source) for source in sources}
-
-
-def _question_links_to_anchor(question: str, anchor: str) -> bool:
-    normalized_question = _normalized_link_text(question)
-    normalized_anchor = _normalized_link_text(anchor)
-    if len(normalized_anchor) >= 2 and (
-        normalized_anchor in normalized_question or normalized_question in normalized_anchor
-    ):
-        return True
-    latin_token = re.compile(r"[a-zA-Z0-9+#]{2,}")
-    question_tokens = {token.lower() for token in latin_token.findall(question)}
-    anchor_tokens = {token.lower() for token in latin_token.findall(anchor)}
-    if question_tokens & anchor_tokens:
-        return True
-    generic_bigrams = {
-        "项目",
-        "经历",
-        "经验",
-        "能力",
-        "岗位",
-        "要求",
-        "简历",
-        "说明",
-        "情况",
-        "相关",
-        "工作",
-        "负责",
-    }
-
-    def chinese_bigrams(text: str) -> set[str]:
-        chunks = re.findall(r"[\u4e00-\u9fff]+", text)
-        return {
-            chunk[index : index + 2]
-            for chunk in chunks
-            for index in range(len(chunk) - 1)
-            if chunk[index : index + 2] not in generic_bigrams
-        }
-
-    return bool(chinese_bigrams(question) & chinese_bigrams(anchor))
-
-
-def _unsupported_negative_claim(text: str, grounded_sources: set[str]) -> bool:
-    if _DEFINITIVE_NEGATIVE.search(text):
-        normalized = _normalized_link_text(text)
-        grounded_negative = any(
-            _DEFINITIVE_NEGATIVE.search(source) and _normalized_link_text(source) in normalized
-            for source in grounded_sources
-        )
-        if not grounded_negative:
-            return True
-    return bool(_UNKNOWN_WORDING.search(text) and not _CAUTIOUS_VERIFICATION.search(text))
-
-
-def render_verification_questions(value: Any) -> str:
-    """Render the only public question-bank representation in stable source order."""
-    if not isinstance(value, list) or not 3 <= len(value) <= 6:
-        raise ValueError("verification_questions must contain 3 to 6 questions")
-    lines: list[str] = []
-    for index, item in enumerate(value):
-        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
-            raise ValueError(f"verification_questions[{index}] fields do not match the contract")
-        category = item.get("category")
-        question = item.get("question")
-        if category not in _QUESTION_CATEGORIES:
-            raise ValueError(f"verification_questions[{index}].category is invalid")
-        if not _non_empty_text(question):
-            raise ValueError(f"verification_questions[{index}].question must be non-empty text")
-        lines.append(f"{index + 1}. [{category}] {question.strip()}")
-    return "\n".join(lines)
-
-
-def _question_source_sets(value: dict[str, Any], role: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
-    role_requirements = _role_requirements(role)
-    match_evidence: set[str] = set()
-    mismatch_evidence: set[str] = set()
-    mismatch_requirements: set[str] = set()
-    for field, evidence_target in (("match_points", match_evidence), ("mismatch_points", mismatch_evidence)):
-        points = value.get(field)
-        if not isinstance(points, list):
-            continue
-        for point in points:
-            if not isinstance(point, dict):
-                continue
-            evidence = point.get("resume_evidence")
-            if isinstance(evidence, list):
-                evidence_target.update(item.strip() for item in evidence if _non_empty_text(item))
-            if field == "mismatch_points" and _non_empty_text(point.get("requirement")):
-                mismatch_requirements.add(point["requirement"].strip())
-    return match_evidence | mismatch_evidence, role_requirements, mismatch_requirements | mismatch_evidence
-
-
-def _validate_verification_questions(
-    value: Any,
-    prefix: str,
-    assessment: dict[str, Any],
-    role: dict[str, Any],
-) -> list[str]:
-    if not isinstance(value, list) or not 3 <= len(value) <= 6:
-        return [f"{prefix} must contain 3 to 6 questions"]
-    resume_sources, role_sources, risk_sources = _question_source_sets(assessment, role)
-    allowed_by_category = {
-        "真实性核验": resume_sources,
-        "岗位匹配": role_sources | resume_sources,
-        "风险澄清": risk_sources,
-    }
-    errors: list[str] = []
-    categories: set[str] = set()
-    seen_questions: set[str] = set()
-    for index, item in enumerate(value):
-        item_prefix = f"{prefix}[{index}]"
-        if not isinstance(item, dict):
-            errors.append(f"{item_prefix} must be an object")
-            continue
-        missing = sorted(_QUESTION_FIELDS - set(item))
-        extra = sorted(set(item) - _QUESTION_FIELDS)
-        if missing:
-            errors.append(f"{item_prefix}.missing_fields:{','.join(missing)}")
-        if extra:
-            errors.append(f"{item_prefix}.unexpected_fields:{','.join(extra)}")
-        for field in _QUESTION_FIELDS:
-            if not _non_empty_text(item.get(field)):
-                errors.append(f"{item_prefix}.{field} must be non-empty text")
-        category = item.get("category")
-        if category not in _QUESTION_CATEGORIES:
-            errors.append(f"{item_prefix}.category must be one of:{','.join(_QUESTION_CATEGORIES)}")
-            continue
-        categories.add(category)
-        question = item.get("question")
-        anchor = item.get("evidence_anchor")
-        if not _non_empty_text(question) or not _non_empty_text(anchor):
-            continue
-        normalized_question = _normalized_link_text(question)
-        if normalized_question in seen_questions:
-            errors.append(f"{item_prefix}.question is duplicated")
-        seen_questions.add(normalized_question)
-        sources = allowed_by_category[category]
-        if not _exact_source_link(anchor, sources):
-            errors.append(f"{item_prefix}.evidence_anchor is not linked to the assessment or selected role")
-        if not _question_links_to_anchor(question, anchor):
-            errors.append(f"{item_prefix}.question is not linked to its evidence_anchor")
-        for field in _QUESTION_FIELDS - {"category"}:
-            text = item.get(field)
-            if _non_empty_text(text) and _PROTECTED_ATTRIBUTE.search(text):
-                errors.append(f"{item_prefix}.{field} references a protected attribute")
-        grounded_sources = sources | {anchor}
-        for field in ("question", "purpose"):
-            text = item.get(field)
-            if _non_empty_text(text) and _unsupported_negative_claim(text, grounded_sources):
-                errors.append(f"{item_prefix}.{field} treats unknown information as a negative fact")
-    for category in _QUESTION_CATEGORIES[:2]:
-        if category not in categories:
-            errors.append(f"{prefix} must include category {category}")
-    if assessment.get("mismatch_points") and "风险澄清" not in categories:
-        errors.append(f"{prefix} must include category 风险澄清 for material risks or evidence gaps")
-    return errors
 
 
 def _privacy_errors(value: Any, path: str) -> list[str]:
@@ -689,10 +493,6 @@ def _validate_table_writeability(value: dict[str, Any], prefix: str) -> list[str
 
     errors.extend(_validate_table_points(value.get("match_points"), f"{prefix}.match_points"))
     errors.extend(_validate_table_points(value.get("mismatch_points"), f"{prefix}.mismatch_points"))
-    try:
-        render_verification_questions(value.get("verification_questions"))
-    except (TypeError, ValueError) as exc:
-        errors.append(f"{prefix}.verification_questions is not table-writeable: {exc}")
     return errors
 
 
@@ -749,14 +549,6 @@ def _validate_assessed(
             errors.append(f"{prefix}.matched_role_name must equal the catalog role name")
         errors.extend(_validate_points(value.get("match_points"), f"{prefix}.match_points", role, mismatch=False))
         errors.extend(_validate_points(value.get("mismatch_points"), f"{prefix}.mismatch_points", role, mismatch=True))
-        errors.extend(
-            _validate_verification_questions(
-                value.get("verification_questions"),
-                f"{prefix}.verification_questions",
-                value,
-                role,
-            )
-        )
 
     total = value.get("total_score")
     total_max = scoring["total_max"]
@@ -884,10 +676,6 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
                 validated.append(deepcopy(value))
         else:
             candidate_errors = []
-        if final_writeability_only:
-            for error in candidate_errors:
-                if ".verification_questions" in error and error not in writeability_errors:
-                    writeability_errors.append(error)
         errors.extend(candidate_errors)
         candidate_id = value.get("candidate_id")
         source = value.get("source")
@@ -905,7 +693,7 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
     if authorities_ready:
         revision = _canonical_sha(
             {
-                "contract": "candidate-assessment-v3-question-bank-v1",
+                "contract": "candidate-assessment-v3",
                 "document_revisions": revisions,
                 "scoring_contract": scoring,
                 "role_catalog": inputs.get("role_catalog"),

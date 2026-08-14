@@ -19,15 +19,6 @@ _DESTINATION_FIELDS = (
     "talent_pool_table_id",
     "interview_table_id",
 )
-_QUESTION_FIELDS = {
-    "question",
-    "category",
-    "evidence_anchor",
-    "purpose",
-    "positive_signal",
-    "risk_signal",
-}
-_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
 
 
 def _load_inputs() -> dict[str, Any]:
@@ -77,30 +68,6 @@ def _canonical_text(value: Any) -> str:
 
 def _valid_revision(value: Any) -> bool:
     return isinstance(value, str) and _REVISION.fullmatch(value) is not None
-
-
-def _validate_questions(value: Any, path: str, *, require_risk: bool) -> None:
-    if not isinstance(value, list) or not 3 <= len(value) <= 6:
-        raise ValueError(f"{path} must contain 3 to 6 questions")
-    categories: set[str] = set()
-    seen_questions: set[str] = set()
-    for index, item in enumerate(value):
-        item_path = f"{path}[{index}]"
-        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
-            raise ValueError(f"{item_path} fields do not match the question-bank contract")
-        for field in _QUESTION_FIELDS:
-            _required_text(item.get(field), f"{item_path}.{field}")
-        if item["category"] not in _QUESTION_CATEGORIES:
-            raise ValueError(f"{item_path}.category is invalid")
-        normalized_question = item["question"].strip()
-        if normalized_question in seen_questions:
-            raise ValueError(f"{item_path}.question is duplicated")
-        seen_questions.add(normalized_question)
-        categories.add(item["category"])
-    if not {"真实性核验", "岗位匹配"} <= categories:
-        raise ValueError(f"{path} must cover authenticity and role-match categories")
-    if require_risk and "风险澄清" not in categories:
-        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
 
 
 def _validate_manifest(manifest: Any, batch_id: str) -> dict[tuple[str, str, str], dict[str, Any]]:
@@ -168,52 +135,13 @@ def _validate_assessment(assessment: Any, batch_id: str, path: str) -> tuple[str
         or not all(_valid_revision(value) for value in revisions.values())
     ):
         raise ValueError(f"{path}.document_revisions is invalid")
-    _validate_questions(
-        assessment.get("verification_questions"),
-        f"{path}.verification_questions",
-        require_risk=bool(assessment.get("mismatch_points")),
-    )
     return candidate_id, revision, role_key
-
-
-def _validate_source_assessments(
-    value: Any,
-    batch_id: str,
-    manifest_rows: dict[tuple[str, str, str], dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    if not isinstance(value, dict) or value.get("status") != "complete":
-        raise ValueError("validated_candidate_assessments must be complete")
-    if value.get("schema_version") != "3.0" or value.get("batch_id") != batch_id:
-        raise ValueError("validated_candidate_assessments must use schema 3.0 and the workflow batch_id")
-    if value.get("errors") != []:
-        raise ValueError("validated_candidate_assessments.errors must be empty")
-    assessments = value.get("assessments")
-    if not isinstance(assessments, list):
-        raise TypeError("validated_candidate_assessments.assessments must be a list")
-
-    indexed: dict[str, dict[str, Any]] = {}
-    for index, assessment in enumerate(assessments):
-        path = f"validated_candidate_assessments.assessments[{index}]"
-        candidate_id, _, _ = _validate_assessment(assessment, batch_id, path)
-        if candidate_id in indexed:
-            raise ValueError("validated_candidate_assessments contains a duplicate candidate")
-        indexed[candidate_id] = assessment
-
-    source_keys = {
-        (candidate_id, assessment["assessment_revision"])
-        for candidate_id, assessment in indexed.items()
-    }
-    manifest_keys = {(candidate_id, revision) for candidate_id, _, revision in manifest_rows}
-    if source_keys != manifest_keys:
-        raise ValueError("validated_candidate_assessments must exactly cover the talent manifest")
-    return indexed
 
 
 def _validate_decisions(
     decisions: Any,
     batch_id: str,
     manifest_rows: dict[tuple[str, str, str], dict[str, Any]],
-    source_assessments: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not isinstance(decisions, dict) or decisions.get("status") != "complete":
         raise ValueError("initial_decision_bundle must be complete")
@@ -243,11 +171,7 @@ def _validate_decisions(
                 raise TypeError(f"{path} must be an object")
             if item.get("initial_status") != expected_status:
                 raise ValueError(f"{group_name}[{index}] initial_status must equal {expected_status}")
-            assessment = item.get("assessment")
-            candidate_id, revision, _ = _validate_assessment(assessment, batch_id, f"{path}.assessment")
-            source_assessment = source_assessments.get(candidate_id)
-            if source_assessment is None or _canonical_text(assessment) != _canonical_text(source_assessment):
-                raise ValueError(f"{path}.assessment must exactly match the immutable validated assessment")
+            candidate_id, revision, _ = _validate_assessment(item.get("assessment"), batch_id, f"{path}.assessment")
             record_id = item.get("record_id")
             if not isinstance(record_id, str) or _RECORD_ID.fullmatch(record_id) is None:
                 raise ValueError(f"{path}.record_id is invalid")
@@ -317,7 +241,6 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
         raise ValueError("batch_id is invalid")
     manifest = _decode(inputs.get("talent_pool_manifest"))
     decisions = _decode(inputs.get("initial_decision_bundle"))
-    source_assessments = _decode(inputs.get("validated_candidate_assessments"))
     role_catalog = _decode(inputs.get("role_catalog"))
     raw_feishu_config = (
         inputs.get("feishu_config") if "feishu_config" in inputs else inputs.get("initial_review_feishu_config")
@@ -325,8 +248,7 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
     feishu_config = _decode(raw_feishu_config)
 
     manifest_rows = _validate_manifest(manifest, batch_id)
-    indexed_assessments = _validate_source_assessments(source_assessments, batch_id, manifest_rows)
-    approved, rejected = _validate_decisions(decisions, batch_id, manifest_rows, indexed_assessments)
+    approved, rejected = _validate_decisions(decisions, batch_id, manifest_rows)
     role_subset = _validated_role_subset(role_catalog, approved)
     destination_config = _destination(feishu_config)
 

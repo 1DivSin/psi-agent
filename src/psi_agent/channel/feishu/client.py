@@ -15,13 +15,13 @@ import aiohttp
 import anyio
 import platformdirs
 from anyio.from_thread import BlockingPortal
-from lark_channel import FeishuChannel, MediaBatchConfig, PolicyConfig, SafetyConfig
+from lark_channel import FeishuChannel, PolicyConfig
 from lark_channel.api.im.v1.model.create_message_reaction_request import CreateMessageReactionRequest
 from lark_channel.api.im.v1.model.create_message_reaction_request_body import CreateMessageReactionRequestBody
 from lark_channel.api.im.v1.model.delete_message_reaction_request import DeleteMessageReactionRequest
 from lark_channel.api.im.v1.model.emoji import Emoji
 from lark_channel.api.im.v1.model.get_message_resource_request import GetMessageResourceRequest
-from lark_channel.core.enum import AccessTokenType, HttpMethod, LogLevel
+from lark_channel.core.enum import AccessTokenType, HttpMethod
 from lark_channel.core.model import BaseRequest
 from lark_channel.event.custom import CustomizedEventProcessor
 from loguru import logger
@@ -827,20 +827,7 @@ async def run_feishu(
         require_mention=require_mention,
         respond_to_mention_all=respond_to_mention_all,
     )
-    safety = SafetyConfig(
-        media_batch=MediaBatchConfig(enabled=True),
-    )
-    # The SDK's INFO connection banner includes the complete transient WebSocket
-    # URL (including access_key/ticket query parameters).  Keep SDK operational
-    # warnings and errors while preventing those credentials from entering the
-    # deployment log; psi-agent emits its own redacted startup/identity INFO logs.
-    channel = FeishuChannel(
-        app_id=app_id,
-        app_secret=app_secret,
-        policy=policy,
-        safety=safety,
-        log_level=LogLevel.WARNING,
-    )
+    channel = FeishuChannel(app_id=app_id, app_secret=app_secret, policy=policy)
     logger.debug(
         f"FeishuChannel created (app_id={app_id} require_mention={require_mention} "
         f"respond_to_mention_all={respond_to_mention_all} gateway_url={gateway_url!r})"

@@ -49,20 +49,6 @@ Evaluate every active entry in `role_catalog.roles` and select the role with the
 - `mismatch_points` 写简历与所选岗位之间的明确反证、已有证据支持的不足，或对岗位有实质影响的岗位风险或证据缺口。对缺失信息只能客观写成“简历未体现……，需在面试中核实”，不得把缺失信息断言成候选人不具备该能力，也不得虚构负面事实。
 - Every point must name the relevant catalog requirement and include one or more concise resume evidence strings with a page or section reference when available.
 
-## Verification question bank
-
-Generate verification_questions as 3–6 complete objects in deliberate interview order. Every object must contain exactly question, category, evidence_anchor, purpose, positive_signal, and risk_signal; every value is non-empty text.
-
-- category must be exactly one of 真实性核验, 岗位匹配, or 风险澄清.
-- Always include at least one 真实性核验 question and one 岗位匹配 question. When mismatch_points is non-empty, also include at least one 风险澄清 question.
-- For 真实性核验, copy evidence_anchor exactly from one match_points.resume_evidence or mismatch_points.resume_evidence string. Ask for the candidate's personal contribution, decisions, process, or verifiable result.
-- For 岗位匹配, copy evidence_anchor exactly from the selected role's responsibility/hard requirement/preference or from resume evidence tied to that role. Ask for concrete role-relevant depth or tradeoffs.
-- For 风险澄清, copy evidence_anchor exactly from one mismatch requirement or mismatch evidence string. Preserve cautious evidence-gap language and ask for clarification without presuming a negative fact.
-- The question must visibly reuse a meaningful term from its evidence_anchor; generic questions such as “请介绍自己” are invalid even when accompanied by an unrelated anchor.
-- purpose states the decision value. positive_signal and risk_signal describe observable answer signals, not a pre-judgment about the candidate.
-- 不得询问或推断年龄、出生日期、性别、婚育、民族、宗教、健康/残障、家庭住址、户籍、籍贯或同类受保护属性。不得把未知信息断言为负面事实；“简历未体现……，需核实”是允许的谨慎表述，“候选人没有/不具备/无法……”在没有明确反证时不允许。
-- Do not include contact details, raw private resume content, invented facts, generic anchors, duplicate questions, or categories outside the enum.
-
 ## Interview recommendation
 
 `interview_recommendation` 是确定性的面试资源门槛，不是第二套自由评分。只有同时满足以下全部条件才返回 `建议面试`：
@@ -116,43 +102,17 @@ Do not call `submit_step_result`. After all required reads and analysis, return 
     "match_points": [
       {
         "requirement": "exact catalog requirement",
-        "resume_evidence": ["项目经历：使用 Python"]
+        "resume_evidence": ["concise resume evidence with section/page when available"]
       }
     ],
     "mismatch_points": [
       {
         "requirement": "exact catalog requirement",
-        "resume_evidence": ["简历未体现可验证的独立交付案例，需在面试中核实"]
+        "resume_evidence": ["explicit contradiction or evidenced shortfall"]
       }
     ],
     "interview_recommendation": "建议面试|不建议面试",
     "interview_recommendation_reason": "candidate-specific decisive evidence gaps or passed hard requirements, their role impact, genuine strengths, and material unknowns",
-    "verification_questions": [
-      {
-        "question": "请说明 Python 项目中你个人负责的关键工作、验证方式和结果。",
-        "category": "真实性核验",
-        "evidence_anchor": "项目经历：使用 Python",
-        "purpose": "核实 Python 项目证据的真实性和个人贡献。",
-        "positive_signal": "能够说明个人职责、关键决策和可验证结果。",
-        "risk_signal": "回答停留在团队概述，不能说明个人贡献。"
-      },
-      {
-        "question": "针对 Python 要求，请说明你处理过的最复杂工程问题和取舍。",
-        "category": "岗位匹配",
-        "evidence_anchor": "Python",
-        "purpose": "判断 Python 工程能力是否达到岗位要求。",
-        "positive_signal": "能够给出具体方案、取舍依据和结果。",
-        "risk_signal": "只列技术名词，缺少具体决策和结果。"
-      },
-      {
-        "question": "简历未体现可验证的独立交付案例，需在面试中核实；请补充一个完整案例。",
-        "category": "风险澄清",
-        "evidence_anchor": "简历未体现可验证的独立交付案例，需在面试中核实",
-        "purpose": "澄清独立交付证据缺口，不把未知信息视为负面事实。",
-        "positive_signal": "能够提供职责边界、交付物和验证结果。",
-        "risk_signal": "案例缺少个人职责或可验证交付结果。"
-      }
-    ],
     "document_revisions": {
       "resume_scoring_sha256": "exact resume_scoring content_sha256",
       "role_information_sha256": "exact role_information content_sha256"

@@ -68,7 +68,7 @@ def test_workflow_guards_every_non_foreach_program_error_boundary() -> None:
         "build_assessment_repairs_round_2_step": "assert_repair_merge_round_1_program_ready_step",
         "repair_assessments_round_2_step": "assert_repair_builder_round_2_program_ready_step",
         "validate_assessments_step": "assert_repair_merge_round_2_program_ready_step",
-        "cleanup_temporary_files_step": "assert_initial_review_handoff_ready_step",
+        "cleanup_temporary_files_step": "assert_repair_merge_round_2_program_ready_step",
     }
     for step, guard in dependencies.items():
         assert f"depends_on({step}, {guard}) == True;" in workflow
