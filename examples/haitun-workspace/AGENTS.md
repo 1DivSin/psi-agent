@@ -166,6 +166,7 @@ service tools:
 | `flow_manage` | CRUD + promote on workflow assets under **workspace** `flows/`; prefers `.workflow` / `.g4` over `.flow.ts`. |
 | `run_flow` / `run_flow_resume` | Execute Workflow plans. Runs without Human Steps finish in the initial call; Human Steps return a checkpointed request that resumes only through `run_flow_resume`. Chat completion uses only an explicit schema-1.0 `user_facing_summary.text`; a Human wait is not completion, raw output mappings stay internal, and background schedule/trigger turns remain silent. |
 | `flow_run` | Legacy Node/Fuclaw `.flow.ts` runner retained for explicit fallback use. |
+| `recruitment_update_record` | Safely supplement or correct approved Human-owned fields on one existing configured talent-pool or interview row. The destination comes only from workspace recruitment defaults; locate by existing record ID, Feishu row link, or one exact-name match. Every write is read back before `ok=true`, and the result never exposes the locator, destination, field values, or raw Feishu response. Skill: `recruitment-record-update`. |
 | `schedule_manage` | CRUD on **workspace** `schedules/<name>/TASK.md`. **Recurring**: `action=create` + `cron`. **One-shot**: `action=create` + `once_at` (`YYYY-MM-DD HH:MM` local) → writes cron + `run_once: true` (Session deletes TASK.md after first successful fire). **`fire=tool`**: Session calls `tool(**tool_args)` at fire time with no LLM (required for Feishu IM reminders via `feishu_message_send`). `fire=prompt` (default) injects TASK body for an agent turn. Also `visibility` (`display`/`silent`), list/view/patch/delete. |
 | `trigger_manage` | CRUD on **agent** `triggers/<name>/TRIGGER.md`。`event` 名应对齐 agent ``channel_events/`` 已接通能力；Session 不再用 catalog 硬拒。`fire=tool` 命中后直调工具。见 `skills/feishu-event-remind`；事件定义见 ``channel_events/README.md``。 |
 | `channel_event_check` | 自查 agent `channel_events/` 的事件（只读、无副作用）。`action=list` 看加载了哪些事件名；`action=shape` + `platform_event=` 用真实 lark SDK 模型给出字段所在层级（`im.message.receive_v1` 的 `chat_id` 在 `event['message']['chat_id']`）；`action=probe` + `event=` 拿样例事件试跑该事件自己的 `map.py`，返回空时打印 mapper 实际拿到的结构与可读路径。**改完 `map.py` 必须先 probe 再上线** —— mapper 返回 `[]` 在日志里与「去重跳过」无法区分。 |
@@ -211,6 +212,7 @@ service tools:
 - `skill-authoring-when` — **whether** to create/patch（复用价值门 + **先 list，有同类则 patch，无则 create**；自进化前同样遵守）。
 - `skill-authoring-how` — **how** to write body and call `skill_manage`（禁止 raw `write` under `skills/`）。
 - `feishu-resume-review` — 简历评估底座（分项评分 + 综合评价 + 面试题）；`agent_editable: true`，用户规则合并进本 skill，不另建平行简历 skill；可选写飞书多维表。
+- `recruitment-record-update` — 根据自然语言安全补充或更正现有人才库、面试记录中的人工字段；只调用受限工具，姓名歧义时要求行链接，不推断评分、状态或 Human 决策。
 - The hermes domain skill set (cryptanalysis, image-segmentation, ml-inference, …).
 - Selected curated skills (`psi-agent-help`, `code-review-checklist`, `python-async-basics`,
   `python-static-analysis`, `user-preferences-and-language`, `example-skill`).
