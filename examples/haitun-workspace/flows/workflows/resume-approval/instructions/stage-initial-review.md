@@ -1,18 +1,18 @@
 # Task
 
-Create or reuse one 13-field initial-review row in the configured `候选人才库` table for every table-writeable assessment in the finalized validation bundle.
+Create or reuse one 14-field initial-review row in the configured `候选人才库` table for every table-writeable assessment in the finalized validation bundle.
 
 ## Guard and live contract
 
 - Before any Feishu call, require `validated_candidate_assessments.status=complete`, a non-empty `assessments` list, the validator-generated `assessment_revision`, and a non-empty runtime `feishu_config.talent_pool_table_id`. `constraint_warnings` describe unresolved business content and do not block a row whose mapped fields remain writeable. Otherwise perform no Feishu read or write.
-- The verified table has exactly these fields in live order: `姓名`, `评级`, `学历`, `毕业院校/背景`, `总分`, `备注`, `匹配岗位`, `匹配点`, `不匹配点`, `面试建议`, `面试建议理由`, `初审状态`, `简历摘要`.
+- The verified table has exactly these fields in live order: `姓名`, `评级`, `学历`, `毕业院校/背景`, `总分`, `备注`, `匹配岗位`, `匹配点`, `不匹配点`, `面试建议`, `面试建议理由`, `问题库`, `初审状态`, `简历摘要`.
 - `评级` must be A-F; `面试建议` must be `建议面试` or `不建议面试`; `初审状态` is `待审批`, `通过`, or `不通过`.
 - Use the real view name `候选人看板` in the manifest and Human handoff.
 - Create rows only for `validated_candidate_assessments.assessments`. Copy `failed_candidates` to the manifest as skipped extraction failures; never create guessed rows for them.
 
 ## Exact row mapping
 
-Build all 13 visible fields deterministically:
+Build all 14 visible fields deterministically:
 
 - `姓名`: `candidate_name`;
 - `评级`: `grade`;
@@ -26,18 +26,19 @@ Build all 13 visible fields deterministically:
 - `不匹配点`: convert the required non-empty `mismatch_points` list to concise Simplified-Chinese bullet lines in source order, exactly one line per point as `- 风险：…；依据：…`; preserve cautious evidence-gap wording and never turn an unknown into a definite negative claim;
 - `面试建议`: exact `interview_recommendation` enum;
 - `面试建议理由`: `interview_recommendation_reason` as concise Chinese text;
+- `问题库`: render `verification_questions` in exact source order with no evidence metadata, exactly one line per item as `<1-based index>. [<category>] <question>`; for example `1. [真实性核验] 请说明 Python 项目中你个人负责的关键工作。`. Never expose `evidence_anchor`, `purpose`, `positive_signal`, or `risk_signal` in the table;
 - `初审状态`: 新记录固定为 `待审批`.
 
 Do not write hashes, IDs, JSON, raw resume text, contact information, internal keys, or English enum tokens to visible fields.
 
-## 11-field idempotency
+## 12-field idempotency
 
-The row fingerprint is the canonical ordered object of 11 个 AI 所有字段: `姓名`, `评级`, `学历`, `毕业院校/背景`, `简历摘要`, `总分`, `匹配岗位`, `匹配点`, `不匹配点`, `面试建议`, `面试建议理由`. `备注` 和 `初审状态` 不进入指纹 because Human may change them.
+The row fingerprint is the canonical ordered object of 12 个 AI 所有字段: `姓名`, `评级`, `学历`, `毕业院校/背景`, `简历摘要`, `总分`, `匹配岗位`, `匹配点`, `不匹配点`, `面试建议`, `面试建议理由`, `问题库`. `备注` 和 `初审状态` 不进入指纹 because Human may change them.
 
-1. Query the configured table by exact `姓名`, follow pagination, normalize the 11 AI fields to visible scalar text/number values, and compare the complete fingerprint locally. Never use name alone as identity.
-2. More than one exact fingerprint match blocks the whole batch. One exact match is reused without any update or status reset. Zero exact matches creates exactly one 13-field row.
-3. Another row with the same name but a different 11-field fingerprint is a separate assessment revision and must not be overwritten.
-4. After every create attempt, query the exact name again and require exactly one matching 11-field fingerprint before reporting success. This recheck is mandatory even when the create response is missing or times out.
+1. Query the configured table by exact `姓名`, follow pagination, normalize the 12 AI fields to visible scalar text/number values, and compare the complete fingerprint locally. Never use name alone as identity.
+2. More than one exact fingerprint match blocks the whole batch. One exact match is reused without any update or status reset. Zero exact matches creates exactly one 14-field row.
+3. Another row with the same name but a different 12-field fingerprint is a separate assessment revision and must not be overwritten.
+4. After every create attempt, query the exact name again and require exactly one matching 12-field fingerprint before reporting success. This recheck is mandatory even when the create response is missing or times out.
 5. The current toolset is append-only. Never overwrite `备注`, `初审状态`, or any reused row.
 
 ## Output
@@ -69,7 +70,8 @@ The row fingerprint is the canonical ordered object of 11 个 AI 所有字段: `
           "匹配点": "...",
           "不匹配点": "...",
           "面试建议": "...",
-          "面试建议理由": "..."
+          "面试建议理由": "...",
+          "问题库": "1. [真实性核验] ...\n2. [岗位匹配] ...\n3. [风险澄清] ..."
         },
         "created": true
       }

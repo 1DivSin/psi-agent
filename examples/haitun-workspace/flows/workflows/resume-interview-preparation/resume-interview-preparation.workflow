@@ -135,7 +135,7 @@ workflow resume_interview_preparation {
     max_attempts(prepare_interview_draft_step) == 2;
 
     step_name(assemble_interview_write_batch_step) == "Assemble authoritative interview write batch";
-    step_instruction(assemble_interview_write_batch_step) == "Join source-ordered one-candidate drafts to authoritative handoff tasks, normalize table-writeable text, and attach all identity fields from the handoff only.";
+    step_instruction(assemble_interview_write_batch_step) == "Join source-ordered one-candidate drafts to authoritative handoff tasks, require suggested questions to exactly equal the source-ordered assessment verification question rendering, normalize table-writeable text, and attach all identity fields from the handoff only.";
     step_executor(assemble_interview_write_batch_step) == interview_write_batch_assembler;
     consumes(assemble_interview_write_batch_step) == [approved_interview_tasks, interview_drafts, batch_id, feishu_config];
     produces(assemble_interview_write_batch_step) == [interview_write_batch, draft_validation_manifest];
@@ -178,7 +178,7 @@ workflow resume_interview_preparation {
     max_turns(initial_decision_agent) == 24;
 
     allowed_tool(interview_draft_agent, feishu_bitable_search_records);
-    agent_system_prompt(interview_draft_agent) == "Prepare exactly one evidence-bound Chinese interview draft for the supplied approved candidate. Historical comparison is optional and read-only. Return exactly one valid JSON object with interview_drafts as its sole top-level key, without Markdown or prose, and never invent or echo private identity fields.";
+    agent_system_prompt(interview_draft_agent) == "Prepare exactly one evidence-bound Chinese interview draft for the supplied approved candidate, copying suggested questions exactly from the assessment verification question bank. Historical comparison is optional and read-only. Return exactly one valid JSON object with interview_drafts as its sole top-level key, without Markdown or prose, and never invent or echo private identity fields.";
     reasoning_effort(interview_draft_agent) == high;
     max_output_tokens(interview_draft_agent) == 8192;
     max_turns(interview_draft_agent) == 8;

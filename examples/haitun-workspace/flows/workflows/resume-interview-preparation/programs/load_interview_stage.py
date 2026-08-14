@@ -38,6 +38,15 @@ _DESTINATION_FIELDS = (
     "talent_pool_table_id",
     "interview_table_id",
 )
+_QUESTION_FIELDS = {
+    "question",
+    "category",
+    "evidence_anchor",
+    "purpose",
+    "positive_signal",
+    "risk_signal",
+}
+_QUESTION_CATEGORIES = {"真实性核验", "岗位匹配", "风险澄清"}
 _HANDOFF_PREFIX = os.path.join(".psi", "resume-approval", "interview-stage-handoffs")
 _DEFAULTS_PATH = os.path.join("flows", "workflows", "resume-approval", "resume-approval.defaults.json")
 
@@ -76,6 +85,30 @@ def _required_text(value: Any, path: str) -> str:
 
 def _valid_revision(value: Any) -> bool:
     return isinstance(value, str) and _REVISION.fullmatch(value) is not None
+
+
+def _validate_questions(value: Any, path: str, *, require_risk: bool) -> None:
+    if not isinstance(value, list) or not 3 <= len(value) <= 6:
+        raise ValueError(f"{path} must contain 3 to 6 questions")
+    categories: set[str] = set()
+    seen_questions: set[str] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict) or set(item) != _QUESTION_FIELDS:
+            raise ValueError(f"{item_path} fields do not match the question-bank contract")
+        for field in _QUESTION_FIELDS:
+            _required_text(item.get(field), f"{item_path}.{field}")
+        if item["category"] not in _QUESTION_CATEGORIES:
+            raise ValueError(f"{item_path}.category is invalid")
+        normalized_question = item["question"].strip()
+        if normalized_question in seen_questions:
+            raise ValueError(f"{item_path}.question is duplicated")
+        seen_questions.add(normalized_question)
+        categories.add(item["category"])
+    if not {"真实性核验", "岗位匹配"} <= categories:
+        raise ValueError(f"{path} must cover authenticity and role-match categories")
+    if require_risk and "风险澄清" not in categories:
+        raise ValueError(f"{path} must cover the risk category when mismatch_points is non-empty")
 
 
 def _require_descriptor(value: Any) -> dict[str, Any]:
@@ -239,6 +272,11 @@ def _build_tasks(document: dict[str, Any]) -> list[dict[str, Any]]:
             _valid_revision(revisions.get(field)) for field in ("resume_scoring_sha256", "role_information_sha256")
         ):
             raise ValueError(f"approved[{index}] document revisions are invalid")
+        _validate_questions(
+            assessment.get("verification_questions"),
+            f"approved[{index}].assessment.verification_questions",
+            require_risk=bool(assessment.get("mismatch_points")),
+        )
         if revisions.get("role_information_sha256") != source_revision:
             raise ValueError(f"approved[{index}] role document revision does not match")
         role_key = assessment.get("matched_role_key")

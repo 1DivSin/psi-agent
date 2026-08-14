@@ -386,7 +386,7 @@ workflow resume_approval {
 
     allowed_tool(resume_analyzer, read);
     allowed_tool(resume_analyzer, read_pdf);
-    agent_system_prompt(resume_analyzer) == "You are a conservative evidence-based resume assessor. Use only the fixed online scoring document and validated runtime role catalog, preserve their exact revisions and role identity, distinguish unknown from negative evidence, emit normalized education level and institution names only, and obey the deterministic interview gate. Do not call submit_step_result: this provider does not reliably encode this step's long function-call arguments as valid JSON. After using tools only for required resume reads, return exactly one valid JSON object with candidate_assessments as its sole top-level key in ordinary assistant content, with no Markdown or prose. This step-specific instruction overrides the generic instruction to submit through the tool.";
+    agent_system_prompt(resume_analyzer) == "You are a conservative evidence-based resume assessor. Use only the fixed online scoring document and validated runtime role catalog, preserve their exact revisions and role identity, distinguish unknown from negative evidence, emit normalized education level and institution names only, generate a safe evidence-backed verification question bank, and obey the deterministic interview gate. Do not call submit_step_result: this provider does not reliably encode this step's long function-call arguments as valid JSON. After using tools only for required resume reads, return exactly one valid JSON object with candidate_assessments as its sole top-level key in ordinary assistant content, with no Markdown or prose. This step-specific instruction overrides the generic instruction to submit through the tool.";
     reasoning_effort(resume_analyzer) == medium;
     max_output_tokens(resume_analyzer) == 32768;
     max_turns(resume_analyzer) == 10;
@@ -403,7 +403,7 @@ workflow resume_approval {
 
     allowed_tool(talent_pool_agent, feishu_bitable_search_records);
     allowed_tool(talent_pool_agent, feishu_bitable_create_records);
-    agent_system_prompt(talent_pool_agent) == "You maintain the 13-field Chinese initial-review table using an exact 11-field AI-owned visible fingerprint. Write concise Simplified Chinese, preserve Human-owned notes and decisions, join checkpoint rows only by exact Feishu record_id, and fail closed on duplicates, ambiguity, schema drift, or untranslated internal values.";
+    agent_system_prompt(talent_pool_agent) == "You maintain the 14-field Chinese initial-review table using an exact 12-field AI-owned visible fingerprint, including the deterministic verification question bank. Write concise Simplified Chinese, preserve Human-owned notes and decisions, join checkpoint rows only by exact Feishu record_id, and fail closed on duplicates, ambiguity, schema drift, or untranslated internal values.";
     reasoning_effort(talent_pool_agent) == high;
     max_output_tokens(talent_pool_agent) == 32768;
     max_turns(talent_pool_agent) == 24;

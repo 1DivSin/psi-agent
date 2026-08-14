@@ -147,6 +147,32 @@ def _assessment() -> dict:
         ],
         "interview_recommendation": "建议面试",
         "interview_recommendation_reason": "Python 项目证据明确\uff0c建议面试核实工程深度。",
+        "verification_questions": [
+            {
+                "question": "请说明 Python 项目中你个人负责的关键工作、验证方式和结果。",
+                "category": "真实性核验",
+                "evidence_anchor": "项目经历\uff1a使用 Python",
+                "purpose": "核实 Python 项目证据的真实性和个人贡献。",
+                "positive_signal": "能够说明个人职责、关键决策和可验证结果。",
+                "risk_signal": "回答停留在团队概述\uff0c不能说明个人贡献。",
+            },
+            {
+                "question": "针对 Python 要求\uff0c请说明你处理过的最复杂工程问题和取舍。",
+                "category": "岗位匹配",
+                "evidence_anchor": "Python",
+                "purpose": "判断 Python 工程能力是否达到岗位要求。",
+                "positive_signal": "能够给出具体方案、取舍依据和结果。",
+                "risk_signal": "只列技术名词\uff0c缺少具体决策和结果。",
+            },
+            {
+                "question": "简历未体现可验证的独立交付案例\uff0c需在面试中核实\uff1b请补充一个完整案例。",
+                "category": "风险澄清",
+                "evidence_anchor": "简历未体现可验证的独立交付案例\uff0c需在面试中核实",
+                "purpose": "澄清独立交付证据缺口\uff0c不把未知信息视为负面事实。",
+                "positive_signal": "能够提供职责边界、交付物和验证结果。",
+                "risk_signal": "案例缺少个人职责或可验证交付结果。",
+            },
+        ],
         "document_revisions": {
             "resume_scoring_sha256": _sha(SCORING_CONTENT),
             "role_information_sha256": _sha(ROLE_CONTENT),
@@ -195,6 +221,131 @@ def test_valid_dynamic_assessment_is_canonicalized_and_revisioned() -> None:
     assert validated["document_revisions"] == _assessment()["document_revisions"]
     assert len(validated["assessments"]) == 1
     assert len(validated["assessments"][0]["assessment_revision"]) == 64
+
+
+def test_question_bank_accepts_three_and_six_question_boundaries_and_renders_stably() -> None:
+    validator = _validator()
+    assessment = _assessment()
+
+    three = validator.run(_inputs([assessment]))
+
+    assert three["errors"] == []
+    assert validator.render_verification_questions(assessment["verification_questions"]) == (
+        "1. [真实性核验] 请说明 Python 项目中你个人负责的关键工作、验证方式和结果。\n"
+        "2. [岗位匹配] 针对 Python 要求\uff0c请说明你处理过的最复杂工程问题和取舍。\n"
+        "3. [风险澄清] 简历未体现可验证的独立交付案例\uff0c需在面试中核实\uff1b请补充一个完整案例。"
+    )
+
+    for suffix, original in enumerate(copy.deepcopy(assessment["verification_questions"]), start=1):
+        original["question"] = f"{original['question']} 补充追问 {suffix}。"
+        assessment["verification_questions"].append(original)
+    six = validator.run(_inputs([assessment]))
+
+    assert six["errors"] == []
+    assert len(six["validated_candidate_assessments"]["assessments"][0]["verification_questions"]) == 6
+
+
+def test_risk_question_coverage_is_conditional_on_material_mismatch_points() -> None:
+    validator = _validator()
+    assessment = _assessment()
+    assessment["mismatch_points"] = []
+    assessment["verification_questions"][2] = {
+        **copy.deepcopy(assessment["verification_questions"][1]),
+        "question": "针对 Python 要求\uff0c请再说明一次性能优化取舍。",
+    }
+
+    errors = validator._validate_verification_questions(
+        assessment["verification_questions"],
+        "candidate_assessments[0].verification_questions",
+        assessment,
+        _catalog()["roles"][0],
+    )
+
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        (lambda value: value["verification_questions"].pop(), "must contain 3 to 6 questions"),
+        (
+            lambda value: value["verification_questions"].extend(
+                [
+                    {
+                        **copy.deepcopy(value["verification_questions"][0]),
+                        "question": f"Python 真实性补充问题 {index}",
+                    }
+                    for index in range(4)
+                ]
+            ),
+            "must contain 3 to 6 questions",
+        ),
+        (
+            lambda value: value["verification_questions"][0].pop("purpose"),
+            ".missing_fields:purpose",
+        ),
+        (
+            lambda value: value["verification_questions"][0].update(category="通用问题"),
+            ".category must be one of:",
+        ),
+        (
+            lambda value: value["verification_questions"][2].update(category="岗位匹配"),
+            "must include category 风险澄清",
+        ),
+        (
+            lambda value: value["verification_questions"][0].update(
+                question="请介绍一下自己。",
+            ),
+            ".question is not linked to its evidence_anchor",
+        ),
+        (
+            lambda value: value["verification_questions"][1].update(
+                question=value["verification_questions"][0]["question"],
+            ),
+            ".question is duplicated",
+        ),
+        (
+            lambda value: value["verification_questions"][0].update(
+                evidence_anchor="通用沟通能力",
+                question="请介绍你的通用沟通能力。",
+            ),
+            ".evidence_anchor is not linked",
+        ),
+        (
+            lambda value: value["verification_questions"][0].update(
+                question="请说明你的年龄以及 Python 项目经历。",
+            ),
+            ".question references a protected attribute",
+        ),
+        (
+            lambda value: value["verification_questions"][1].update(
+                question="你没有 Python 能力\uff0c请解释原因。",
+            ),
+            ".question treats unknown information as a negative fact",
+        ),
+    ],
+)
+def test_question_bank_rejects_malformed_unlinked_or_unsafe_content(mutation, expected_error: str) -> None:
+    validator = _validator()
+    assessment = _assessment()
+    mutation(assessment)
+
+    result = validator.run(_inputs([assessment]))
+
+    assert any(expected_error in error for error in result["errors"])
+    assert result["validated_candidate_assessments"]["assessments"] == []
+
+
+def test_final_validation_still_blocks_untraceable_questions_after_repairs() -> None:
+    validator = _validator()
+    assessment = _assessment()
+    assessment["verification_questions"][0]["question"] = "请介绍一下自己。"
+
+    result = validator.run({**_inputs([assessment]), "candidate_assessments_repaired": [assessment]})
+
+    assert result["assessment_validation_manifest"]["status"] == "blocked"
+    assert any(".verification_questions" in error for error in result["errors"])
+    assert result["validated_candidate_assessments"]["assessments"] == []
 
 
 @pytest.mark.parametrize(
@@ -266,21 +417,39 @@ def test_role_point_lists_must_both_contain_a_table_point(field: str) -> None:
                 "interview_recommendation_reason": "评级 C 未达到自动面试门槛\uff0c保留为人工初审备选。",
             }
         ),
-        lambda value: value.update(
-            {
-                "match_points": [{"requirement": "构建 AI 应用", "resume_evidence": ["项目经历\uff1a构建 AI 应用"]}],
-                "interview_recommendation": "不建议面试",
-                "interview_recommendation_reason": "评级 B\uff0c但 Python 硬性要求缺少肯定证据。",
-            }
+        lambda value: (
+            value.update(
+                {
+                    "match_points": [
+                        {"requirement": "构建 AI 应用", "resume_evidence": ["项目经历\uff1a构建 AI 应用"]}
+                    ],
+                    "interview_recommendation": "不建议面试",
+                    "interview_recommendation_reason": "评级 B\uff0c但 Python 硬性要求缺少肯定证据。",
+                }
+            ),
+            value["verification_questions"][0].update(
+                {
+                    "question": "请说明构建 AI 应用项目中你个人负责的关键工作、验证方式和结果。",
+                    "evidence_anchor": "项目经历\uff1a构建 AI 应用",
+                }
+            ),
         ),
-        lambda value: value.update(
-            {
-                "mismatch_points": [
-                    {"requirement": "Python", "resume_evidence": ["项目明确仅使用 Java\uff0c无法使用 Python"]}
-                ],
-                "interview_recommendation": "不建议面试",
-                "interview_recommendation_reason": "评级 B\uff0c但 Python 硬性要求存在明确反证。",
-            }
+        lambda value: (
+            value.update(
+                {
+                    "mismatch_points": [
+                        {"requirement": "Python", "resume_evidence": ["项目明确仅使用 Java\uff0c无法使用 Python"]}
+                    ],
+                    "interview_recommendation": "不建议面试",
+                    "interview_recommendation_reason": "评级 B\uff0c但 Python 硬性要求存在明确反证。",
+                }
+            ),
+            value["verification_questions"][2].update(
+                {
+                    "question": "项目明确仅使用 Java\uff0c无法使用 Python\uff1b请说明当前 Python 实践情况。",
+                    "evidence_anchor": "项目明确仅使用 Java\uff0c无法使用 Python",
+                }
+            ),
         ),
     ],
 )
@@ -497,6 +666,20 @@ def test_repair_request_contains_only_fixed_authorities_and_candidate_errors() -
         "mismatch_content": "resume-supported shortfalls, contradictions, or material evidence gaps",
         "table_format": "one '- ' bullet line per point",
     }
+    assert request["expected_contract"]["verification_question_rules"] == {
+        "type": (
+            "array of {question, category, evidence_anchor, purpose, positive_signal, risk_signal} objects"
+        ),
+        "min_items": 3,
+        "max_items": 6,
+        "categories": ["真实性核验", "岗位匹配", "风险澄清"],
+        "required_coverage": ["真实性核验", "岗位匹配", "风险澄清 when mismatch_points is non-empty"],
+        "evidence_anchor": (
+            "exact selected-role requirement or exact resume evidence from match_points/mismatch_points"
+        ),
+        "public_rendering": "<index>. [<category>] <question> in source order",
+        "safety": "exclude protected attributes and unsupported negative claims",
+    }
 
 
 @pytest.mark.parametrize(
@@ -527,6 +710,49 @@ def test_repair_merge_rejects_immutable_identity_changes(mutation, message: str)
                 "assessment_repair_requests_round_1": requests,
                 "repaired_candidate_assessments_round_1": [repaired],
                 "batch_id": BATCH_ID,
+            },
+            assessments_key="candidate_assessments",
+            requests_key="assessment_repair_requests_round_1",
+            repairs_key="repaired_candidate_assessments_round_1",
+        )
+
+
+def test_question_only_repair_preserves_unrelated_fields_and_candidate_indices() -> None:
+    pipeline = _pipeline()
+    untouched = _assessment()
+    untouched["source"]["sha256"] = "b" * 64
+    untouched["candidate_id"] = "b" * 16
+    broken = _assessment()
+    broken["verification_questions"][0]["question"] = "请介绍一下自己。"
+    requests, _ = pipeline.build_repair_requests(
+        _inputs([untouched, broken]),
+        assessments_key="candidate_assessments",
+    )
+    repaired = _assessment()
+
+    merged, manifest = pipeline.merge_repairs(
+        {
+            "candidate_assessments": [untouched, broken],
+            "assessment_repair_requests_round_1": requests,
+            "repaired_candidate_assessments_round_1": [repaired],
+        },
+        assessments_key="candidate_assessments",
+        requests_key="assessment_repair_requests_round_1",
+        repairs_key="repaired_candidate_assessments_round_1",
+    )
+
+    assert merged[0] == untouched
+    assert merged[1] == repaired
+    assert manifest["modified_indices"] == [1]
+
+    forged = copy.deepcopy(repaired)
+    forged["education"] = "硕士"
+    with pytest.raises(ValueError, match="question-only repair"):
+        pipeline.merge_repairs(
+            {
+                "candidate_assessments": [untouched, broken],
+                "assessment_repair_requests_round_1": requests,
+                "repaired_candidate_assessments_round_1": [forged],
             },
             assessments_key="candidate_assessments",
             requests_key="assessment_repair_requests_round_1",
@@ -581,8 +807,7 @@ def test_final_validation_does_not_block_unrepaired_point_or_school_content() ->
     validator = _validator()
     assessment = _assessment()
     assessment["education_background"] = "测试大学"
-    assessment["match_points"] = []
-    assessment["mismatch_points"] = []
+    assessment["match_points"][0]["requirement"] = "非目录要求"
 
     final = validator.run({**_inputs([assessment]), "candidate_assessments_repaired": [assessment]})
 
@@ -590,8 +815,7 @@ def test_final_validation_does_not_block_unrepaired_point_or_school_content() ->
     assert final["assessment_validation_manifest"]["status"] == "complete"
     warnings = final["assessment_validation_manifest"]["constraint_warnings"]
     assert any(".education_background must label each institution" in item for item in warnings)
-    assert any(".match_points must contain at least one point" in item for item in warnings)
-    assert any(".mismatch_points must contain at least one point" in item for item in warnings)
+    assert any(".match_points[0].requirement must exactly match" in item for item in warnings)
     assert len(final["validated_candidate_assessments"]["assessments"]) == 1
 
 
@@ -653,6 +877,8 @@ def test_repair_prompt_locks_all_cross_batch_identity() -> None:
     assert "forbidden legacy fields" in prompt
     assert "expected_contract.education_rules" in prompt
     assert "expected_contract.recommendation_rules" in prompt
+    assert "expected_contract.verification_question_rules" in prompt
+    assert "question-only" in prompt
     assert "never claim the candidate lacks the ability" in prompt
     assert "具体岗位证据缺口" in prompt
     assert "不得把评级或分数本身作为主要理由" in prompt

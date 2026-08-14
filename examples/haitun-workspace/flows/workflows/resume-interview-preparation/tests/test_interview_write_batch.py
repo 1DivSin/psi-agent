@@ -12,6 +12,41 @@ CANDIDATE_ID = "a" * 16
 ROLE_KEY = "role-0123456789abcdef01234567"
 
 
+def _questions() -> list[dict]:
+    return [
+        {
+            "question": "请说明 Python 项目中你个人负责的关键工作。",
+            "category": "真实性核验",
+            "evidence_anchor": "项目使用 Python",
+            "purpose": "核实项目真实性和个人贡献。",
+            "positive_signal": "能够说明个人职责和结果。",
+            "risk_signal": "回答缺少个人职责或结果。",
+        },
+        {
+            "question": "针对 Python 要求\uff0c请说明一次复杂问题的解决过程。",
+            "category": "岗位匹配",
+            "evidence_anchor": "Python",
+            "purpose": "判断岗位所需的 Python 工程深度。",
+            "positive_signal": "能够说明方案、取舍和结果。",
+            "risk_signal": "回答仅列技术名词。",
+        },
+        {
+            "question": "请澄清生产经验的具体范围和验证结果。",
+            "category": "风险澄清",
+            "evidence_anchor": "生产经验",
+            "purpose": "澄清生产经验的证据缺口。",
+            "positive_signal": "能够提供可验证案例。",
+            "risk_signal": "案例缺少可验证结果。",
+        },
+    ]
+
+
+def _rendered_questions() -> str:
+    return "\n".join(
+        f"{index}. [{item['category']}] {item['question']}" for index, item in enumerate(_questions(), start=1)
+    )
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("assemble_interview_write_batch", PROGRAM_PATH)
     assert spec is not None and spec.loader is not None
@@ -29,6 +64,7 @@ def _task() -> dict:
         "candidate_name": "测试候选人",
         "matched_role_key": ROLE_KEY,
         "matched_role_name": "AI应用开发工程师",
+        "verification_questions": _questions(),
         "assessment_revision": "d" * 64,
         "document_revisions": {
             "resume_scoring_sha256": "b" * 64,
@@ -54,7 +90,7 @@ def _draft() -> dict:
         "面试前摘要": "候选人摘要",
         "面试重点": "1. 验证 Python 工程能力\n2. 验证系统设计能力",
         "风险提示": "- 生产经验需要核实",
-        "建议问题": "1. 请说明项目架构\n2. 如何处理线上故障",
+        "建议问题": _rendered_questions(),
         "candidate_name": "Agent 伪造姓名",
         "talent_record_id": "recForged00001",
     }
@@ -90,7 +126,7 @@ def test_builds_authoritative_write_batch_and_ignores_agent_identity() -> None:
         "面试前摘要": "候选人摘要",
         "面试重点": "1. 验证 Python 工程能力\n2. 验证系统设计能力",
         "风险提示": "- 生产经验需要核实",
-        "建议问题": "1. 请说明项目架构\n2. 如何处理线上故障",
+        "建议问题": _rendered_questions(),
     }
     ignored = {
         warning["field"]
@@ -104,20 +140,19 @@ def test_normalizes_string_arrays_to_newline_text() -> None:
     module = _load_module()
     inputs = _inputs()
     inputs["interview_drafts"][0]["风险提示"] = ["- 风险一", "- 风险二"]
-    inputs["interview_drafts"][0]["建议问题"] = ["1. 问题一", "2. 问题二"]
+    inputs["interview_drafts"][0]["建议问题"] = _rendered_questions().splitlines()
 
     result = module.run(inputs)
     fingerprint = result["interview_write_batch"]["records"][0]["row_fingerprint"]
 
     assert fingerprint["风险提示"] == "- 风险一\n- 风险二"
-    assert fingerprint["建议问题"] == "1. 问题一\n2. 问题二"
+    assert fingerprint["建议问题"] == _rendered_questions()
 
 
 def test_style_shortfalls_are_warnings_not_failures() -> None:
     module = _load_module()
     inputs = _inputs()
     inputs["interview_drafts"][0]["面试重点"] = "只核实一个重点"
-    inputs["interview_drafts"][0]["建议问题"] = "只问一个问题"
 
     result = module.run(inputs)
 
@@ -125,6 +160,15 @@ def test_style_shortfalls_are_warnings_not_failures() -> None:
     assert manifest["status"] == "complete"
     assert manifest["errors"] == []
     assert manifest["warnings"]
+
+
+def test_rejects_independently_rewritten_suggested_questions() -> None:
+    module = _load_module()
+    inputs = _inputs()
+    inputs["interview_drafts"][0]["建议问题"] = "1. 请介绍一下自己"
+
+    with pytest.raises(ValueError, match="exactly reuse"):
+        module.run(inputs)
 
 
 def test_accepts_legacy_generated_fields_contract() -> None:
@@ -175,6 +219,12 @@ def test_accepts_misplaced_metadata_and_ignores_forbidden_reference() -> None:
         (lambda data: data["interview_drafts"][0].update(风险提示={"x": 1}), "text"),
         (lambda data: data["interview_drafts"][0].update(schema_version="2.0"), "schema"),
         (lambda data: data["approved_interview_tasks"][0]["assessment"].update(assessment_revision="bad"), "revision"),
+        (
+            lambda data: data["approved_interview_tasks"][0]["assessment"][
+                "verification_questions"
+            ].pop(),
+            "3 to 6",
+        ),
         (lambda data: data["approved_interview_tasks"][0].update(talent_record_id="bad"), "talent"),
         (lambda data: data["approved_interview_tasks"][0]["matched_role"].update(name="其他岗位"), "role"),
     ],
