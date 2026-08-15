@@ -30,6 +30,7 @@ import aiohttp
 import anyio
 from loguru import logger
 
+from psi_agent._tls import client_ssl_context
 from psi_agent.gateway._auth_store import AuthStore
 
 # 客户端拿到 401 即视为登录态失效: 清本地凭证、回登录界面。没有静默续期逻辑 ——
@@ -169,9 +170,12 @@ class AuthManager:
             # 必须显式传 connector: 默认值的 keepalive 15s 撑不过登录步距,
             # 见 _KEEPALIVE_SECONDS。不加 enable_cleanup_closed —— Python 3.14.7
             # 下它已是 no-op 且抛 DeprecationWarning, 而本仓库禁止 noqa 抑制。
+            # 必须显式传 ssl 上下文: 默认组列表下部分网络会丢握手包, 表现为
+            # 「所有 /auth/* 全超时而 curl 秒回」。见 psi_agent._tls。
             connector = aiohttp.TCPConnector(
                 keepalive_timeout=_KEEPALIVE_SECONDS,
                 ttl_dns_cache=_DNS_CACHE_SECONDS,
+                ssl=client_ssl_context(),
             )
             self._session = aiohttp.ClientSession(
                 connector=connector,
@@ -454,6 +458,18 @@ class AuthManager:
             self._pending_temp_token = ""
         if self._store is not None:
             await self._store.clear_token()
+
+    def bearer_token(self) -> str:
+        """当前 token, 未登录时为空串。
+
+        ** 唯一的进程内取值口 **, 只给免费模型换算力用 (见 ``_free_model.py``)。
+        不加锁: 读一个 str 是原子的, 而这里要的就是「此刻的值」—— 拿到旧值的
+        后果是一次 401, 拿锁的代价是每次建 AI socket 都要等一次认证请求。
+
+        ** 不要把它接到任何下行响应上 **: token 不进快照、不进 ``/ais``、不进
+        ``status()``。要判断有没有登录用 ``status()["loggedIn"]``。
+        """
+        return self._token
 
     # ---- 状态 ----
     def status(self) -> dict[str, Any]:
