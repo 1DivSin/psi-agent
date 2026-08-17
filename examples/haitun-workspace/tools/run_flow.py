@@ -22,6 +22,7 @@ from typing import Any, cast
 import anyio
 import anyio.lowlevel
 from anyio.abc import ByteReceiveStream, Process
+from json_repair import repair_json
 from loguru import logger
 
 from psi_agent.session.agent import SessionAgent, current_tool_ai_socket
@@ -58,6 +59,7 @@ from fusion_flow.job_store import (  # noqa: E402
     RunLease,
     new_opaque_id,
 )
+from fusion_flow.step_timing import StepTimingReporter  # noqa: E402
 from fusion_flow.workflow_execution import (  # noqa: E402
     ExecutionCheckpoint,
     ExecutionPlanError,
@@ -83,12 +85,28 @@ _STEP_SYSTEM_PROMPT = (
 )
 _JSON_FENCE_OPEN = re.compile(r"[ \t]*(?P<fence>`{3,})json[ \t]*", re.IGNORECASE)
 _JSON_FENCE_CLOSE = re.compile(r"[ \t]*(?P<fence>`{3,})[ \t]*")
+_JSON_WHITESPACE = frozenset(" \t\r\n")
 _HUMAN_PREPARER_SYSTEM_PROMPT = (
     "You prepare exactly one assigned FusionFlow Human step for another person. "
     "Use the workspace-confined read tool only when useful to inspect an instruction reference. "
     "Do not change files, perform the task, ask the person directly, or start another workflow. "
     "Your final response must be exactly the requested JSON question contract."
 )
+_PROGRAM_RUNTIME_GUIDANCE = {
+    "nt": (
+        " This host is Windows. For a declared Python script, select runtime='python'; do not "
+        "select python3 unless workspace inspection has proved that exact executable works."
+    ),
+    "posix": (" This host is POSIX. For a declared Python script, prefer runtime='python3' when it is available."),
+}
+
+
+def _program_runtime_guidance(os_name: str) -> str:
+    """Return Program runtime guidance for one supported host family."""
+
+    return _PROGRAM_RUNTIME_GUIDANCE["nt" if os_name == "nt" else "posix"]
+
+
 _PROGRAM_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Program step. "
     "The user message contains one JSON execution contract; treat every field literally. "
@@ -110,7 +128,7 @@ _PROGRAM_SYSTEM_PROMPT = (
     "Adaptation is allowed only when the execution contract sets repair_authorized to true; even "
     "then, state a concrete adaptation reason and keep the declared input artifacts immutable. "
     "Never fabricate missing values or turn a process or format failure into success. After the "
-    "authoritative attempt, call submit_program_result exactly once and by itself."
+    "authoritative attempt, call submit_program_result exactly once and by itself." + _program_runtime_guidance(os.name)
 )
 _STEP_TOOL_SESSION_ID = f"{__name__}_step"
 _STEP_TOOLS_LOAD_LOCK = anyio.Lock()
@@ -606,52 +624,115 @@ def _parse_mapping(value: str, *, label: str) -> dict[str, object]:
     return cast(dict[str, object], parsed)
 
 
-def _parse_strict_agent_mapping(value: str, *, label: str) -> dict[str, object]:
-    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError(f"duplicate JSON object key {key!r}")
-            result[key] = item
-        return result
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, item in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = item
+    return result
 
-    try:
-        parsed = json.loads(
-            value,
-            parse_constant=_reject_json_constant,
-            object_pairs_hook=reject_duplicate_keys,
-        )
-        json.dumps(parsed, allow_nan=False)
-    except (json.JSONDecodeError, OverflowError, ValueError) as error:
-        raise ValueError(f"{label} must be a strict JSON object") from error
-    if not isinstance(parsed, dict):
-        raise ValueError(f"{label} must be a strict JSON object")
+
+def _parse_strict_json_value(value: str) -> object:
+    parsed = json.loads(
+        value,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
+    json.dumps(parsed, allow_nan=False)
     return parsed
 
 
-def _extract_json_fences(value: str) -> list[str]:
+def _parse_strict_agent_mapping(value: str, *, label: str) -> dict[str, object]:
+
+    try:
+        parsed = _parse_strict_json_value(value)
+    except (json.JSONDecodeError, OverflowError, RecursionError, ValueError) as error:
+        raise ValueError(f"{label} must be a strict JSON object") from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be a strict JSON object")
+    return cast(dict[str, object], parsed)
+
+
+def _extract_single_json_fence(value: str) -> str | None:
     lines = value.splitlines(keepends=True)
-    fenced: list[str] = []
     index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index == len(lines):
+        return None
+
+    opener = _JSON_FENCE_OPEN.fullmatch(lines[index].rstrip("\r\n"))
+    if opener is None:
+        return None
+
+    opening_width = len(opener.group("fence"))
+    body_start = index + 1
+    index = body_start
     while index < len(lines):
-        opener = _JSON_FENCE_OPEN.fullmatch(lines[index].rstrip("\r\n"))
-        if opener is None:
-            index += 1
+        closer = _JSON_FENCE_CLOSE.fullmatch(lines[index].rstrip("\r\n"))
+        if closer is not None and len(closer.group("fence")) >= opening_width:
+            if any(line.strip() for line in lines[index + 1 :]):
+                return None
+            return "".join(lines[body_start:index])
+        index += 1
+    return None
+
+
+def _remove_trailing_json_commas(value: str) -> tuple[str, int]:
+    """Remove unambiguous JSON trailing commas in one string-aware pass."""
+
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    previous_significant: str | None = None
+    repair_count = 0
+
+    for index, character in enumerate(value):
+        if in_string:
+            repaired.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
             continue
 
-        opening_width = len(opener.group("fence"))
-        body_start = index + 1
-        index = body_start
-        while index < len(lines):
-            closer = _JSON_FENCE_CLOSE.fullmatch(lines[index].rstrip("\r\n"))
-            if closer is not None and len(closer.group("fence")) >= opening_width:
-                fenced.append("".join(lines[body_start:index]))
-                index += 1
-                break
-            index += 1
-        else:
-            return []
-    return fenced
+        if character == '"':
+            in_string = True
+            previous_significant = character
+            repaired.append(character)
+            continue
+
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(value) and value[lookahead] in _JSON_WHITESPACE:
+                lookahead += 1
+            if (
+                lookahead < len(value)
+                and value[lookahead] in "}]"
+                and previous_significant not in {"{", "[", ",", ":", None}
+            ):
+                repair_count += 1
+                continue
+
+        repaired.append(character)
+        if character not in _JSON_WHITESPACE:
+            previous_significant = character
+
+    return "".join(repaired), repair_count
+
+
+def _canonical_json_value(value: object) -> str:
+    """Return a type-preserving canonical form of one parsed JSON value."""
+
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _parse_agent_step_result(
@@ -664,11 +745,13 @@ def _parse_agent_step_result(
     try:
         result = _parse_strict_agent_mapping(value, label=label)
     except ValueError as error:
-        fenced = _extract_json_fences(value)
-        if len(fenced) != 1:
+        if not isinstance(error.__cause__, json.JSONDecodeError):
+            raise _AgentStepResultParseError(str(error)) from error
+        fenced = _extract_single_json_fence(value)
+        if fenced is None:
             raise _AgentStepResultParseError(str(error)) from error
         try:
-            result = _parse_strict_agent_mapping(fenced[0], label=label)
+            result = _parse_strict_agent_mapping(fenced, label=label)
         except ValueError as fenced_error:
             raise _AgentStepResultParseError(str(fenced_error)) from fenced_error
 
@@ -681,27 +764,53 @@ def _parse_agent_step_result(
     return result
 
 
-def _warn_agent_result_fallback(
+def _parse_agent_step_result_with_json_repair(
+    value: str,
     *,
     step_id: str,
-    executor_id: str,
     output_ids: tuple[str, ...],
-    fallback_mode: str,
-    validation_error: ValueError,
-    repair_attempts: int,
-) -> None:
-    validation_failure = (
-        "unparseable_result" if isinstance(validation_error, _AgentStepResultParseError) else "output_keys_mismatch"
-    )
-    logger.bind(
-        event="fusion_flow.agent_result_fallback",
+) -> tuple[dict[str, object], int, str]:
+    """Use json-repair, accepting only the trailing-comma-safe equivalent."""
+
+    fenced = _extract_single_json_fence(value)
+    candidate = value if fenced is None else fenced
+    response_form = "raw" if fenced is None else "json_fence"
+    trailing_comma_repaired, repair_count = _remove_trailing_json_commas(candidate)
+    if repair_count == 0:
+        raise _AgentStepResultParseError(f"response for step {step_id!r} has no repairable trailing comma")
+
+    expected = _parse_agent_step_result(
+        trailing_comma_repaired,
         step_id=step_id,
-        executor_id=executor_id,
-        output_artifact_ids=list(output_ids),
-        fallback_mode=fallback_mode,
-        validation_failure=validation_failure,
-        repair_attempts=repair_attempts,
-    ).warning("FusionFlow Agent Step committed a raw-response fallback")
+        output_ids=output_ids,
+    )
+
+    try:
+        repaired = repair_json(
+            candidate,
+            return_objects=False,
+            skip_json_loads=True,
+            logging=False,
+            stream_stable=False,
+            strict=True,
+            ensure_ascii=False,
+        )
+    except Exception as error:
+        raise _AgentStepResultParseError(f"json-repair failed for step {step_id!r}") from error
+    if not isinstance(repaired, str):
+        raise _AgentStepResultParseError(f"json-repair returned a non-string result for step {step_id!r}")
+
+    try:
+        result = _parse_agent_step_result(
+            repaired,
+            step_id=step_id,
+            output_ids=output_ids,
+        )
+    except ValueError as error:
+        raise _AgentStepResultParseError(f"json-repair returned invalid strict JSON for step {step_id!r}") from error
+    if _canonical_json_value(result) != _canonical_json_value(expected):
+        raise _AgentStepResultParseError(f"json-repair changed more than trailing commas for step {step_id!r}")
+    return result, repair_count, response_form
 
 
 def _parse_resource_capacities(value: str) -> Mapping[str, ResourceCapacity] | None:
@@ -743,9 +852,18 @@ def _bind_step_tool_to_workspace(
 
 def _parse_human_response(value: str) -> object:
     try:
-        return json.loads(value, parse_constant=_reject_json_constant)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise ValueError("human_response_json must be valid JSON") from error
+        parsed = _parse_strict_json_value(value)
+    except json.JSONDecodeError as error:
+        stripped = value.strip()
+        spelling = stripped
+        while spelling.startswith("\ufeff"):
+            spelling = spelling[1:].lstrip()
+        if not spelling or spelling[0] in {"{", "[", '"'} or spelling in {"NaN", "Infinity", "-Infinity"}:
+            raise ValueError("human_response_json must be valid JSON or non-empty plain text") from error
+        return value
+    except (OverflowError, RecursionError, ValueError) as error:
+        raise ValueError("human_response_json must be valid JSON or non-empty plain text") from error
+    return parsed
 
 
 def _json_values_equal(left: object, right: object) -> bool:
@@ -2145,8 +2263,6 @@ async def _complete_agent_step(
         "If tool calling is unavailable, respond with exactly one JSON object keyed by exactly "
         "those output keys, with no surrounding prose or Markdown."
     )
-    first_invalid_response: str | None = None
-    first_validation_error: ValueError | None = None
 
     def stop_after_submission() -> bool:
         nonlocal submission_error
@@ -2166,6 +2282,7 @@ async def _complete_agent_step(
 
     for attempt in range(3):
         submission_error = None
+        repair_response: str | None = None
         response = await _complete_step_agent(
             agent,
             conversation,
@@ -2186,39 +2303,40 @@ async def _complete_agent_step(
                     output_ids=context.output_ids,
                 )
             except _AgentStepResultParseError as error:
-                if len(context.output_ids) == 1:
-                    _warn_agent_result_fallback(
-                        step_id=context.step_id,
-                        executor_id=context.executor_id,
-                        output_ids=context.output_ids,
-                        fallback_mode="single_raw",
-                        validation_error=error,
-                        repair_attempts=attempt,
-                    )
-                    return {context.output_ids[0]: response}
                 validation_error = error
+                repair_response = response
             except ValueError as error:
                 validation_error = error
-            if first_invalid_response is None:
-                first_invalid_response = response
-                first_validation_error = validation_error
         if attempt == 2:
-            if len(context.output_ids) > 1 and first_invalid_response is not None:
-                assert first_validation_error is not None
-                _warn_agent_result_fallback(
-                    step_id=context.step_id,
-                    executor_id=context.executor_id,
-                    output_ids=context.output_ids,
-                    fallback_mode="broadcast_raw",
-                    validation_error=first_validation_error,
-                    repair_attempts=attempt,
-                )
-                return dict.fromkeys(context.output_ids, first_invalid_response)
+            if repair_response is not None:
+                try:
+                    repaired, repair_count, response_form = _parse_agent_step_result_with_json_repair(
+                        repair_response,
+                        step_id=context.step_id,
+                        output_ids=context.output_ids,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    logger.bind(
+                        event="fusion_flow.agent_step_json_repaired",
+                        step_id=context.step_id,
+                        executor_id=context.executor_id,
+                        invocation_id=context.dispatch.invocation_id or context.step_id,
+                        iteration_index=context.dispatch.iteration_index,
+                        workflow_attempt=context.dispatch.attempt,
+                        response_attempt=attempt + 1,
+                        repair_kind="json_repair_trailing_comma",
+                        repair_count=repair_count,
+                        response_form=response_form,
+                    ).warning("FusionFlow Agent Step accepted safe trailing-comma output from json-repair")
+                    return repaired
             raise ValueError(f"step {context.step_id!r} result remained invalid after 3 attempts") from validation_error
         message = (
             f"Your previous step result was invalid: {validation_error}\n"
-            "Do not redo the step. Call submit_step_result exactly once and by itself "
-            f"with exactly these keys: {json.dumps(context.output_ids, ensure_ascii=False)}."
+            "Do not redo the step. Return exactly one valid JSON object as ordinary assistant content, "
+            f"keyed by exactly these output keys: {json.dumps(context.output_ids, ensure_ascii=False)}. "
+            "Do not add Markdown or prose."
         )
     raise AssertionError("unreachable")
 
@@ -2308,6 +2426,12 @@ async def _execute_persisted_run(
         run.run_id,
         reuse_existing=True,
     )
+    timing_reporter = await StepTimingReporter.open(
+        artifact_store.run_dir,
+        run_id=run.run_id,
+        workflow_id=run.checkpoint.workflow_id,
+        flow_path=run.flow_path,
+    )
     await artifact_store.persist(run.checkpoint.values)
     step_tools: ToolRegistry | None = None
     human_tools: ToolRegistry | None = None
@@ -2388,6 +2512,7 @@ async def _execute_persisted_run(
             )
             await lease.save(updated)
             run_state = updated
+            await timing_reporter.persist()
 
     human_requests: list[HumanRequestSpec] = []
     outputs: dict[str, object] | None = None
@@ -2407,6 +2532,7 @@ async def _execute_persisted_run(
                     resolve_instruction=_cached_instruction_resolver(instruction_files),
                     checkpoint=run.checkpoint,
                     checkpoint_observer=observe_checkpoint,
+                    timing_recorder=timing_reporter.record,
                 ),
                 adapter=agent_sessions,
                 run_id=run.run_id,
@@ -2431,6 +2557,13 @@ async def _execute_persisted_run(
         try:
             with anyio.CancelScope(shield=True):
                 await lease.save(recoverable)
+                if _is_cancellation(error):
+                    await timing_reporter.persist()
+                else:
+                    await timing_reporter.finalize(
+                        status="failed",
+                        error_type=type(error).__name__,
+                    )
         except Exception as persistence_error:
             error.add_note(f"also failed to persist terminal run state: {persistence_error}")
         raise
@@ -2447,6 +2580,7 @@ async def _execute_persisted_run(
         )
         with anyio.CancelScope(shield=True):
             await lease.save(waiting)
+            await timing_reporter.persist()
         return _human_request_payload(waiting.run_id, request)
 
     if outputs is None:
@@ -2459,6 +2593,10 @@ async def _execute_persisted_run(
     )
     with anyio.CancelScope(shield=True):
         await lease.save(completed)
+        await timing_reporter.finalize(
+            status="completed",
+            error_type=None,
+        )
     return json.dumps(outputs, ensure_ascii=False, sort_keys=True)
 
 
@@ -2533,6 +2671,12 @@ async def run_flow(
         )
 
     artifact_store = await _new_artifact_store(flow_path)
+    timing_reporter = await StepTimingReporter.open(
+        artifact_store.run_dir,
+        run_id=artifact_store.run_dir.name,
+        workflow_id=compiled.graph.workflow_id,
+        flow_path=flow_path,
+    )
     await artifact_store.persist(initial_checkpoint.values)
     agent_sessions = _AgentSessionAdapter(
         ai_socket=ai_socket,
@@ -2541,23 +2685,38 @@ async def run_flow(
 
     async def observe_checkpoint(checkpoint: ExecutionCheckpoint) -> None:
         await artifact_store.persist(checkpoint.values)
+        await timing_reporter.persist()
 
-    outputs = await _run_with_agent_sessions(
-        lambda: _execute_workflow(
-            source,
-            inputs=inputs,
-            complete=agent_sessions.complete,
-            resource_capacities=resource_capacities,
-            supported_executor_kinds=("Agent", "Program"),
-            resolve_instruction=_cached_instruction_resolver(instruction_files),
-            work_dir=_workspace_dir(),
-            run_program=complete_program,
-            checkpoint=initial_checkpoint,
-            checkpoint_observer=observe_checkpoint,
-        ),
-        adapter=agent_sessions,
-        run_id=artifact_store.run_dir.name,
-    )
+    try:
+        outputs = await _run_with_agent_sessions(
+            lambda: _execute_workflow(
+                source,
+                inputs=inputs,
+                complete=agent_sessions.complete,
+                resource_capacities=resource_capacities,
+                supported_executor_kinds=("Agent", "Program"),
+                resolve_instruction=_cached_instruction_resolver(instruction_files),
+                work_dir=_workspace_dir(),
+                run_program=complete_program,
+                checkpoint=initial_checkpoint,
+                checkpoint_observer=observe_checkpoint,
+                timing_recorder=timing_reporter.record,
+            ),
+            adapter=agent_sessions,
+            run_id=artifact_store.run_dir.name,
+        )
+    except BaseException as error:
+        with anyio.CancelScope(shield=True):
+            await timing_reporter.finalize(
+                status="cancelled" if _is_cancellation(error) else "failed",
+                error_type=type(error).__name__,
+            )
+        raise
+    with anyio.CancelScope(shield=True):
+        await timing_reporter.finalize(
+            status="completed",
+            error_type=None,
+        )
     return json.dumps(outputs, ensure_ascii=False, sort_keys=True)
 
 
@@ -2571,9 +2730,10 @@ async def run_flow_resume(
     Args:
         run_id: Opaque run ID returned by ``run_flow``.
         request_id: Opaque Human request ID returned by the latest wait.
-        human_response_json: The person's response encoded as any valid JSON
-            value. For multiple output artifacts, use an object keyed exactly
-            by those artifact IDs.
+        human_response_json: The person's response as non-empty plain text or
+            encoded as any valid JSON value. JSON-looking text must be encoded
+            as a JSON string to preserve its string type. For multiple output
+            artifacts, use a JSON object keyed exactly by those artifact IDs.
 
     Returns:
         The final output Artifact mapping, or the next
@@ -2619,6 +2779,30 @@ async def run_flow_resume(
             )
             with anyio.CancelScope(shield=True):
                 await lease.save(failed)
+                if run.checkpoint is not None:
+                    try:
+                        artifact_store = await _artifact_store(
+                            run.flow_path,
+                            run.run_id,
+                            reuse_existing=True,
+                        )
+                        timing_reporter = await StepTimingReporter.open(
+                            artifact_store.run_dir,
+                            run_id=run.run_id,
+                            workflow_id=run.checkpoint.workflow_id,
+                            flow_path=run.flow_path,
+                        )
+                        await timing_reporter.finalize(
+                            status="failed",
+                            error_type=(
+                                type(definition_error).__name__ if definition_error is not None else "ValueError"
+                            ),
+                        )
+                    except Exception as timing_error:
+                        logger.warning(
+                            "Workflow timing sidecar finalization ignored after "
+                            f"{type(timing_error).__name__}: {timing_error}"
+                        )
             raise ValueError(f"workflow definition changed for FusionFlow run {run_id!r}") from definition_error
 
         if run.status == "running":
