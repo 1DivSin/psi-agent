@@ -21,6 +21,7 @@ from psi_agent.gateway._defaults import (
     resolve_default_workspace,
 )
 from psi_agent.gateway._feishu_manager import FeishuManager
+from psi_agent.gateway._free_model import is_cloud_free_model
 from psi_agent.gateway._history_manager import HistoryManager
 from psi_agent.gateway._oauth_manager import OAuthRelay
 from psi_agent.gateway._openapi import render_openapi
@@ -31,6 +32,7 @@ from psi_agent.gateway._spa_shell import DEFAULT_APP_NAME, inject_app_name, read
 from psi_agent.gateway._summary_manager import SummaryManager
 from psi_agent.gateway._title_manager import TitleManager
 from psi_agent.gateway._todo_manager import TodoManager
+from psi_agent.gateway._ui_prefs import UIPrefs
 from psi_agent.gateway._workspace_manager import WorkspaceManager
 
 # Browser fetch often dies during multi-minute tool silence; SSE comments keep it open.
@@ -132,6 +134,32 @@ async def _request_attention(request: web.Request) -> web.Response:
     return _json({"ok": True})
 
 
+async def _get_survey_pref(request: web.Request) -> web.Response:
+    """GET /ui/prefs/survey — has the user already dismissed the survey popup?
+
+    Server-side because the SPA origin's port changes every startup (random port),
+    which silently voids any ``localStorage`` flag. See ``_ui_prefs``.
+    """
+    prefs: UIPrefs = request.app["uiprefs"]
+    return _json({"done": await prefs.survey_done()})
+
+
+async def _set_survey_pref(request: web.Request) -> web.Response:
+    """POST /ui/prefs/survey — record that the survey popup was dismissed.
+
+    Body ``{"done": bool}``; missing/non-bool ``done`` is treated as ``true``
+    since the only caller is the dismiss action.
+    """
+    prefs: UIPrefs = request.app["uiprefs"]
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        body = {}
+    done = body.get("done") if isinstance(body, dict) else None
+    await prefs.set_survey_done(done if isinstance(done, bool) else True)
+    return _json({"done": await prefs.survey_done()})
+
+
 def _json(data: object, status: int = 200) -> web.Response:
     return web.Response(
         text=json.dumps(data, ensure_ascii=False),
@@ -217,6 +245,9 @@ async def create_app(
     app["default_agent"] = default_agent
     app["default_workspace"] = default_workspace
     app["appdata"] = appdata
+    # Built from *appdata* rather than taken as a parameter: prefs are a plain
+    # file, no lifecycle to own and nothing for callers to inject or fake.
+    app["uiprefs"] = await UIPrefs.from_appdata(appdata)
 
     spa_root = _gateway_spa_root()
     spa_dist = spa_root / "spa" / "dist"
@@ -258,6 +289,8 @@ async def create_app(
     app.router.add_post("/summaries", _set_summary)
     app.router.add_post("/summaries/generate", _generate_summary)
     app.router.add_post("/ui/attention", _request_attention)
+    app.router.add_get("/ui/prefs/survey", _get_survey_pref)
+    app.router.add_post("/ui/prefs/survey", _set_survey_pref)
     app.router.add_get("/workspace/cwd", _get_cwd)
     app.router.add_get("/defaults", _get_defaults)
     app.router.add_get("/workspace/places", _list_workspace_places)
@@ -888,8 +921,15 @@ def _auth_reply(status: int, body: dict[str, Any]) -> web.Response:
 
 
 async def _auth_status(request: web.Request) -> web.Response:
-    """当前登录态。SPA 据此决定显示登录引导还是身份信息; 不含 token。"""
-    return _json(_auth(request).status())
+    """当前登录态。SPA 据此决定显示登录引导还是身份信息; 不含 token。
+
+    顺手把连接焐热: SPA 挂载登录面板时必然探这个端点, 是最自然的预热时机 ——
+    因此前端一行都不用改。它本身只读内存、不打云端, 而 ``nudge_warm`` 只是往
+    task group 里塞个任务就返回, 所以加上预热也不会让这个响应变慢。
+    """
+    authm = _auth(request)
+    await authm.nudge_warm()
+    return _json(authm.status())
 
 
 async def _auth_send_code(request: web.Request) -> web.Response:
@@ -904,6 +944,21 @@ async def _auth_send_code(request: web.Request) -> web.Response:
     return _auth_reply(status, data)
 
 
+async def _refresh_free_models(request: web.Request) -> None:
+    """登录态变了, 让免费模型的 socket 重新取一次 token。
+
+    ** 为什么要显式做 **: 交给 ``Ai`` 的 key 在 socket 构造时就定了, 而
+    ``AiInfo.api_key`` 里存的是哨兵 —— 去重键看不见 token 变化, 不会自然重建。
+    不做的话: 换账号登录后仍拿旧 token (已被云端吊销) 去请求, 一路 401;
+    登出后仍能继续用, 更糟。
+
+    只重建、不删除: 模型列表与 Session 绑定都不动, 用户看不到任何抖动。
+    """
+    authm: AuthManager = request.app["authm"]
+    aim: AIManager = request.app["aim"]
+    await aim.refresh_where(lambda info: is_cloud_free_model(info.api_key, info.base_url, authm.endpoint))
+
+
 async def _auth_verify(request: web.Request) -> web.Response:
     """校验验证码。老用户直接登录; 新用户的 tempToken 由 manager 扣住不下发。"""
     body = await _read_json(request)
@@ -914,6 +969,9 @@ async def _auth_verify(request: web.Request) -> web.Response:
         phone=str(body.get("phone", "")),
         email=str(body.get("email", "")),
     )
+    # 老用户在这一步就拿到了正式 token; 新用户要走 /complete, 那边也刷。
+    if status == 200:
+        await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 
@@ -942,6 +1000,8 @@ async def _auth_complete(request: web.Request) -> web.Response:
     if body is None:
         return _error("invalid_request", status=400)
     status, data = await _auth(request).complete(display_name=str(body.get("displayName", "")))
+    if status == 200:
+        await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 
@@ -952,6 +1012,9 @@ async def _auth_me(request: web.Request) -> web.Response:
 
 async def _auth_logout(request: web.Request) -> web.Response:
     status, data = await _auth(request).logout()
+    # 无条件刷: 云端不可达时本机凭证也已清掉 (logout_local), socket 必须跟着走,
+    # 否则登出后免费模型还能继续用。
+    await _refresh_free_models(request)
     return _auth_reply(status, data)
 
 

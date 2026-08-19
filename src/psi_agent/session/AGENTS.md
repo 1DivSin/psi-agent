@@ -260,6 +260,15 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 
 同时累积 `reasoning`（AI 的思考过程）——DeepSeek V4 等 reasoning model 要求 tool call 轮次中 `reasoning` 必须完整回传到 API。
 
+**回传时键名必须是 `reasoning_content`，不是 `reasoning`**（`history_display._rename_reasoning_for_wire`）。
+落盘行用的是内部键名 `reasoning`，而它**不在** `_DISPLAY_ONLY_KEYS` 里，所以会原样出网；
+provider 只认 `reasoning_content`（any-llm 的 `REASONING_FIELD_NAMES` 首项），把
+`reasoning` 原样发上去**等于什么都没发**。拿真实 wire 形态对线上端点实测，键名是唯一变量、
+各三次：`reasoning` → 3/3 HTTP 400，`reasoning_content` → 3/3 成功，键缺失 → 3/3 HTTP 400。
+现网用户没吃到 400（中间层把不认识的键丢了，8/8 成功），代价是**思考过程静默丢失**、上面
+那条「必须完整回传」的约定实际上一直没兑现。改在**投影处**而非落盘处，故已有历史文件无需迁移；
+行上已有显式 `reasoning_content` 时以它为准（那是 provider 形状的值）。
+
 收到 `finish_reason="tool_calls"` 后，按 index 排序生成完整 tool_calls 列表，逐一执行。
 
 **Tool 执行容错**：
@@ -280,6 +289,34 @@ output Artifact、handoff、记录 ID 或目标配置。
 content 时也始终以模型回复为准。Workflow 工具执行错误只产生固定脱敏失败回执，
 不把异常正文、路径或技术 ID 暴露给调用用户。该行为属于 Session 业务编排，未改变
 Channel/SSE 协议。
+
+**单条 tool 结果上限 `MAX_TOOL_RESULT_CHARS = 20000`（`history_display.py`，刻意为之，勿"修掉"）**
+
+线上一个会话被两条 `feishu_api` 结果永久卡死：一次分页把整个飞书群的消息历史拉进单行
+（2,343,193 字符），另一次重拉同群（725,043 字符），两条合计占该请求 3,389,280 字符的
+**90.5%**，上游直接拒收（`maximum context length is 1048576 tokens ... requested 1563214`）。
+
+**压缩救不了这种情况**：压缩信号是流**正常结束后**才发的，而这个请求在**发出时**就被拒，
+拿不到信号；每次重试都重建同样的超长载荷，且历史已落盘，**重启无效**。
+
+上限施加在**两处**，都调用 `truncate_tool_result()`：
+
+1. **落盘前**（`agent.py` tool 结果写入点）——超限时 `logger.warning` 记原长与截后长。
+   治根：56 万字符的单行本身就不该进历史文件
+2. **出网投影时**（`_project_for_ai`，仅 `role="tool"` 且 `content` 为 `str`）——兜住
+   上限存在**之前**就已落盘的巨型行，以及未来可能绕过落盘点的新路径
+
+配套约定：
+
+- 阈值 20000 是拿同一会话实测标定的：正常工具最大结果为 16,035 字符（`search_content`）
+  与 12,752（`read`），2 万既不影响正常使用，又挡住失控结果吃掉整个预算
+- **截断提示写进 `content` 本身**并带上原始长度。模型只读 `content`，静默截断会让它以为拿到
+  了全量结果，于是拿残缺数据作答而不是缩小查询范围；带上原长它才能判断下次要收窄多少
+- **只留头部**不留尾部：工具输出高度前置——JSON 开头就是标识载荷的字段，分页结果本身有序
+- **幂等**（`_TRUNCATION_MARKER`）。上限刻意施加两次，同一行每个后续回合都会被重新投影；
+  无此判断第二遍会切进第一遍的提示里再叠一条，提示逐回合腐化
+- 只截 `role="tool"`。长的 user 消息是用户自己写的字，截它等于替用户改话；非 `str` 的
+  结构化 `content` 没有有意义的前缀，不动
 
 ## Schedule 机制完整流程
 
@@ -404,7 +441,8 @@ Session 支持将对话历史持久化到 AppData `histories/{session_id}.jsonl`
 4. **冷却门槛**：`_compaction_cooldown_elapsed()` 不过则直接返回（见下）
 5. 构造 `complete_fn`（使用现有 `AiClient` 做流式调用并收集全部 content 的闭包）
 6. `summary = await compact_history(conversation.messages, complete_fn)`
-7. 插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）到 conversation
+7. **落盘前校验** `_summary_looks_hijacked()`（见下「摘要落盘校验」）：判为劫持则重试一次，
+   仍失败则不写入；通过后插入独立的 `compacted` 消息（`role="compacted"`, `kind="compacted"`）
 8. `commit()` 落盘——历史消息**保留**，不删除；随后记录水位线
    `_tokens_at_last_compaction`（**仅成功时**记，失败没缩小任何东西，下次信号仍应放行）
 9. 下次发送 AI 请求时，`messages_for_ai()` 负责：找到 system prompt 和最后一个 compacted，删除中间消息，将 compacted 内容合并到 system prompt
@@ -427,6 +465,36 @@ async def compact_history(
 上下文）；若自定义的 `compact_history` 忽略传入的 `compacted` 行，则每压一次就少一层
 历史——这正是「时不时压缩就忘记前面对话」的成因。
 
+### 摘要落盘校验（`_summary_looks_hijacked`，刻意为之，勿"修掉"）
+
+第 7 步落盘前有一道校验。原因是一次现网事故：`compact_history` 把对话原文放进一条**裸
+`user` 消息**，而「请总结」指令孤零零待在 `system` 槽，于是**原文的最后一行成了模型看到的
+最后一条指令**——原文里有 401 处心跳任务「只回 `HEARTBEAT_OK`，不要解释」，模型就照做了。
+一次真实会话 88 条 `compacted` 里，9 条摘要**就是** `HEARTBEAT_OK` 十二个字符，代表 46 万
+字符的对话；且摘要是链式累积的，一旦写进去就被后续每次压缩固化下去。
+
+两侧一起改才闸得住：
+
+- **提示词侧**（各 workspace `system.py`）：原文用 `<transcript>` 围栏包裹、声明为待总结的
+  数据、「请总结」在围栏**之后**复述，与劫持指令争同一个尾部位置；原文里的 `</transcript>`
+  转义掉，防止逃逸。
+- **落盘侧**（本层）：`_summary_looks_hijacked(summary, source_chars)` 判为劫持则重试一次，
+  仍失败则**不写入**——宁可这回合不压缩（下回合会重试），也不能把整段对话换成模型的一句
+  回话。
+
+两条判据都是拿那 88 条实测定出来的，别凭直觉调：
+
+- `MIN_SUMMARY_CHARS = 200` **只在** `source_chars >= MIN_SOURCE_CHARS = 2000` 时生效。
+  绝对下限会误杀短对话——短对话的摘要本来就该短（首版无条件生效，直接让 3 条既有测试变红）。
+- 标记词只做**前缀**匹配（`HIJACK_ECHO_PREFIXES`）。改成子串匹配会误杀好摘要：那 88 条里有
+  20 条含 `[SEND:`，其中最长的 9 条是正常总结「我把文件发给你了」这类对话的合法摘要。
+  判据是「摘要不能**就是**一条指令」，不是「摘要不能**提到**指令」。
+- 只量 `[Recent turns]` 之前那段：其后是逐字保留的近期原文，会把塌缩的摘要稀释掉看不出来。
+  该段为**空是合法的**（没有比逐字窗口更早的内容时，`compact_history` 只返回尾部）。
+
+这不是完备检测：又长、又不以已知套话开头的劫持仍会漏过。它只保证**灾难性形态**——整段对话
+被一句话取代并永久链式固化——不会静默落盘。
+
 ### 压缩冷却（`COMPACTION_COOLDOWN_FRACTION = 0.1`，刻意为之，勿"修掉"）
 
 信号只表示 `prompt_tokens` 超了阈值，而压缩**改不了 system prompt 的体积**。当提示词
@@ -440,6 +508,11 @@ async def compact_history(
 - 信号缺数字时 **fail open**，保持改动前行为
 - 水位线存 `SessionAgent` 实例属性——该对象每 session 进程建一次，跨回合有效；进程重启
   归零（可接受：重启后最多多压一次）
+- **增长为负时直接放行**（刻意为之，勿"改回去"）。水位线记的是压缩**前**的 token 数，
+  所以一次真正生效的压缩必然让下一回合报出更少的 token，`grown` 转负后就**永远**回不到
+  `required` 之上——门会把压缩锁死。线上实测：18 小时内 25 次冷却拦截有 **24 次是负增长**，
+  即这道门正因为「上次压缩起作用了」而拒绝再压。收缩是机制生效的证据，且信号只在
+  `prompt_tokens` 仍超阈值时才发，所以这恰恰是该压缩的时刻。
 
 ### peek_pending / clear_pending 安全机制
 

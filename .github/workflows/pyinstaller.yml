@@ -48,6 +48,7 @@ jobs:
         --collect-submodules hikari
         --collect-submodules matplotlib
         --collect-submodules antlr4
+        --collect-submodules json_repair
         --collect-submodules keyring
     steps:
       - uses: actions/checkout@v7
@@ -55,6 +56,10 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync
+      # 协议 HTML 是 spa-v2/legal/ 下两份 md 的生成物, 入库以免 build 与 installer 两个 job 都要跑生成器。
+      # 这一步防的是「改了 md 忘了重新生成」—— 那会让安装器与产品内展示过时协议。
+      - name: Check legal HTML is in sync with docs
+        run: uv run python scripts/gen_legal_html.py --check
       - run: uv pip install pyinstaller "mcp[cli,rich,ws]" "any-llm-sdk[all]"
       - uses: actions/setup-node@v7
         with:
@@ -114,11 +119,26 @@ jobs:
           HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
           HAITUN_UPDATE_INTERVAL_HOURS: ${{ vars.HAITUN_UPDATE_INTERVAL_HOURS }}
           HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
+          HAITUN_UPDATE_MODE: ${{ vars.HAITUN_UPDATE_MODE }}
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
           & ".github\inno-setup\build-haitun-launcher.ps1"
+      - name: Assemble release layout
+        shell: pwsh
+        run: |
+          $layout = "release-layout"
+          Remove-Item -Recurse -Force $layout -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $layout | Out-Null
+          Copy-Item -Force -Recurse "examples\haitun-workspace\*" $layout
+          Copy-Item -Force ".github\inno-setup\haitun.exe" $layout
+          Copy-Item -Force ".github\inno-setup\haitun.ico" $layout
+      - name: Upload release layout artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: haitun-agent-release-layout
+          path: release-layout
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"

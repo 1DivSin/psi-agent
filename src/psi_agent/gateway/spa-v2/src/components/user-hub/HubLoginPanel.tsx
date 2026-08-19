@@ -48,10 +48,19 @@ type Props = {
   /** 登录成功后提示一句。原型 D4：不插「登录成功」屏，用 toast 交代结果。 */
   onToast?: (message: string) => void
   /**
-   * 显示「暂不登录，继续使用」出口。首屏软门禁自动弹窗时必须给 —— 只给一个 ✕
-   * 会让用户以为登录是硬门禁。用户自己从侧栏点开时不需要（他本来就是想登录）。
+   * 硬门禁：登录是使用本产品的前置条件（C 端默认模型走云端转发，未登录拿不到
+   * 可用的 key）。为真时不给「暂不登录」出口、不给 ✕、点遮罩与 Esc 都不关窗,
+   * 唯一出口是登录成功。用户自己从侧栏点开时为假（那时他已登录或想看账户）。
    */
-  showSkip?: boolean
+  mandatory?: boolean
+  /**
+   * 登录态在本面板内变过（登出成功 / 本设备被移除）。
+   *
+   * 硬门禁是父层按 `/auth/status` 定的, 而**登出发生在本面板内部** —— 不往上说
+   * 一声, 父层的 `authGate` 会一直停在启动那次探到的 `passed`, 于是登出后登录窗
+   * 就有了 ✕、点遮罩也能关掉, 门等于只在冷启动那一下存在。
+   */
+  onLoginStateChanged?: () => void
 }
 
 /**
@@ -75,11 +84,14 @@ const EMPTY_CHANNEL: ChannelState = { account: '', cooldown: 0 }
 // 必须走 BASE_URL: 这个 SPA 挂在 `/spa-v2/` 下, 写死 `/haitun-dolphin.png`
 // 会打到站点根目录, 404 出一个碎图标。
 const DOLPHIN = `${import.meta.env.BASE_URL}haitun-dolphin.png`
-// 协议页同样在 public/ 下, 同样必须走 BASE_URL
-const LEGAL_TERMS = `${import.meta.env.BASE_URL}terms.html`
-const LEGAL_PRIVACY = `${import.meta.env.BASE_URL}privacy.html`
 
-export default function HubLoginPanel({ show, onClose, onToast, showSkip = false }: Props) {
+export default function HubLoginPanel({
+  show,
+  onClose,
+  onToast,
+  mandatory = false,
+  onLoginStateChanged,
+}: Props) {
   const [status, setStatus] = useState<AuthStatus | null>(null)
   const [channel, setChannel] = useState<Channel>('phone')
   // 两条链路各自留一份，切 Tab 不互相清（原型 B1）
@@ -88,8 +100,6 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
   const [code, setCode] = useState('')
   const [stage, setStage] = useState<Stage>('input')
   const [busy, setBusy] = useState(false)
-  const [agreed, setAgreed] = useState(false)
-  const [shakeAgree, setShakeAgree] = useState(false)
   const [error, setError] = useState('') // D1 就地错误文案
   const [fail, setFail] = useState<'' | 'D2' | 'D3'>('') // D2 限频 / D3 断网
   const [dailyCap, setDailyCap] = useState(false)
@@ -133,12 +143,23 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
     if (cooldown === 0 && fail === 'D2') setFail('')
   }, [cooldown, fail])
 
-  /** 返回「现在是否登录态」，调用方据此决定是留在账户面板还是关窗回工作台。 */
-  const refresh = useCallback(async (): Promise<boolean> => {
+  /**
+   * 返回「现在是否登录态」，调用方据此决定是留在账户面板还是关窗回工作台。
+   *
+   * `enterAccount` 为假时只探登录态，**不切到账户面板、也不拉 me 与设备列表**。
+   * 马上要关窗的路径必须传假：默认那条会先 `setStage('done')` 把 C1 渲染出来，
+   * 再等两个请求回来才关窗 —— 用户看到的是一个只有窗框和标题、内容空着的账户面板
+   * 闪一秒多，正是原型 D4 禁止的「插一屏」。少掉的这两个请求下次开窗会补上。
+   */
+  const refresh = useCallback(async (enterAccount = true): Promise<boolean> => {
     try {
       const st = await getAuthStatus()
       setStatus(st)
       if (st.available && st.loggedIn) {
+        // 广播要在最前面: 关窗路径靠它让侧栏账户区就地变成已登录, 而这条路径
+        // 下面的 me/devices 都不取。
+        notifyAuthChanged()
+        if (!enterAccount) return true
         setStage('done')
         const [info, devs] = await Promise.all([
           getAuthMe().catch(() => null),
@@ -146,8 +167,6 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
         ])
         setMe(info)
         setDevices(Array.isArray(devs?.devices) ? devs.devices : [])
-        // 侧栏账户区靠这个广播就地更新, 否则登录完外面还显示「未登录」
-        notifyAuthChanged()
         return true
       }
       setStage('input')
@@ -203,11 +222,6 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
   const onSend = async () => {
     setError('')
     setFail('')
-    if (!agreed) {
-      setShakeAgree(true)
-      window.setTimeout(() => setShakeAgree(false), 460)
-      return
-    }
     const value = account.trim()
     const invalid = validateAccount(channel, value)
     if (invalid) {
@@ -262,7 +276,8 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
           return
         }
         // 老用户登录成功：关窗回工作台，不停在账户面板（原型 D4）
-        if (await refresh()) finishAndClose('已登录')
+        // 传 false：不进账户面板, 否则关窗前会闪一下空的 C1
+        if (await refresh(false)) finishAndClose('已登录')
       } catch (e) {
         const c = errorCodeOf(e)
         const screen = failScreenFor(c)
@@ -318,7 +333,8 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
       const wanted = skipName ? '' : displayName.trim()
       await completeAuth(wanted ? { displayName: wanted } : {})
       // 建号成功同样关窗回工作台，侧栏就地更新（原型 D4）
-      if (await refresh()) finishAndClose('账号已创建')
+      // 同上传 false：D4 的转圈屏直接接关窗, 中间不插一屏空账户面板
+      if (await refresh(false)) finishAndClose('账号已创建')
     } catch (e) {
       if (isTempTokenExpired(errorCodeOf(e))) {
         // tempToken 过期（10 分钟）：退回 A1，说清要重新获取验证码
@@ -348,12 +364,12 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
       setManageDevices(false)
       setBindMode(null)
       setDisplayName('')
-      /* 必须重置：startBind 会把 agreed 置 true（已登录用户绑定无需再勾），
-       * 不重置则退出登录后回到 A1 时勾选框仍是已勾状态 —— 协议门禁静默消失，
-       * 换个人用这台机器也不会再看到协议。 */
-      setAgreed(false)
       backToInput()
       await refresh()
+      /* 必须通知父层重新判门禁: 登出后就该重新被拦在登录窗里。放在 refresh() 之后
+         是为了让本面板先回到输入屏 —— 父层随后把 mandatory 置真, 用户看到的是一个
+         关不掉的输入屏, 而不是先闪一下账户面板。 */
+      onLoginStateChanged?.()
     } catch (e) {
       setError(humanize(e))
     } finally {
@@ -369,7 +385,6 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
     setCode('')
     setError('')
     setFail('')
-    setAgreed(true) // 已登录用户绑定无需再次勾协议
     setStage('input')
   }
 
@@ -410,8 +425,12 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
       <div className="mark">{offline ? null : <img src={DOLPHIN} alt="HaiTun" />}</div>
       <h3>{offline ? '暂时无法连接' : '欢迎使用 HaiTun Agent'}</h3>
       <p>
+        {/* 硬门禁下不能再说「本机功能不受影响」—— 登录成了使用前置条件, 断网时
+            人是真进不去。原先那句是软门禁时代留下的, 会让用户以为可以绕过。 */}
         {offline
-          ? '登录需要联网，本机功能不受影响'
+          ? mandatory
+            ? '登录需要联网，请检查网络后重试'
+            : '登录需要联网，本机功能不受影响'
           : `验证${channel === 'phone' ? '手机号' : '邮箱'}即可登录，未注册将自动创建账号`}
       </p>
     </div>
@@ -428,27 +447,9 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
     </div>
   )
 
-  const agree = (
-    <div className="hub-agree">
-      <button type="button" onClick={() => setAgreed((v) => !v)} aria-label="同意协议">
-        <span className={`box${agreed ? ' on' : ''}${shakeAgree ? ' shake' : ''}`}>
-          {agreed ? '✓' : ''}
-        </span>
-      </button>
-      {/* 新窗口打开: 协议是 public/ 下的静态页, 若原地跳转会把用户从登录流里
-          踢出去, 回来又得重填号码。rel 必带, 防 reverse tabnabbing。 */}
-      <span>
-        我已阅读并同意{' '}
-        <a href={LEGAL_TERMS} target="_blank" rel="noopener noreferrer">
-          《用户服务协议》
-        </a>{' '}
-        与{' '}
-        <a href={LEGAL_PRIVACY} target="_blank" rel="noopener noreferrer">
-          《隐私政策》
-        </a>
-      </span>
-    </div>
-  )
+  /* 登录屏不放协议文字。先是必勾复选框, 后改成一行被动告知, 现按团队决定整句去掉。
+   * `public/terms.html` 与 `public/privacy.html` 仍在包里, 但**界面上已无入口** ——
+   * 要再挂回去的话, 挂在设置或关于页比堵在登录路径上合适。 */
 
   // ---- 屏 A1/B1：输入账号 ----
   const renderInput = () => (
@@ -523,21 +524,8 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
         {busy ? <Loader2 size={15} className="hub-spin" /> : null}
         {cooldown > 0 ? `重新获取（${cooldown}s）` : busy ? '正在发送…' : '获取验证码'}
       </button>
-      {bindMode ? null : agree}
       {error ? <p className="hub-login-err"><span>⊘</span><span>{error}</span></p> : null}
-      {/* 软门禁的出口。绑定子流程里不给 —— 那时用户已登录, 关掉就回账户面板。 */}
-      {showSkip && !bindMode ? (
-        <div className="hub-login-center">
-          <button
-            type="button"
-            className="hub-btn ghost"
-            style={{ border: 0, background: 'none' }}
-            onClick={onClose}
-          >
-            暂不登录，继续使用
-          </button>
-        </div>
-      ) : null}
+      {/* 硬门禁下没有「暂不登录」出口 —— 登录是使用前置条件。 */}
     </>
   )
   // ---- 屏 A2/B2/D1：输入验证码 ----
@@ -730,16 +718,24 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
       {brand(true)}
       <div className="hub-tip bad">
         <span className="ico">⊘</span>
-        <span>无法连接认证服务，请检查网络后重试。</span>
+        <span>
+          {mandatory
+            ? '无法连接认证服务。登录后才能使用，请检查网络后重试。'
+            : '无法连接认证服务，请检查网络后重试。'}
+        </span>
       </div>
       <button type="button" className="hub-btn primary block" onClick={() => void refresh()} disabled={busy}>
         {busy ? <Loader2 size={15} className="hub-spin" /> : null} 重试
       </button>
-      <div className="hub-login-center">
-        <button type="button" className="hub-btn ghost" style={{ border: 0, background: 'none' }} onClick={onClose}>
-          暂不登录，继续使用
-        </button>
-      </div>
+      {/* 硬门禁下断网也不放行: 默认模型的 key 由云端按登录态下发, 放进去只会在
+          第一次对话时报一个与产品无关的上游错误(见 gateway/_free_model.py)。 */}
+      {mandatory ? null : (
+        <div className="hub-login-center">
+          <button type="button" className="hub-btn ghost" style={{ border: 0, background: 'none' }} onClick={onClose}>
+            暂不登录，继续使用
+          </button>
+        </div>
+      )}
     </>
   )
   // ---- 标题随屏切换 ----
@@ -862,7 +858,8 @@ export default function HubLoginPanel({ show, onClose, onToast, showSkip = false
       onClose={onClose}
       actions={actions}
       onBack={onBack}
-      blocking={stage === 'finishing'}
+      /* 硬门禁与 D4 建号收尾都不可中断: 藏起 ✕、遮罩点击失效。 */
+      blocking={stage === 'finishing' || mandatory}
     >
       {body}
     </HubDialog>

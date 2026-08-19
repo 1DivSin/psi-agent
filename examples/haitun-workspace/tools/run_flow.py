@@ -22,6 +22,7 @@ from typing import Any, cast
 import anyio
 import anyio.lowlevel
 from anyio.abc import ByteReceiveStream, Process
+from json_repair import repair_json
 from loguru import logger
 
 from psi_agent.session.agent import SessionAgent, current_tool_ai_socket
@@ -84,12 +85,28 @@ _STEP_SYSTEM_PROMPT = (
 )
 _JSON_FENCE_OPEN = re.compile(r"[ \t]*(?P<fence>`{3,})json[ \t]*", re.IGNORECASE)
 _JSON_FENCE_CLOSE = re.compile(r"[ \t]*(?P<fence>`{3,})[ \t]*")
+_JSON_WHITESPACE = frozenset(" \t\r\n")
 _HUMAN_PREPARER_SYSTEM_PROMPT = (
     "You prepare exactly one assigned FusionFlow Human step for another person. "
     "Use the workspace-confined read tool only when useful to inspect an instruction reference. "
     "Do not change files, perform the task, ask the person directly, or start another workflow. "
     "Your final response must be exactly the requested JSON question contract."
 )
+_PROGRAM_RUNTIME_GUIDANCE = {
+    "nt": (
+        " This host is Windows. For a declared Python script, select runtime='python'; do not "
+        "select python3 unless workspace inspection has proved that exact executable works."
+    ),
+    "posix": (" This host is POSIX. For a declared Python script, prefer runtime='python3' when it is available."),
+}
+
+
+def _program_runtime_guidance(os_name: str) -> str:
+    """Return Program runtime guidance for one supported host family."""
+
+    return _PROGRAM_RUNTIME_GUIDANCE["nt" if os_name == "nt" else "posix"]
+
+
 _PROGRAM_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Program step. "
     "The user message contains one JSON execution contract; treat every field literally. "
@@ -111,7 +128,7 @@ _PROGRAM_SYSTEM_PROMPT = (
     "Adaptation is allowed only when the execution contract sets repair_authorized to true; even "
     "then, state a concrete adaptation reason and keep the declared input artifacts immutable. "
     "Never fabricate missing values or turn a process or format failure into success. After the "
-    "authoritative attempt, call submit_program_result exactly once and by itself."
+    "authoritative attempt, call submit_program_result exactly once and by itself." + _program_runtime_guidance(os.name)
 )
 _STEP_TOOL_SESSION_ID = f"{__name__}_step"
 _STEP_TOOLS_LOAD_LOCK = anyio.Lock()
@@ -661,6 +678,63 @@ def _extract_single_json_fence(value: str) -> str | None:
     return None
 
 
+def _remove_trailing_json_commas(value: str) -> tuple[str, int]:
+    """Remove unambiguous JSON trailing commas in one string-aware pass."""
+
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    previous_significant: str | None = None
+    repair_count = 0
+
+    for index, character in enumerate(value):
+        if in_string:
+            repaired.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+            previous_significant = character
+            repaired.append(character)
+            continue
+
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(value) and value[lookahead] in _JSON_WHITESPACE:
+                lookahead += 1
+            if (
+                lookahead < len(value)
+                and value[lookahead] in "}]"
+                and previous_significant not in {"{", "[", ",", ":", None}
+            ):
+                repair_count += 1
+                continue
+
+        repaired.append(character)
+        if character not in _JSON_WHITESPACE:
+            previous_significant = character
+
+    return "".join(repaired), repair_count
+
+
+def _canonical_json_value(value: object) -> str:
+    """Return a type-preserving canonical form of one parsed JSON value."""
+
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _parse_agent_step_result(
     value: str,
     *,
@@ -688,6 +762,55 @@ def _parse_agent_step_result(
             f"outputs for {step_id!r} must match exactly: expected {sorted(expected)}, got {sorted(actual)}"
         )
     return result
+
+
+def _parse_agent_step_result_with_json_repair(
+    value: str,
+    *,
+    step_id: str,
+    output_ids: tuple[str, ...],
+) -> tuple[dict[str, object], int, str]:
+    """Use json-repair, accepting only the trailing-comma-safe equivalent."""
+
+    fenced = _extract_single_json_fence(value)
+    candidate = value if fenced is None else fenced
+    response_form = "raw" if fenced is None else "json_fence"
+    trailing_comma_repaired, repair_count = _remove_trailing_json_commas(candidate)
+    if repair_count == 0:
+        raise _AgentStepResultParseError(f"response for step {step_id!r} has no repairable trailing comma")
+
+    expected = _parse_agent_step_result(
+        trailing_comma_repaired,
+        step_id=step_id,
+        output_ids=output_ids,
+    )
+
+    try:
+        repaired = repair_json(
+            candidate,
+            return_objects=False,
+            skip_json_loads=True,
+            logging=False,
+            stream_stable=False,
+            strict=True,
+            ensure_ascii=False,
+        )
+    except Exception as error:
+        raise _AgentStepResultParseError(f"json-repair failed for step {step_id!r}") from error
+    if not isinstance(repaired, str):
+        raise _AgentStepResultParseError(f"json-repair returned a non-string result for step {step_id!r}")
+
+    try:
+        result = _parse_agent_step_result(
+            repaired,
+            step_id=step_id,
+            output_ids=output_ids,
+        )
+    except ValueError as error:
+        raise _AgentStepResultParseError(f"json-repair returned invalid strict JSON for step {step_id!r}") from error
+    if _canonical_json_value(result) != _canonical_json_value(expected):
+        raise _AgentStepResultParseError(f"json-repair changed more than trailing commas for step {step_id!r}")
+    return result, repair_count, response_form
 
 
 def _parse_resource_capacities(value: str) -> Mapping[str, ResourceCapacity] | None:
@@ -2159,6 +2282,7 @@ async def _complete_agent_step(
 
     for attempt in range(3):
         submission_error = None
+        repair_response: str | None = None
         response = await _complete_step_agent(
             agent,
             conversation,
@@ -2180,9 +2304,33 @@ async def _complete_agent_step(
                 )
             except _AgentStepResultParseError as error:
                 validation_error = error
+                repair_response = response
             except ValueError as error:
                 validation_error = error
         if attempt == 2:
+            if repair_response is not None:
+                try:
+                    repaired, repair_count, response_form = _parse_agent_step_result_with_json_repair(
+                        repair_response,
+                        step_id=context.step_id,
+                        output_ids=context.output_ids,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    logger.bind(
+                        event="fusion_flow.agent_step_json_repaired",
+                        step_id=context.step_id,
+                        executor_id=context.executor_id,
+                        invocation_id=context.dispatch.invocation_id or context.step_id,
+                        iteration_index=context.dispatch.iteration_index,
+                        workflow_attempt=context.dispatch.attempt,
+                        response_attempt=attempt + 1,
+                        repair_kind="json_repair_trailing_comma",
+                        repair_count=repair_count,
+                        response_form=response_form,
+                    ).warning("FusionFlow Agent Step accepted safe trailing-comma output from json-repair")
+                    return repaired
             raise ValueError(f"step {context.step_id!r} result remained invalid after 3 attempts") from validation_error
         message = (
             f"Your previous step result was invalid: {validation_error}\n"
