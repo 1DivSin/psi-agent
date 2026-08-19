@@ -33,20 +33,33 @@ if ([string]::IsNullOrWhiteSpace($installerName)) {
     $installerName = 'HaiTun_Agent_Setup.exe'
 }
 
+$updateMode = [Environment]::GetEnvironmentVariable('HAITUN_UPDATE_MODE')
+if ([string]::IsNullOrWhiteSpace($updateMode)) {
+    $updateMode = ''
+}
+
 if (-not (Test-Path $WorkspaceDir)) {
     New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
 }
 
 $confPath = Join-Path $WorkspaceDir 'haitun-update.conf'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllLines($confPath, @(
+$confLines = @(
     "HAITUN_VERSION=$version",
     "HAITUN_UPDATE_BASE_URL=$baseUrl",
     "HAITUN_UPDATE_INTERVAL_HOURS=$intervalHours",
     "HAITUN_UPDATE_INSTALLER_NAME=$installerName"
-), $utf8NoBom)
+)
+if (-not [string]::IsNullOrWhiteSpace($updateMode)) {
+    $confLines += "HAITUN_UPDATE_MODE=$updateMode"
+}
+[System.IO.File]::WriteAllLines($confPath, $confLines, $utf8NoBom)
 
-Write-Host "Wrote $confPath (version=$version)"
+if ([string]::IsNullOrWhiteSpace($updateMode)) {
+    Write-Host "Wrote $confPath (version=$version, mode=legacy)"
+} else {
+    Write-Host "Wrote $confPath (version=$version, mode=$updateMode)"
+}
 
 Push-Location $InnoSetupDir
 try {
@@ -55,6 +68,10 @@ try {
         throw "rc failed with exit code $LASTEXITCODE"
     }
     cl /nologo /O2 /utf-8 'haitun.c' 'haitun.res' /Fe:'haitun.exe' /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib wininet.lib urlmon.lib ole32.lib gdi32.lib
+    if ($LASTEXITCODE -ne 0) {
+        throw "cl failed with exit code $LASTEXITCODE"
+    }
+    cl /nologo /O2 /utf-8 'haitun-updater.c' /Fe:'haitun-updater.exe' /link /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup kernel32.lib user32.lib
     if ($LASTEXITCODE -ne 0) {
         throw "cl failed with exit code $LASTEXITCODE"
     }
