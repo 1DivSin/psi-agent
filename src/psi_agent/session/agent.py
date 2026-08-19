@@ -59,7 +59,7 @@ _CURRENT_TOOL_AI_SOCKET: ContextVar[str | None] = ContextVar(
     default=None,
 )
 
-_WORKFLOW_TOOLS = frozenset({"run_flow", "run_flow_resume"})
+_WORKFLOW_TOOLS = frozenset({"run_flow", "run_flow_retry", "run_flow_resume"})
 _WORKFLOW_HUMAN_CONTROL_KEY = "$fusion_flow/control"
 _WORKFLOW_SUMMARY_KEY = "user_facing_summary"
 _WORKFLOW_SUMMARY_MAX_CHARS = 16_000

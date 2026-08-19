@@ -13,15 +13,22 @@ from fusion_flow._atomic_io import atomic_write_text
 from fusion_flow.artifact_store import ArtifactStore
 from fusion_flow.execution import runtime as execution_runtime
 from fusion_flow.job_store import JobStore
-from fusion_flow.step_timing import StepTimingMetadata, StepTimingReporter, StepTimingStore
+from fusion_flow.step_timing import (
+    StepTiming,
+    StepTimingMetadata,
+    StepTimingReporter,
+    StepTimingStore,
+)
 from fusion_flow.workflow_execution import (
     DispatchContext,
     ExecutionCheckpoint,
+    ExecutionPlanError,
     execute_plan,
     generate_plan,
 )
 from fusion_flow.workflow_graph import (
     ArtifactNode,
+    ConsumesEdge,
     ForeachEdge,
     ProducesEdge,
     StepNode,
@@ -82,6 +89,137 @@ def _timing_metadata() -> dict[str, StepTimingMetadata]:
             executor_kind="Agent",
         )
     }
+
+
+def _side_effect_resume_graph() -> WorkflowGraph:
+    return WorkflowGraph(
+        workflow_id="side_effect_resume",
+        steps=(
+            StepNode("step_a", "Step A", "agent"),
+            StepNode("step_b", "Step B", "program", depends_on=("step_a",)),
+            StepNode("step_c", "Step C", "agent", depends_on=("step_b",)),
+            StepNode("step_d", "Step D", "program", depends_on=("step_c",)),
+        ),
+        artifacts=(
+            ArtifactNode("request", is_input=True),
+            ArtifactNode("a"),
+            ArtifactNode("b"),
+            ArtifactNode("c"),
+            ArtifactNode("result", is_output=True),
+        ),
+        edges=(
+            ConsumesEdge("request", "step_a"),
+            ProducesEdge("step_a", "a"),
+            ConsumesEdge("a", "step_b"),
+            ProducesEdge("step_b", "b"),
+            ConsumesEdge("b", "step_c"),
+            ProducesEdge("step_c", "c"),
+            ConsumesEdge("c", "step_d"),
+            ProducesEdge("step_d", "result"),
+        ),
+    )
+
+
+@pytest.mark.anyio
+async def test_resume_skips_completed_side_effect_step_and_continues_downstream() -> None:
+    graph = _side_effect_resume_graph()
+    plan = generate_plan(graph)
+    checkpoints: list[ExecutionCheckpoint] = []
+    calls: list[str] = []
+    step_c_attempts: list[int] = []
+    side_effect_count = 0
+    fail_step_c = True
+
+    async def observe(checkpoint: ExecutionCheckpoint) -> None:
+        checkpoints.append(checkpoint)
+
+    async def dispatch(
+        step: StepNode,
+        inputs: Mapping[str, object],
+        context: DispatchContext,
+    ) -> Mapping[str, object]:
+        nonlocal fail_step_c, side_effect_count
+        calls.append(step.step_id)
+        if step.step_id == "step_a":
+            return {"a": f"a:{inputs['request']}"}
+        if step.step_id == "step_b":
+            side_effect_count += 1
+            return {"b": f"b:{inputs['a']}"}
+        if step.step_id == "step_c":
+            step_c_attempts.append(context.attempt)
+            if fail_step_c:
+                fail_step_c = False
+                raise RuntimeError("synthetic failure after the side effect")
+            return {"c": f"c:{inputs['b']}"}
+        assert step.step_id == "step_d"
+        return {"result": f"done:{inputs['c']}"}
+
+    with pytest.raises(BaseExceptionGroup):
+        await execute_plan(
+            plan,
+            graph,
+            inputs={"request": "input"},
+            dispatch=dispatch,
+            checkpoint_observer=observe,
+        )
+
+    checkpoint = checkpoints[-1]
+    assert checkpoint.completed_step_ids == ("step_a", "step_b")
+    assert calls == ["step_a", "step_b", "step_c"]
+    assert side_effect_count == 1
+
+    with pytest.raises(ExecutionPlanError, match="checkpoint input does not match current input"):
+        await execute_plan(
+            plan,
+            graph,
+            inputs={"request": "changed"},
+            dispatch=dispatch,
+            checkpoint=checkpoint,
+        )
+
+    missing_artifact = ExecutionCheckpoint(
+        workflow_id=checkpoint.workflow_id,
+        plan_digest=checkpoint.plan_digest,
+        values={"request": "input", "a": checkpoint.values["a"]},
+        completed_step_ids=checkpoint.completed_step_ids,
+    )
+    with pytest.raises(ExecutionPlanError, match="checkpoint values must match materialized artifacts exactly"):
+        await execute_plan(
+            plan,
+            graph,
+            inputs={"request": "input"},
+            dispatch=dispatch,
+            checkpoint=missing_artifact,
+        )
+
+    wrong_plan = ExecutionCheckpoint(
+        workflow_id=checkpoint.workflow_id,
+        plan_digest="0" * 64,
+        values=checkpoint.values,
+        completed_step_ids=checkpoint.completed_step_ids,
+    )
+    with pytest.raises(ExecutionPlanError, match="checkpoint plan digest does not match"):
+        await execute_plan(
+            plan,
+            graph,
+            inputs={"request": "input"},
+            dispatch=dispatch,
+            checkpoint=wrong_plan,
+        )
+
+    outputs = await execute_plan(
+        plan,
+        graph,
+        inputs={"request": "input"},
+        dispatch=dispatch,
+        checkpoint=checkpoint,
+        checkpoint_observer=observe,
+    )
+
+    assert calls == ["step_a", "step_b", "step_c", "step_c", "step_d"]
+    assert step_c_attempts == [1, 1]
+    assert side_effect_count == 1
+    assert outputs == {"result": "done:c:b:a:input"}
 
 
 @pytest.mark.anyio
@@ -264,6 +402,75 @@ async def test_resume_merges_running_timing_sidecar_and_reuses_successes(tmp_pat
     [step] = payload["steps"]
     assert payload["status"] == "completed"
     assert [item["iteration_index"] for item in step["iterations"]] == [0, 1, 2]
+
+
+@pytest.mark.anyio
+async def test_explicit_retry_reopens_terminal_timing_sidecar(tmp_path: Path) -> None:
+    graph = _foreach_graph()
+    run_id = "3" * 32
+    first_reporter = await StepTimingReporter.open(
+        anyio.Path(tmp_path),
+        run_id=run_id,
+        workflow_id=graph.workflow_id,
+        flow_path="synthetic/offline.workflow",
+    )
+    first_reporter.record(
+        StepTiming(
+            step_id="review",
+            step_name="Review synthetic item",
+            executor_id="offline_worker",
+            executor_kind="Agent",
+            foreach=True,
+            started_at="2026-08-19T00:00:00Z",
+            finished_at="2026-08-19T00:00:01Z",
+            duration_ms=1000,
+            status="error",
+            error_type="RuntimeError",
+            iterations=(),
+        )
+    )
+    await first_reporter.finalize(status="failed", error_type="RuntimeError")
+
+    with pytest.raises(ValueError, match="resumable step timing report must have running status"):
+        await StepTimingStore.open(
+            anyio.Path(tmp_path),
+            run_id=run_id,
+            workflow_id=graph.workflow_id,
+            flow_path="synthetic/offline.workflow",
+        )
+
+    resumed_reporter = await StepTimingReporter.open(
+        anyio.Path(tmp_path),
+        run_id=run_id,
+        workflow_id=graph.workflow_id,
+        flow_path="synthetic/offline.workflow",
+        resume_terminal=True,
+    )
+    reopened = json.loads((tmp_path / "step-timings.json").read_text(encoding="utf-8"))
+    assert reopened["status"] == "running"
+    assert reopened["error_type"] is None
+    assert [step["step_id"] for step in reopened["steps"]] == ["review"]
+
+    resumed_reporter.record(
+        StepTiming(
+            step_id="review",
+            step_name="Review synthetic item",
+            executor_id="offline_worker",
+            executor_kind="Agent",
+            foreach=True,
+            started_at="2026-08-19T00:00:02Z",
+            finished_at="2026-08-19T00:00:03Z",
+            duration_ms=1000,
+            status="ok",
+            iterations=(),
+        )
+    )
+    await resumed_reporter.finalize(status="completed", error_type=None)
+
+    completed = json.loads((tmp_path / "step-timings.json").read_text(encoding="utf-8"))
+    assert completed["status"] == "completed"
+    assert completed["steps"][0]["status"] == "ok"
+    assert completed["steps"][0]["duration_ms"] == 2000
 
 
 @pytest.mark.anyio

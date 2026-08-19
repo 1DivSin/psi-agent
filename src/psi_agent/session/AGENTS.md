@@ -269,7 +269,7 @@ AI 的 tool_calls 通过 SSE 流式传输——多个 chunk 中的 `delta.tool_c
 
 ### Workflow 空回复安全回执
 
-`run_flow` / `run_flow_resume` 的最终结果可以显式携带
+`run_flow` / `run_flow_retry` / `run_flow_resume` 的最终结果可以显式携带
 `user_facing_summary.text`。当且仅当普通 `kind=chat` 回合的最终模型响应以
 `finish_reason="stop"` 结束且 content 为空时，Session 才把该字段作为回复
 fallback，并按普通 assistant content 写入 history。Session 不解析或展示其他

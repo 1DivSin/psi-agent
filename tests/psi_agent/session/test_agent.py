@@ -833,29 +833,41 @@ async def test_agent_empty_content_stop(tmp_path: Path) -> None:
 async def _run_workflow_tool_then_empty_stop(
     tmp_path: Path,
     *,
+    tool_name: str = "run_flow",
     tool_result: str = "",
     tool_error: Exception | None = None,
     response_kind: str | None = None,
 ) -> tuple[list[AgentChunk], SessionAgent]:
-    handler = await _make_inline_ai_handler([_tc("run_flow", '{"flow_path":"flows/example.workflow"}'), _stop("")])
+    if tool_name == "run_flow_retry":
+        tool_arguments = '{"run_id":"recoverable-run"}'
+        tool_parameters = {
+            "type": "object",
+            "properties": {"run_id": {"type": "string"}},
+            "required": ["run_id"],
+            "additionalProperties": False,
+        }
+    else:
+        tool_arguments = '{"flow_path":"flows/example.workflow"}'
+        tool_parameters = {
+            "type": "object",
+            "properties": {"flow_path": {"type": "string"}},
+            "required": ["flow_path"],
+            "additionalProperties": False,
+        }
+    handler = await _make_inline_ai_handler([_tc(tool_name, tool_arguments), _stop("")])
     server = MockAIServer(tmp_path)
     ai_socket = await server.start(handler)
 
-    async def workflow_tool(flow_path: str) -> str:
-        del flow_path
+    async def workflow_tool(**kwargs: str) -> str:
+        del kwargs
         if tool_error is not None:
             raise tool_error
         return tool_result
 
     tool = ToolFunction(
-        name="run_flow",
+        name=tool_name,
         description="Run a workflow.",
-        parameters={
-            "type": "object",
-            "properties": {"flow_path": {"type": "string"}},
-            "required": ["flow_path"],
-            "additionalProperties": False,
-        },
+        parameters=tool_parameters,
     )
     agent = SessionAgent(
         ai_client=AiClient(ai_socket),
@@ -864,8 +876,8 @@ async def _run_workflow_tool_then_empty_stop(
             files={
                 "__test__": FileEntry(
                     file_hash="",
-                    tools={"run_flow": tool},
-                    funcs={"run_flow": workflow_tool},
+                    tools={tool_name: tool},
+                    funcs={tool_name: workflow_tool},
                 )
             }
         ),
@@ -906,6 +918,25 @@ async def test_agent_returns_safe_workflow_summary_when_model_stops_empty(tmp_pa
     assistants = [message for message in agent._conversation.messages if message.get("role") == "assistant"]
     assert assistants[-1]["content"] == summary
     assert assistants[-1]["kind"] == "chat"
+
+
+@pytest.mark.anyio
+async def test_agent_returns_safe_workflow_summary_after_retry(tmp_path: Path) -> None:
+    summary = "Workflow 已从断点恢复并完成。"
+    tool_result = json.dumps(
+        {"user_facing_summary": {"schema_version": "1.0", "text": summary}},
+        ensure_ascii=False,
+    )
+
+    chunks, agent = await _run_workflow_tool_then_empty_stop(
+        tmp_path,
+        tool_name="run_flow_retry",
+        tool_result=tool_result,
+    )
+
+    assert "".join(chunk.content or "" for chunk in chunks) == summary
+    assistants = [message for message in agent._conversation.messages if message.get("role") == "assistant"]
+    assert assistants[-1]["content"] == summary
 
 
 @pytest.mark.anyio
