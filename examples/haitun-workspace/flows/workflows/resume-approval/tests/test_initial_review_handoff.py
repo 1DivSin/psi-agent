@@ -95,6 +95,7 @@ def _inputs() -> dict:
                     "candidate_id": CANDIDATE_ID,
                     "assessment_revision": ASSESSMENT_REVISION,
                     "row_fingerprint": _row_fingerprint(),
+                    "attachment_persisted": True,
                     "created": True,
                 }
             ],
@@ -216,6 +217,14 @@ def test_conflicting_publication_is_not_overwritten(tmp_path: Path) -> None:
         (
             lambda data: data["talent_pool_manifest"]["records"][0]["row_fingerprint"].pop("面试建议理由"),
             "row_fingerprint",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0].update(attachment_persisted=False),
+            "attachment_persisted",
+        ),
+        (
+            lambda data: data["talent_pool_manifest"]["records"][0].update(file_token="must-not-persist"),
+            "attachment-safe",
         ),
         (lambda data: data["validated_candidate_assessments"].update(assessments=[]), "non-empty"),
     ],
