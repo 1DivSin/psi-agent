@@ -32,6 +32,14 @@ _AI_FINGERPRINT_FIELDS = {
     "面试建议",
     "面试建议理由",
 }
+_MANIFEST_RECORD_FIELDS = {
+    "record_id",
+    "candidate_id",
+    "assessment_revision",
+    "row_fingerprint",
+    "attachment_persisted",
+    "created",
+}
 
 
 def _load_inputs() -> dict[str, Any]:
@@ -156,6 +164,12 @@ def _validate_manifest(
         path = f"talent_pool_manifest.records[{index}]"
         if not isinstance(record, dict):
             raise TypeError(f"{path} must be an object")
+        if set(record) != _MANIFEST_RECORD_FIELDS:
+            raise ValueError(f"{path} must contain only the private attachment-safe manifest fields")
+        if record.get("attachment_persisted") is not True:
+            raise ValueError(f"{path}.attachment_persisted must be true")
+        if not isinstance(record.get("created"), bool):
+            raise TypeError(f"{path}.created must be boolean")
         candidate_id = record.get("candidate_id")
         record_id = record.get("record_id")
         if not isinstance(candidate_id, str) or _CANDIDATE_ID.fullmatch(candidate_id) is None:
@@ -214,15 +228,14 @@ def _destination(value: Any) -> dict[str, str]:
     return {field: _required_text(value.get(field), f"feishu_config.{field}") for field in _DESTINATION_FIELDS}
 
 
-def _review_request(batch_id: str, count: int, base_url: str, view_name: str) -> str:
+def _review_request(batch_id: str, count: int, view_name: str) -> str:
     return (
         "初审任务已就绪\uff0c正在等你操作\uff1a\n\n"
         f"**批次**\uff1a`{batch_id}`\n"
-        f"**请打开**\uff1a{base_url} → 数据表「候选人才库」→ 视图「{view_name}」\n"
         f"**本次建档**\uff1a{count} 名候选人\n"
-        "**你的操作**\uff1a逐行查看简历摘要、总分、评级、匹配岗位、匹配点、不匹配点、"
-        "面试建议和面试建议理由\uff0c然后只修改「初审状态」为「通过」或「不通过」。"
-        "全部完成后\uff0c请回到聊天并只回复\uff1a初审完成\n"
+        f"**你的操作**\uff1a直接在聊天中按候选人姓名查看「{view_name}」中的信息或要求重读已存简历\uff0c"
+        "然后明确要求我只修改「初审状态」为「通过」或「不通过」。"
+        "全部完成后\uff0c请只回复\uff1a初审完成\n"
         "收到后将直接启动下一阶段 workflow:resume-interview-preparation。"
         "只要仍存在「待审批」\uff0c下一阶段会拒绝执行。"
     )
@@ -297,7 +310,7 @@ def run(inputs: dict[str, Any], workspace_root: str | None = None) -> dict[str, 
             "expected_count": count,
             "errors": [],
         },
-        "initial_review_request": _review_request(batch_id, count, base_url, view_name),
+        "initial_review_request": _review_request(batch_id, count, view_name),
     }
 
 

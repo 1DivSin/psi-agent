@@ -13,7 +13,8 @@ import tempfile
 from typing import Any
 
 _SUPPORTED_SUFFIXES = frozenset({".docx", ".md", ".pdf", ".txt"})
-_MAX_SOURCE_BYTES = 50 * 1024 * 1024
+# feishu_drive_upload uses the single-request endpoint and rejects larger files.
+_MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _SAFE_COMPONENT = re.compile(r"[^A-Za-z0-9._-]+")
 _WINDOWS_DOWNLOADS_FOLDER_ID = "{374DE290-123F-4565-9164-39C4925E467B}"
 
@@ -189,6 +190,7 @@ def run(
                 "original_name": os.path.basename(requested_name.strip()),
                 "sha256": digest,
                 "format": suffix,
+                "size_bytes": os.path.getsize(source),
                 "temporary": True,
             }
         )
