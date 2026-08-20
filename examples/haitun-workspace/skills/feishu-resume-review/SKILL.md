@@ -1,6 +1,6 @@
 ---
 name: feishu-resume-review
-description: "Review one resume: extract facts, score against a default rubric, write a short overall evaluation, and suggest interview questions. Optional Feishu bitable write when the user provides a table. Use for 简历评估/审简历/面试建议/入库. User-supplied scoring or interview rules MUST patch this skill (agent_editable) — do not create a parallel resume skill."
+description: "Review or continue handling a candidate in chat: extract resume facts, score against a default rubric, suggest targeted interview questions, and view or correct an existing recruitment record. Use for 简历评估/审简历/面试建议/入库/候选人查询或更正. User-supplied scoring or interview rules MUST patch this skill (agent_editable) — do not create a parallel resume skill."
 category: productivity
 agent_editable: true
 ---
@@ -17,6 +17,7 @@ agent_editable: true
 
 - 用户交来简历（聊天附件 / 本地路径 / 飞书 doc / PDF），要评估、打分、出面试题。
 - 说法类似：评估这份简历、审一下候选人、给面试建议、简历入库到某张多维表。
+- 用户要在聊天中查看、继续整理或更正已有候选人信息，包括长对话后重新查找候选人或简历。
 
 ## When not to use
 
@@ -107,6 +108,14 @@ agent_editable: true
 1. …（考察点：…）
 …
 ```
+
+## 已有候选人的对话管理
+
+- 读取 `flows/workflows/resume-approval/resume-approval.defaults.json` 的固定招聘目标；已有配置时，不向用户索要 app token 或 table ID。
+- 用 `feishu_bitable_search_records` 在配置的人才库中按完整 `姓名` 精确查询，并在聊天中返回相关行信息；无结果请用户核对姓名，多行同名则请用户提供飞书行链接消歧。
+- 用户明确要求修改时，用固定目标的 `feishu_bitable_update_record` 只写本次指定的人工字段；不得推断评分、状态、结论或录用决定。
+- 需要恢复原始简历细节时，取唯一记录的原生 `简历附件` token，调用 `feishu_file_download(source_type="media", ...)` 下载，再沿用上面的读简历流程。
+- 查看、整理或更新候选人信息均可在聊天内完成，不要求用户仅为这些操作打开飞书文档或多维表。
 
 ## Boundaries
 
