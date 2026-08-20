@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import aclosing
 from contextvars import ContextVar
@@ -367,12 +368,23 @@ class SessionAgent:
         ``run()`` ignore it and just get the chunk stream as before.
         """
 
+        turn_started = time.perf_counter()
+
         def _finish(
             status: AgentRunStatus,
             stop_cause: AgentStopCause,
             model_finish_reason: str | None,
             model_turns: int,
         ) -> None:
+            logger.bind(
+                event="agent_turn_complete",
+                session_id=self._conversation.session_id,
+                total_ms=round((time.perf_counter() - turn_started) * 1000, 3),
+                status=status.value,
+                stop_cause=stop_cause.value,
+                model_finish_reason=model_finish_reason,
+                model_turns=model_turns,
+            ).info("Agent turn completed")
             if _result_sink is not None:
                 _result_sink._set_result(
                     AgentRunResult(
@@ -403,14 +415,31 @@ class SessionAgent:
         ):
             async with self._conversation:
                 # Reload tools and schedules from their configured roots.
+                phase_started = time.perf_counter()
                 await self._tool_registry.refresh()
+                tool_refresh_ms = (time.perf_counter() - phase_started) * 1000
+                phase_started = time.perf_counter()
                 await self._schedule_registry.refresh()
+                schedule_refresh_ms = (time.perf_counter() - phase_started) * 1000
 
+                phase_started = time.perf_counter()
                 if not turn_response_kind.startswith("schedule."):
                     hook_message |= await self._system_prompt.run_before_turn(hook_message)
+                before_turn_ms = (time.perf_counter() - phase_started) * 1000
 
                 # system prompt (lazy + optional rebuild)
+                phase_started = time.perf_counter()
                 await self._system_prompt.ensure(self._conversation, hook_message)
+                prompt_ms = (time.perf_counter() - phase_started) * 1000
+                logger.bind(
+                    event="agent_turn_prepare",
+                    session_id=self._conversation.session_id,
+                    tool_refresh_ms=round(tool_refresh_ms, 3),
+                    schedule_refresh_ms=round(schedule_refresh_ms, 3),
+                    before_turn_ms=round(before_turn_ms, 3),
+                    prompt_ms=round(prompt_ms, 3),
+                    tool_count=len(self._tool_registry.tools),
+                ).info("Agent turn preparation completed")
 
                 # peek pending schedule chunks — yield first, clear only after yield
                 # (only schedule.display results are stashed; silent never enters pending)
@@ -425,7 +454,14 @@ class SessionAgent:
                 # turn's user message instead of the prompt, so the per-turn
                 # change lands at the request tail and leaves the prefix —
                 # prompt plus every earlier turn — byte-identical.
+                phase_started = time.perf_counter()
                 turn_context = await self._system_prompt.turn_context()
+                logger.bind(
+                    event="agent_turn_context",
+                    session_id=self._conversation.session_id,
+                    elapsed_ms=round((time.perf_counter() - phase_started) * 1000, 3),
+                    context_chars=len(turn_context),
+                ).info("Agent turn context completed")
                 if turn_context:
                     stored_user_message = stored_user_message | {TURN_CONTEXT_KEY: turn_context}
 
@@ -566,32 +602,51 @@ class SessionAgent:
                                 # execute all tools concurrently
                                 results: list[str] = [""] * len(ordered_calls)
 
-                                async def _execute_one(idx: int, fn: str, a: dict[str, Any], r: list[str]) -> None:
-                                    func = self._tool_registry.get(fn)
-                                    if func is None:
-                                        r[idx] = f"Error: Tool '{fn}' not found"
-                                        logger.error(f"Tool not found: {fn!r}")
-                                    else:
-                                        try:
+                                async def _execute_one(
+                                    idx: int,
+                                    fn: str,
+                                    a: dict[str, Any],
+                                    argument_error: str | None,
+                                    r: list[str],
+                                ) -> None:
+                                    tool_started = time.perf_counter()
+                                    tool_status = "interrupted"
+                                    try:
+                                        if not fn:
+                                            tool_status = "empty_name"
+                                            r[idx] = "Error: empty tool call name"
+                                        elif argument_error is not None:
+                                            tool_status = "invalid_arguments"
+                                            r[idx] = argument_error
+                                        elif (func := self._tool_registry.get(fn)) is None:
+                                            tool_status = "not_found"
+                                            r[idx] = f"Error: Tool '{fn}' not found"
+                                            logger.error(f"Tool not found: {fn!r}")
+                                        else:
                                             token = _CURRENT_TOOL_AI_SOCKET.set(self._ai_client.ai_socket)
                                             try:
                                                 raw = await func(**a)
                                             finally:
                                                 _CURRENT_TOOL_AI_SOCKET.reset(token)
                                             r[idx] = str(raw)
+                                            tool_status = "ok"
                                             logger.info(f"Tool result ({fn!r}): {str(raw)[:1000]!r}")
-                                        except Exception as e:
-                                            r[idx] = f"Error executing tool '{fn}': {e}"
-                                            logger.error(f"Tool execution error ({fn!r}): {e!r}")
+                                    except Exception as e:
+                                        tool_status = "error"
+                                        r[idx] = f"Error executing tool '{fn}': {e}"
+                                        logger.error(f"Tool execution error ({fn!r}): {e!r}")
+                                    finally:
+                                        logger.bind(
+                                            event="agent_tool_complete",
+                                            session_id=self._conversation.session_id,
+                                            tool_name=fn,
+                                            elapsed_ms=round((time.perf_counter() - tool_started) * 1000, 3),
+                                            status=tool_status,
+                                        ).info("Agent tool execution completed")
 
                                 async with anyio.create_task_group() as tg:
                                     for i, _tc, func_name, args, argument_error in tool_args:
-                                        if not func_name:
-                                            results[i] = "Error: empty tool call name"
-                                        elif argument_error is not None:
-                                            results[i] = argument_error
-                                        else:
-                                            tg.start_soon(_execute_one, i, func_name, args, results)
+                                        tg.start_soon(_execute_one, i, func_name, args, argument_error, results)
 
                                 # yield results in order, save
                                 for i, tc, func_name, _args, _argument_error in tool_args:
