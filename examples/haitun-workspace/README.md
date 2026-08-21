@@ -147,7 +147,9 @@ uv run python examples/haitun-workspace/systems/system.py
    - `--default-agent {app}`（安装目录即能力包：tools / skills / system）
    - `--default-workspace {Desktop}/haitun交付`（用户文件区；运行时解析桌面路径）
 
-产物为 GitHub artifact `haitun-agent-installer-pyinstaller`（`HaiTun Agent Setup.exe`）。
+产物为 GitHub artifact `haitun-agent-installers`：完整包
+`HaiTun_Agent_Setup.exe`、海豚组件包 `HaiTun_Agent_App_Setup.exe`、环境组件包
+`msys-setup.exe`，以及 `haitun-version.txt` / `msys-version.txt`。
 
 > `haitun.exe` 启动前会读取本目录下的 `.env`（若存在），把其中的 `KEY=VALUE` 注入 `psi-agent.exe` 的运行环境（跳过空行 / `#` 注释，剥离值两端成对引号）。
 

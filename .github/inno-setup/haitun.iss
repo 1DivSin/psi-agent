@@ -1,10 +1,18 @@
-﻿; Inno Setup script for HaiTun Agent.
-; Packages the entire haitun-workspace (including psi-agent.exe, copied in at build time).
+; Inno Setup script for HaiTun Agent component installers.
+;
+; One script builds three packages:
+;   - COMPONENT_APP    -> HaiTun_Agent_App_Setup.exe (app only)
+;   - COMPONENT_MSYS   -> msys-setup.exe (environment only)
+;   - (default)        -> HaiTun_Agent_Setup.exe (full install)
 
 #define MyAppName "HaiTun Agent"
 #define MyAppVersion "1.0.6"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
+
+#ifndef MSYS_FINGERPRINT
+#define MSYS_FINGERPRINT "msys-unknown"
+#endif
 
 [Setup]
 AppId={{234DFAA2-39F9-4E4C-92C7-680728ADDA4A}
@@ -12,11 +20,19 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 UninstallDisplayName={#MyAppName}
-UninstallDisplayIcon={app}\haitun.ico
+UninstallDisplayIcon={app}\app\haitun.ico
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-OutputBaseFilename=HaiTun Agent Setup
+#ifdef COMPONENT_MSYS
+OutputBaseFilename=msys-setup
+#else
+#ifdef COMPONENT_APP
+OutputBaseFilename=HaiTun_Agent_App_Setup
+#else
+OutputBaseFilename=HaiTun_Agent_Setup
+#endif
+#endif
 SetupIconFile=haitun.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -27,8 +43,6 @@ ShowLanguageDialog=yes
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-; 协议页文案写在这里而非 .isl —— ChineseSimplified.isl 是构建时下载且被 .gitignore,
-; 不能指望它提供任何自定义键。
 [CustomMessages]
 chinesesimplified.LegalPageCaption=许可协议与隐私保护政策
 chinesesimplified.LegalPageDesc=安装前请阅读并同意以下协议
@@ -43,13 +57,26 @@ english.LegalTerms=Haitun Agent Software License and Service Agreement
 english.LegalPrivacy=Haitun Agent Privacy Policy
 english.LegalAgree=I have read and agree to the agreements above
 
+#ifndef COMPONENT_MSYS
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+#endif
 
 [Files]
-Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "haitun.ico"; DestDir: "{app}"
-Source: "haitun.exe"; DestDir: "{app}"
+#ifdef COMPONENT_MSYS
+Source: "..\..\examples\haitun-workspace\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+#else
+Source: "..\..\examples\haitun-workspace\*"; DestDir: "{app}\app"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "msys64"
+Source: "haitun.ico"; DestDir: "{app}\app"
+Source: "haitun.exe"; DestDir: "{app}\app"
+#ifdef COMPONENT_APP
+#else
+Source: "..\..\examples\haitun-workspace\msys64\*"; DestDir: "{app}\msys64"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
+#endif
+Source: "rollback.cmd"; DestDir: "{app}"
+Source: "rollback.ps1"; DestDir: "{app}"
+Source: "rollback-state.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 ; 协议页要读的三个文件。dontcopy = 只打进安装包供向导页临时解出, 不装到 {app}
 ; —— 产品内那份走 spa-v2/dist（vite 会把 public/* 拷进去）, 装两份必有一份过时。
 ; 这三个是 scripts/gen_legal_html.py 的产物, 改 docs/ 下的 md 后需重新生成。
@@ -57,34 +84,28 @@ Source: "..\..\src\psi_agent\gateway\spa-v2\public\terms.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\spa-v2\public\privacy.html"; Flags: dontcopy
 Source: "..\..\src\psi_agent\gateway\spa-v2\public\legal.css"; Flags: dontcopy
 
+#ifndef COMPONENT_MSYS
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\haitun.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\haitun.ico"
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\app\{#MyAppExeName}"; IconFilename: "{app}\app\haitun.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\app\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\app\haitun.ico"
+#endif
 
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: shellexec postinstall skipifsilent
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}\*"
+Type: filesandordirs; Name: "{app}"
 
 [Code]
 { ---- 协议页 ----
   许可协议导言写明「您在本软件安装过程中勾选同意本协议, 即视为您同时同意隐私保护政策」,
   所以是一个勾选框覆盖两份, 而非各勾一个 —— 这也是不能用内置 LicenseFile 的原因:
-  它是单选钮, 且一次只挂一份文件。
-
-  不记录同意状态(无注册表、无标记文件): 团队决定每次安装都勾。自动更新走完整向导
-  (haitun.c 用 ShellExecuteW 拉起 setup, 未带 /SILENT), 因此升级也会经过本页。
-  副作用是好的: 换人用同一台机器不会静默跳过协议。
-
-  /SILENT 与 /VERYSILENT 会跳过全部向导页含本页, 按决策「视为部署方已代为同意」,
-  故不加 /ACCEPTTOS 参数。见 oss-publish.md。 }
+  它是单选钮, 且一次只挂一份文件。 }
 var
   LegalPage: TWizardPage;
   LegalAgreeCheck: TNewCheckBox;
   LegalFilesExtracted: Boolean;
   PrevPageID: Integer;
+  PendingStateJSON: String;
 
-{ 打开协议 HTML。ExtractTemporaryFile 对同一文件重复调用会报错, 故用标记只解一次;
-  legal.css 必须一并解出, 否则浏览器拿到的是无样式裸文本。临时目录由 Inno 退出时自清。
-  注意: 本行不能写花括号常量 —— Pascal 注释以花括号定界, 写进去会提前闭合注释。 }
 procedure OpenLegalDoc(const FileName: String);
 var
   ResultCode: Integer;
@@ -111,8 +132,6 @@ begin
   OpenLegalDoc('privacy.html');
 end;
 
-{ 勾选状态直接驱动「下一步」的可用性。不用 NextButtonClick 返回 False 弹提示
-  —— 那是先让人点了再拒绝; 禁用态更直白。 }
 procedure UpdateNextButtonState;
 begin
   WizardForm.NextButton.Enabled := LegalAgreeCheck.Checked;
@@ -123,9 +142,6 @@ begin
   UpdateNextButtonState;
 end;
 
-{ 造一个下划线蓝色可点文本。不用 6.3 才有的 TNewLinkLabel: CI 里
-  choco install innosetup 不锁版本, 拿到更早的 6.x 会编译失败。
-  OnClick 由调用方赋值 —— 事件类型不作参数传, 少一处版本相关的写法。 }
 function CreateLegalLink(const Caption: String; ATop: Integer): TNewStaticText;
 begin
   Result := TNewStaticText.Create(LegalPage);
@@ -176,14 +192,10 @@ procedure InitializeWizard;
 begin
   LegalFilesExtracted := False;
   PrevPageID := -1;
+  PendingStateJSON := '';
   CreateLegalPage;
 end;
 
-{ 进本页时按勾选状态重算(用户可能勾了之后点「上一步」再回来, 那时按钮该是启用的);
-  刚离开本页时把按钮交还给 Inno, 否则后续页面的「下一步」会被我们留在禁用态。
-
-  只在「上一页是本页」时才恢复, 不能对所有其他页无条件置 True ——
-  安装进行页等页面的按钮状态由 Inno 自己管, 每页都插一手会把它的状态覆盖掉。 }
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if CurPageID = LegalPage.ID then
@@ -193,7 +205,204 @@ begin
   PrevPageID := CurPageID;
 end;
 
+{ ---- 目录换新与回滚状态 ---- }
+
+function ReadTextFileTrim(const FileName: String): String;
+var
+  S: AnsiString;
+begin
+  Result := '';
+  if FileExists(FileName) and LoadStringFromFile(FileName, S) then
+    Result := Trim(S);
+end;
+
+function ComponentDir(const Name: String): String;
+begin
+  Result := ExpandConstant('{app}\') + Name;
+end;
+
+function SwapComponent(const Name: String): Boolean;
+var
+  Cur, Backup: String;
+begin
+  Cur := ComponentDir(Name);
+  Backup := Cur + '.backup';
+  if not DirExists(Cur) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if DirExists(Backup) then
+    DelTree(Backup, True, True, True);
+  Result := RenameFile(Cur, Backup);
+end;
+
+function WriteStateFile(const Content: String): Boolean;
+var
+  Path, Tmp: String;
+begin
+  ForceDirectories(ExpandConstant('{app}'));
+  Path := ExpandConstant('{app}\rollback-state.json');
+  Tmp := Path + '.tmp';
+  Result := SaveStringToFile(Tmp, Content, False);
+  if Result then
+  begin
+    if FileExists(Path) then
+      DeleteFile(Path);
+    Result := RenameFile(Tmp, Path);
+  end;
+end;
+
+function BuildStateJSON(const UpdateKind, AppTo, MsysTo: String): String;
+var
+  AppFrom, MsysFrom: String;
+begin
+  AppFrom := ReadTextFileTrim(ComponentDir('app') + '\haitun-version.txt');
+  MsysFrom := ReadTextFileTrim(ComponentDir('msys64') + '\msys-version.txt');
+  Result := '{' + #13#10 +
+    '  "schema_version": 1,' + #13#10 +
+    '  "last_update": "' + UpdateKind + '",' + #13#10 +
+    '  "status": "pending",' + #13#10 +
+    '  "updated_at": "' + GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') + '",' + #13#10 +
+    '  "app": { "from": "' + AppFrom + '", "to": "' + AppTo + '" },' + #13#10 +
+    '  "msys": { "from": "' + MsysFrom + '", "to": "' + MsysTo + '" }' + #13#10 +
+    '}';
+end;
+
+function InstallsApp: Boolean;
+begin
+#ifdef COMPONENT_APP
+  Result := True;
+#else
+#ifdef COMPONENT_MSYS
+  Result := False;
+#else
+  Result := True;
+#endif
+#endif
+end;
+
+function InstallsMsys: Boolean;
+begin
+#ifdef COMPONENT_MSYS
+  Result := True;
+#else
+#ifdef COMPONENT_APP
+  Result := False;
+#else
+  Result := True;
+#endif
+#endif
+end;
+
+function UpdateKindName: String;
+begin
+#ifdef COMPONENT_APP
+  Result := 'app';
+#else
+#ifdef COMPONENT_MSYS
+  Result := 'msys';
+#else
+  Result := 'all';
+#endif
+#endif
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Root, AppTo, MsysTo: String;
+  FreshInstall: Boolean;
+  ResultCode: Integer;
+begin
+  Result := '';
+  NeedsRestart := False;
+  Root := ExpandConstant('{app}');
+
+  if (FileExists(Root + '\haitun.exe') or FileExists(Root + '\psi-agent.exe')) and
+     not DirExists(Root + '\app') then
+  begin
+    Result := '检测到旧版本安装结构。请先在“设置 -> 应用”中卸载旧版 HaiTun Agent，再运行新安装包。';
+    Exit;
+  end;
+
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM haitun.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM psi-agent.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+#ifdef COMPONENT_MSYS
+  AppTo := '';
+  MsysTo := '{#MSYS_FINGERPRINT}';
+#else
+  AppTo := '{#MyAppVersion}';
+#ifdef COMPONENT_APP
+  MsysTo := '';
+#else
+  MsysTo := '{#MSYS_FINGERPRINT}';
+#endif
+#endif
+
+  FreshInstall := not DirExists(ComponentDir('app')) and
+                  not DirExists(ComponentDir('msys64'));
+  if not FreshInstall then
+  begin
+    PendingStateJSON := BuildStateJSON(UpdateKindName, AppTo, MsysTo);
+    if not WriteStateFile(PendingStateJSON) then
+    begin
+      Result := '无法写入回滚状态文件，请检查磁盘空间后重试。';
+      Exit;
+    end;
+  end;
+
+  if InstallsApp and not SwapComponent('app') then
+  begin
+    Result := '无法备份旧版海豚目录，请关闭海豚后重试。';
+    Exit;
+  end;
+  if InstallsMsys and not SwapComponent('msys64') then
+  begin
+    Result := '无法备份旧版环境目录，请关闭海豚后重试。';
+    Exit;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  DoneJSON, Exe: String;
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if DirExists(ComponentDir('app') + '.backup') or
+       DirExists(ComponentDir('msys64') + '.backup') then
+    begin
+      if Length(PendingStateJSON) > 0 then
+      begin
+        DoneJSON := PendingStateJSON;
+        if StringChange(DoneJSON, '"status": "pending"', '"status": "done"') > 0 then
+          WriteStateFile(DoneJSON);
+      end;
+    end
+    else if Length(PendingStateJSON) > 0 then
+    begin
+      WriteStateFile(
+        '{' + #13#10 +
+        '  "schema_version": 1,' + #13#10 +
+        '  "last_update": "",' + #13#10 +
+        '  "status": "none",' + #13#10 +
+        '  "updated_at": "",' + #13#10 +
+        '  "app": { "from": "", "to": "" },' + #13#10 +
+        '  "msys": { "from": "", "to": "" }' + #13#10 +
+        '}');
+    end;
+
+    Exe := ComponentDir('app') + '\haitun.exe';
+    if FileExists(Exe) then
+      ShellExec('open', Exe, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+  end;
+end;
+
+function PrepareToUninstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin

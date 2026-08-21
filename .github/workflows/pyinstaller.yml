@@ -4,7 +4,7 @@ name: PyInstaller
 #   1. 跨平台可编译性的兜底 —— 三平台全编, 编不过这里先红 (nuitka.yml 只在发版
 #      时才编, 不承担这个职责);
 #   2. OSS 发版通道的上游 —— `haitun-inno-setup` 产出的
-#      `haitun-agent-installer-pyinstaller` 由 oss-publish.yml 消费。
+#      `haitun-agent-installers` 由 oss-publish.yml 消费。
 #
 # 触发面保持宽口径 (任何分支的任何推送 + PR): 兜底职责要求编得越勤越好, 收窄
 # 会让特性分支上的编译问题拖到开 PR 才暴露。
@@ -118,7 +118,6 @@ jobs:
         env:
           HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
           HAITUN_UPDATE_INTERVAL_HOURS: ${{ vars.HAITUN_UPDATE_INTERVAL_HOURS }}
-          HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
@@ -127,9 +126,28 @@ jobs:
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"
-      - shell: pwsh
-        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp /O"installer-output" ".github\inno-setup\haitun.iss"'
+      - name: Compute MSYS fingerprint
+        shell: pwsh
+        run: |
+          $fp = & ".github\inno-setup\compute-msys-fingerprint.ps1" -MsysDir "examples\haitun-workspace\msys64"
+          Set-Content -LiteralPath "examples\haitun-workspace\msys64\msys-version.txt" -Value $fp -Encoding UTF8 -NoNewline
+          Write-Output "MSYS_FINGERPRINT=$fp" >> $env:GITHUB_ENV
+      - name: Build installers
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc /Qp /DMSYS_FINGERPRINT="$env:MSYS_FINGERPRINT" /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $iscc /Qp /DCOMPONENT_APP /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $iscc /Qp /DCOMPONENT_MSYS /DMSYS_FINGERPRINT="$env:MSYS_FINGERPRINT" /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Collect version files
+        shell: pwsh
+        run: |
+          Copy-Item -Force "examples\haitun-workspace\haitun-version.txt" "installer-output\"
+          Copy-Item -Force "examples\haitun-workspace\msys64\msys-version.txt" "installer-output\"
       - uses: actions/upload-artifact@v7
         with:
-          name: haitun-agent-installer-pyinstaller
-          path: installer-output/HaiTun Agent Setup.exe
+          name: haitun-agent-installers
+          path: installer-output

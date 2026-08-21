@@ -79,7 +79,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          URL="${HAITUN_DOWNLOAD_BASE_URL%/}/version.txt"
+          URL="${HAITUN_DOWNLOAD_BASE_URL%/}/haitun-version.txt"
           CODE="$(curl -fsS -o /tmp/oss-version.txt -w '%{http_code}' "$URL" || true)"
           if [ "$CODE" = "200" ]; then
             CURRENT="$(tr -d '[:space:]' < /tmp/oss-version.txt)"
@@ -91,7 +91,7 @@ jobs:
               echo "skip=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "::notice::OSS version.txt not available (HTTP ${CODE:-unknown}); publishing"
+            echo "::notice::OSS haitun-version.txt not available (HTTP ${CODE:-unknown}); publishing"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -99,12 +99,20 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         uses: actions/download-artifact@v8
         with:
-          name: haitun-agent-installer-pyinstaller
+          name: haitun-agent-installers
           path: installer
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload installer and version.txt to Aliyun OSS
+      - name: Read MSYS version
+        if: steps.check.outputs.skip != 'true'
+        id: msys-version
+        shell: bash
+        run: |
+          MSYS="$(tr -d '[:space:]' < installer/msys-version.txt)"
+          echo "msys=$MSYS" >> "$GITHUB_OUTPUT"
+
+      - name: Upload installers and version files to Aliyun OSS
         if: steps.check.outputs.skip != 'true'
         shell: bash
         env:
@@ -113,8 +121,13 @@ jobs:
           ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
           ALIYUN_OSS_ENDPOINT: ${{ secrets.ALIYUN_OSS_ENDPOINT }}
           ALIYUN_OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX }}
-          HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
           HAITUN_VERSION: ${{ steps.metadata.outputs.version }}
+          MSYS_VERSION: ${{ steps.msys-version.outputs.msys }}
+          INSTALLER_FULL_PATH: installer/HaiTun_Agent_Setup.exe
+          INSTALLER_APP_PATH: installer/HaiTun_Agent_App_Setup.exe
+          INSTALLER_MSYS_PATH: installer/msys-setup.exe
+          HAITUN_VERSION_FILE: installer/haitun-version.txt
+          MSYS_VERSION_FILE: installer/msys-version.txt
         run: |
           python3 -m pip install --quiet oss2
           python3 .github/inno-setup/upload_to_oss.py

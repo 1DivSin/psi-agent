@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Upload the Haitun Agent installer and version.txt to Aliyun OSS.
+"""Upload the three Haitun Agent installers and two version files to Aliyun OSS.
 
-Required env:
-  ALIYUN_ACCESS_KEY_ID, ALIYUN_ACCESS_KEY_SECRET
-  ALIYUN_OSS_BUCKET, ALIYUN_OSS_ENDPOINT
-  HAITUN_VERSION
-
-Optional env:
-  ALIYUN_OSS_PREFIX      default: empty (bucket root)
+Upload order is fixed: installers first, version files last, so clients never
+see a new version before the matching packages are available.
 """
 
 import os
@@ -26,51 +21,57 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _upload_file(bucket: oss2.Bucket, key: str, path: str, headers: dict[str, str]) -> None:
+    if not os.path.isfile(path):
+        raise SystemExit(f"File not found: {path}")
+    bucket.put_object_from_file(key, path, headers=headers)
+
+
 def main() -> None:
     access_key_id = _require_env("ALIYUN_ACCESS_KEY_ID")
     access_key_secret = _require_env("ALIYUN_ACCESS_KEY_SECRET")
     bucket_name = _require_env("ALIYUN_OSS_BUCKET")
     endpoint = _require_env("ALIYUN_OSS_ENDPOINT")
-    version = _require_env("HAITUN_VERSION")
+    haitun_version = _require_env("HAITUN_VERSION")
+    msys_version = _require_env("MSYS_VERSION")
+    full_path = _require_env("INSTALLER_FULL_PATH")
+    app_path = _require_env("INSTALLER_APP_PATH")
+    msys_path = _require_env("INSTALLER_MSYS_PATH")
+    haitun_version_file = _require_env("HAITUN_VERSION_FILE")
+    msys_version_file = _require_env("MSYS_VERSION_FILE")
 
     prefix = os.environ.get("ALIYUN_OSS_PREFIX", "").strip().strip("/")
     if prefix in ("", ".", "-", "root", "ROOT"):
         prefix = ""
-    installer_name = os.environ.get("HAITUN_UPDATE_INSTALLER_NAME", "HaiTun_Agent_Setup.exe").strip()
-    if not installer_name:
-        installer_name = "HaiTun_Agent_Setup.exe"
-    installer = os.environ.get(
-        "INSTALLER_PATH",
-        os.path.join("installer", "HaiTun Agent Setup.exe"),
-    )
-    if not os.path.isfile(installer):
-        raise SystemExit(f"Installer artifact not found: {installer}")
+
+    def key(name: str) -> str:
+        return f"{prefix}/{name}" if prefix else name
 
     auth = oss2.Auth(access_key_id, access_key_secret)
     bucket = oss2.Bucket(auth, endpoint, bucket_name)
-
-    base_name, ext = os.path.splitext(installer_name)
-    stable_key = f"{prefix}/{installer_name}" if prefix else installer_name
-    versioned_key = f"{prefix}/{base_name}-{version}{ext}" if prefix else f"{base_name}-{version}{ext}"
-    version_key = f"{prefix}/version.txt" if prefix else "version.txt"
 
     exe_headers = {
         "Content-Type": "application/octet-stream",
         "Cache-Control": "public, max-age=300",
         "x-oss-object-acl": "public-read",
     }
-    bucket.put_object_from_file(stable_key, installer, headers=exe_headers)
-    copy_headers = {**exe_headers, "x-oss-metadata-directive": "REPLACE"}
-    bucket.copy_object(bucket_name, stable_key, versioned_key, headers=copy_headers)
-    bucket.put_object(
-        version_key,
-        version + "\n",
-        headers={
-            "Content-Type": "text/plain; charset=utf-8",
-            "Cache-Control": "no-cache",
-            "x-oss-object-acl": "public-read",
-        },
-    )
+    text_headers = {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "x-oss-object-acl": "public-read",
+    }
+
+    _upload_file(bucket, key("HaiTun_Agent_Setup.exe"), full_path, exe_headers)
+    _upload_file(bucket, key("HaiTun_Agent_App_Setup.exe"), app_path, exe_headers)
+    _upload_file(bucket, key("msys-setup.exe"), msys_path, exe_headers)
+
+    with open(haitun_version_file, encoding="utf-8") as fh:
+        haitun_text = fh.read().strip() or haitun_version
+    with open(msys_version_file, encoding="utf-8") as fh:
+        msys_text = fh.read().strip() or msys_version
+
+    bucket.put_object(key("haitun-version.txt"), haitun_text + "\n", headers=text_headers)
+    bucket.put_object(key("msys-version.txt"), msys_text + "\n", headers=text_headers)
 
 
 if __name__ == "__main__":
