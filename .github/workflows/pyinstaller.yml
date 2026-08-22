@@ -123,6 +123,19 @@ jobs:
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
           & ".github\inno-setup\build-haitun-launcher.ps1"
+      - name: Inject runtime .env
+        shell: pwsh
+        env:
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+        run: |
+          # 只把 key 写进打包目录，不落库；PR 分支没有 secret 时生成空 .env，打包照常成功。
+          $path = "examples\haitun-workspace\.env"
+          $lines = [System.Collections.Generic.List[string]]::new()
+          if ($env:SERPER_API_KEY) {
+            $lines.Add("SERPER_API_KEY=$env:SERPER_API_KEY")
+          }
+          [System.IO.File]::WriteAllText($path, ($lines -join "`r`n"), [System.Text.UTF8Encoding]::new($false))
+          Write-Output "runtime .env prepared (SERPER_API_KEY present: $([bool]$env:SERPER_API_KEY))"
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"
