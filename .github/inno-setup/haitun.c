@@ -368,6 +368,7 @@ static int update_pending(void)
 static void launch_installer_file(const WCHAR *path, const WCHAR *fallback_url)
 {
     WCHAR cmd[1024];
+    WCHAR work_dir[MAX_PATH];
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi = {0};
 
@@ -376,7 +377,9 @@ static void launch_installer_file(const WCHAR *path, const WCHAR *fallback_url)
     wsprintfW(cmd, L"\"%s\"", path);
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOWNORMAL;
-    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (!GetTempPathW(MAX_PATH, work_dir) || !work_dir[0])
+        lstrcpyW(work_dir, L"C:\\");
+    if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, work_dir, &si, &pi)) {
         if (pi.hThread) CloseHandle(pi.hThread);
         if (pi.hProcess) CloseHandle(pi.hProcess);
         return;

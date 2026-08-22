@@ -6,7 +6,7 @@
 ;   - (default)        -> HaiTun_Agent_Setup.exe (full install)
 
 #define MyAppName "HaiTun Agent"
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
 
@@ -225,6 +225,7 @@ end;
 function SwapComponent(const Name: String): Boolean;
 var
   Cur, Backup: String;
+  i: Integer;
 begin
   Cur := ComponentDir(Name);
   Backup := Cur + '.backup';
@@ -233,9 +234,30 @@ begin
     Result := True;
     Exit;
   end;
+  i := 1;
+  while i <= 5 do
+  begin
+    if DirExists(Backup) then
+      DelTree(Backup, True, True, True);
+    if not DirExists(Backup) then
+      i := 6
+    else
+    begin
+      Sleep(1000);
+      i := i + 1;
+    end;
+  end;
   if DirExists(Backup) then
-    DelTree(Backup, True, True, True);
+  begin
+    Result := False;
+    Exit;
+  end;
   Result := RenameFile(Cur, Backup);
+  if not Result then
+  begin
+    Sleep(1000);
+    Result := RenameFile(Cur, Backup);
+  end;
 end;
 
 function WriteStateFile(const Content: String): Boolean;
@@ -252,6 +274,19 @@ begin
       DeleteFile(Path);
     Result := RenameFile(Tmp, Path);
   end;
+end;
+
+function WriteNoneStateFile: Boolean;
+begin
+  Result := WriteStateFile(
+    '{' + #13#10 +
+    '  "schema_version": 1,' + #13#10 +
+    '  "last_update": "",' + #13#10 +
+    '  "status": "none",' + #13#10 +
+    '  "updated_at": "",' + #13#10 +
+    '  "app": { "from": "", "to": "" },' + #13#10 +
+    '  "msys": { "from": "", "to": "" }' + #13#10 +
+    '}');
 end;
 
 function BuildStateJSON(const UpdateKind, AppTo, MsysTo: String): String;
@@ -317,6 +352,7 @@ var
 begin
   Result := '';
   NeedsRestart := False;
+  SetCurrentDir(ExpandConstant('{tmp}'));
   Root := ExpandConstant('{app}');
 
   if (FileExists(Root + '\haitun.exe') or FileExists(Root + '\psi-agent.exe')) and
@@ -330,6 +366,7 @@ begin
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM psi-agent.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(1500);
 
 #ifdef COMPONENT_MSYS
   AppTo := '';
@@ -357,11 +394,17 @@ begin
 
   if InstallsApp and not SwapComponent('app') then
   begin
+    if (not DirExists(ComponentDir('app') + '.backup')) and
+       (not DirExists(ComponentDir('msys64') + '.backup')) then
+      WriteNoneStateFile;
     Result := '无法备份旧版海豚目录，请关闭海豚后重试。';
     Exit;
   end;
   if InstallsMsys and not SwapComponent('msys64') then
   begin
+    if (not DirExists(ComponentDir('app') + '.backup')) and
+       (not DirExists(ComponentDir('msys64') + '.backup')) then
+      WriteNoneStateFile;
     Result := '无法备份旧版环境目录，请关闭海豚后重试。';
     Exit;
   end;
@@ -386,15 +429,7 @@ begin
     end
     else if Length(PendingStateJSON) > 0 then
     begin
-      WriteStateFile(
-        '{' + #13#10 +
-        '  "schema_version": 1,' + #13#10 +
-        '  "last_update": "",' + #13#10 +
-        '  "status": "none",' + #13#10 +
-        '  "updated_at": "",' + #13#10 +
-        '  "app": { "from": "", "to": "" },' + #13#10 +
-        '  "msys": { "from": "", "to": "" }' + #13#10 +
-        '}');
+      WriteNoneStateFile;
     end;
 
     Exe := ComponentDir('app') + '\haitun.exe';

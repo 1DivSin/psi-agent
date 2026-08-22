@@ -73,7 +73,16 @@ foreach ($name in $components) {
 }
 
 if ($restored.Count -eq 0) {
-    Write-Host '没有找到可恢复的备份，未做任何修改。'
+    if ($state.status -eq 'pending') {
+        $state.last_update = ''
+        $state.status = 'none'
+        $tmp = $statePath + '.tmp'
+        $state | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath $tmp
+        Move-Item -LiteralPath $tmp -Destination $statePath -Force
+        Write-Host '未发现可恢复的备份，已清除未完成的更新状态。'
+    } else {
+        Write-Host '没有找到可恢复的备份，未做任何修改。'
+    }
     exit 0
 }
 
