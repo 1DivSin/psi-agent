@@ -6,7 +6,7 @@
 ;   - (default)        -> HaiTun_Agent_Setup.exe (full install)
 
 #define MyAppName "HaiTun Agent"
-#define MyAppVersion "1.0.9"
+#define MyAppVersion "1.0.10"
 #define MyAppPublisher "Hefei Zhenzhi Artificial Intelligence Application Software Co., Ltd"
 #define MyAppExeName "haitun.exe"
 
@@ -365,6 +365,16 @@ begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM haitun.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM psi-agent.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM HaiTun-Agent-Setup.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM HaiTun-Agent-App-Setup.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM msys-setup.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM HaiTun_Agent_Setup.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM HaiTun_Agent_App_Setup.exe',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Sleep(1500);
 
