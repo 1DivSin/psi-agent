@@ -8,6 +8,7 @@ channel/
 ├── _errors.py         # ChannelError 基类（传输/协议/session/附件下载错误统一抛出）
 ├── _markers.py        # [RECV:] 标记 + encode_input + 有状态扫描器 SendMarkerScanner；[SEND:] 解码重导出自 `psi_agent/_send_markers.py`
 ├── _stream.py         # SSE 解析 iter_sse_events + interval 缓冲 StreamBuffer（与传输解耦）
+├── _file_bytes.py     # fetch_file_bytes — 跨容器取出向文件字节（GET {source}/files，与平台无关）
 ├── _core.py           # ChannelCore — 连接管理 + post() 编排
 ├── _event_defs.py     # 加载 agent 包 channel_events/<channel>/（EVENT.yaml + map.py|produce.py）+ 变更指纹
 ├── _event_shapes.py   # 事件载荷 → 纯数据（plainify）与形状/字段路径推导；线上路径与自查工具共用
@@ -37,6 +38,7 @@ ChannelCore 是所有 Channel（CLI、REPL、Telegram）共享的公共部件：
 - `post(list[InputChunk]) -> AsyncIterator[OutputChunk]`：InputChunk → 字符串 → POST → SSE → OutputChunk
 - 将输入中的 FileChunk 转换为 `[RECV:/path]` 标记（session 端负责读文件）
 - 检测输出中的 `[SEND:/path]` 标记并产生 FileChunk。解码走 `iter_send_paths()`——它同时承载正则与**空路径过滤**：裸 `[SEND:]` 是模型笔误而非传输请求，放过去会让 `_send_file` 拿空 source path 发起上传。该函数定义在顶层 `psi_agent/_send_markers.py`（本模块重导出）：`session/history_display.py` 的 Gateway 投影复用同一函数，放在本层会让 Session import Channel 的私有模块
+- **给出向 FileChunk 盖 `source`（跨容器取字节的地址）**：`_byte_source` —— `session_socket` 是 `http(s)://` 时取其规范化前缀，否则留空。空 = 客户端照旧直接读本地路径；非空 = 该 Session 可能在别的容器里，字节要从 `GET {source}/files?path=...` 回取（见 `session/AGENTS.md` 同名小节）。**（刻意为之）盖在 `post()` 的扫描循环里而不是 `SendMarkerScanner` 里**：scanner 是纯解码，不该知道传输地址；`source` 在 `_types.FileChunk` 上有默认空值，故输入侧所有构造点无需改动
 - 将 SSE 的 `delta.reasoning` 流切分为 `ReasoningChunk`（透传可选 `delta.kind`），与 `content`（`TextChunk`）按到达顺序交错产出；同槽不同 `kind` 在 buffer 内视为不同活动类型（不合并）；`[SEND:...]` 仅扫描 content
 - SSE 内容在 interval 窗口内缓冲合并为单个 TextChunk（默认 1s，可配置）
 - 终端通道（CLI/REPL）设置 interval=0 无需缓冲
@@ -107,6 +109,9 @@ Channel 层是 psi-agent 的用户界面层，负责连接 Session socket 并通
 - `<audio key="..."/>` inline 标签通过 `message_resource.aget()` API 下载
 - 通过 `channel.stream()`  + `stream.append()` 实现卡片流式渲染
 - FileChunk 通过 `channel.send()` 发送文件；用户文件下载至 `Downloads/.psi/<date>/`
+- **出向文件先按图片试、失败再按文件发**：`_send_file` 先发 `{"image": ...}`，SDK 拒了（非图片格式，`code=234011`）再发 `{"file": ...}`。这条探测路径会在生产日志里留下常量级的 `materialize blocked` WARNING，属正常流——**读日志时勿把 WARNING 条数当故障数**
+- **独立容器 Session 的字节回取（`_file_bytes.fetch_file_bytes`）**：`FileChunk.source` 非空时先 `GET {source}/files?path=...` 拿到 `bytes` 再交给 SDK。**（刻意为之）实现在 channel 通用层而非 `feishu/` 下**：`FileChunk` 是所有 channel 共用的，函数本身不认识任何平台的上传 API，放进 feishu 等于给 telegram 将来同样部署时留一份逐字复制。**必须交 bytes 而不是路径**：SDK `_coerce.py` 把 `{"source": <str>}` 一律当 `kind="file"`，在 **Gateway 进程内**打开该路径——独立容器部署下那个路径在 Gateway 文件系统里不存在，上传静默失败，飞书侧表现为「一句话回复、没有附件」；`bytes` 则走 `kind="buffer"`，不碰文件系统。走 file 分支时**必须同时给 `file_name`**（buffer 没有文件名可推）。**（刻意为之）取字节失败抛 `OutboundFileError`，不回落到「交路径给 SDK」**：跨容器下那条回落路**必然**失败（路径在本容器不存在，正是本 bug 的成因），走一遍只是把我们的错误换成 SDK 的错误，而 SDK 那侧的失败恰恰是**静默**的——用户看到的还是「一句话回复、没有附件」，与修复前无区别。`source` 为空（同容器 Session）根本不进这条分支，照旧交路径、一步 HTTP 都不多走。异常在 `_stream_reply._produce` 的调用点就地捕获：记 ERROR + 给会话发一句「文件发送失败: <名>」，**不重抛**——那里在卡片流式渲染里，抛出去会中断整条回复，一个附件失败不该让用户连文字也收不到；其余 chunk 继续处理，多个文件失败各报一次
+- **私密区守卫两道，判据不同，勿当重复删掉一道**：出向发文件前 `client.py` 调 `_private_space.blocks_send(chunk.path, sender_open_id)`，判的是「**这位飞书发送者**是不是该私密区的主人」——只有 channel 手里有 sender_open_id，这一道只能在这里。另一道在 `session/file_serving.py`，判的是「这文件**是不是**私密区的」，无条件拦。分工的根据是**谁掌握什么事实**：channel 知道发送者是谁但跨容器时拿不到文件系统事实（那串路径在 gateway 上不存在，`realpath` 退化成字符串规范化，软链绕得过）；source Session 有文件系统事实但不知道发送者是谁。两道都保留才既能「主人自己收得到」又能挡住软链绕行
 - 认证：`--app-id` + `--app-secret` CLI args > `PSI_FEISHU_APP_ID` / `PSI_FEISHU_APP_SECRET` env
 - 用户白名单：`--allowed-user-ids` 参数或 `None`（不限制）
 - 处理状态表情（参考 Hermes）：收到白名单消息后立即在该消息上加 `Typing` 表情（`message_reaction.acreate`），回复完成后移除；处理失败则替换为 `CrossMark`。表情操作失败安全，不影响回复
