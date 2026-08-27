@@ -90,6 +90,8 @@ AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量�
 只要 provider 返回有效 usage，AI 层还会在 stream 尾部用
 `make_usage_signal()` 发送单 choice 的 `finish_reason="usage"` 辅助帧。该帧让 Session 和 Router
 在保持“0 choice 是心跳”与“每个有效事件恰好 1 choice”约束的同时保留真实 token 用量；它不终止流。
+AI 层同时从 `prompt_tokens_details.cached_tokens` 提取缓存读取量，并在 provider 适配器提供时
+保留缓存创建量。缺失的缓存指标发送为 `null`，不得用 `0` 代替未知。
 
 信号由 `psi_agent.protocol.make_compaction_signal(prompt_tokens=…, threshold=…)` 构造，形状见根 `AGENTS.md`「核心通信协议」。`prompt_tokens` / `threshold` 不是日志字段——Session 用它们做压缩冷却判断（见 `session/AGENTS.md`），省略会让冷却退化成 fail-open。
 

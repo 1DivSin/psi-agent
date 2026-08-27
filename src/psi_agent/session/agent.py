@@ -176,8 +176,12 @@ class AgentRun:
         self._result: AgentRunResult | None = None
         self._model_calls = 0
         self._usage_calls = 0
+        self._cache_read_usage_calls = 0
+        self._cache_creation_usage_calls = 0
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cached_input_tokens = 0
+        self._cache_creation_input_tokens = 0
         self._chunks = start(self)
 
     @property
@@ -198,17 +202,36 @@ class AgentRun:
             model_calls=self._model_calls,
             input_tokens=self._input_tokens if complete else None,
             output_tokens=self._output_tokens if complete else None,
+            cached_input_tokens=(
+                self._cached_input_tokens if complete and self._cache_read_usage_calls == self._model_calls else None
+            ),
+            cache_creation_input_tokens=(
+                self._cache_creation_input_tokens
+                if complete and self._cache_creation_usage_calls == self._model_calls
+                else None
+            ),
         )
 
     def _start_model_call(self) -> None:
         self._model_calls += 1
 
-    def _record_model_usage(self, input_tokens: int | None, output_tokens: int | None) -> None:
-        if input_tokens is None or output_tokens is None:
-            return
-        self._usage_calls += 1
-        self._input_tokens += input_tokens
-        self._output_tokens += output_tokens
+    def _record_model_usage(
+        self,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        cache_creation_input_tokens: int | None,
+    ) -> None:
+        if input_tokens is not None and output_tokens is not None:
+            self._usage_calls += 1
+            self._input_tokens += input_tokens
+            self._output_tokens += output_tokens
+        if cached_input_tokens is not None:
+            self._cache_read_usage_calls += 1
+            self._cached_input_tokens += cached_input_tokens
+        if cache_creation_input_tokens is not None:
+            self._cache_creation_usage_calls += 1
+            self._cache_creation_input_tokens += cache_creation_input_tokens
 
     def __aiter__(self) -> AgentRun:
         return self
@@ -594,6 +617,8 @@ class SessionAgent:
                     _compaction_threshold = 0
                     _input_tokens: int | None = None
                     _output_tokens: int | None = None
+                    _cached_input_tokens: int | None = None
+                    _cache_creation_input_tokens: int | None = None
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -620,6 +645,10 @@ class SessionAgent:
                             if delta.input_tokens is not None and delta.output_tokens is not None:
                                 _input_tokens = delta.input_tokens
                                 _output_tokens = delta.output_tokens
+                            if delta.cached_input_tokens is not None:
+                                _cached_input_tokens = delta.cached_input_tokens
+                            if delta.cache_creation_input_tokens is not None:
+                                _cache_creation_input_tokens = delta.cache_creation_input_tokens
 
                             if is_terminal_finish(delta.finish_reason) and not finish_reason:
                                 finish_reason = delta.finish_reason
@@ -748,7 +777,12 @@ class SessionAgent:
                                 break
 
                     if _result_sink is not None:
-                        _result_sink._record_model_usage(_input_tokens, _output_tokens)
+                        _result_sink._record_model_usage(
+                            _input_tokens,
+                            _output_tokens,
+                            _cached_input_tokens,
+                            _cache_creation_input_tokens,
+                        )
 
                     if finish_reason == FINISH_REASON_STOP:
                         logger.debug("AI finished with stop")

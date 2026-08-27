@@ -58,6 +58,30 @@ class AiClient:
             return None
         return value
 
+    @classmethod
+    def _usage_counts(
+        cls,
+        usage_signal: dict[str, object],
+    ) -> tuple[int | None, int | None, int | None, int | None]:
+        input_tokens = cls._as_token_count(usage_signal.get("prompt_tokens"))
+        output_tokens = cls._as_token_count(usage_signal.get("completion_tokens"))
+        cached_input_tokens = cls._as_token_count(usage_signal.get("cached_input_tokens"))
+        cache_creation_input_tokens = cls._as_token_count(usage_signal.get("cache_creation_input_tokens"))
+        if input_tokens is None:
+            return input_tokens, output_tokens, None, None
+        if cached_input_tokens is not None and cached_input_tokens > input_tokens:
+            cached_input_tokens = None
+        if cache_creation_input_tokens is not None and cache_creation_input_tokens > input_tokens:
+            cache_creation_input_tokens = None
+        if (
+            cached_input_tokens is not None
+            and cache_creation_input_tokens is not None
+            and cached_input_tokens + cache_creation_input_tokens > input_tokens
+        ):
+            cached_input_tokens = None
+            cache_creation_input_tokens = None
+        return input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens
+
     async def stream(self, request_body: dict) -> AsyncGenerator[AiDelta]:
         connector, endpoint = self._build_connector_and_endpoint()
         pending_tool_terminal: AiDelta | None = None
@@ -113,6 +137,7 @@ class AiClient:
                 compaction_needed = isinstance(compaction_signal, dict) and compaction_signal.get("needed", False)
                 usage_signal = data.get("psi_usage", {})
                 has_usage = isinstance(usage_signal, dict) and c.get("finish_reason") == FINISH_REASON_USAGE
+                usage_counts = self._usage_counts(usage_signal) if has_usage else (None, None, None, None)
                 current_finish = c.get("finish_reason")
                 parsed_delta = AiDelta(
                     content=delta_data.get("content"),
@@ -127,8 +152,10 @@ class AiClient:
                     compaction_threshold=self._as_int(compaction_signal.get("threshold"))
                     if isinstance(compaction_signal, dict)
                     else 0,
-                    input_tokens=self._as_token_count(usage_signal.get("prompt_tokens")) if has_usage else None,
-                    output_tokens=self._as_token_count(usage_signal.get("completion_tokens")) if has_usage else None,
+                    input_tokens=usage_counts[0],
+                    output_tokens=usage_counts[1],
+                    cached_input_tokens=usage_counts[2],
+                    cache_creation_input_tokens=usage_counts[3],
                 )
                 if pending_tool_terminal is not None and not is_auxiliary_finish(current_finish):
                     # Trailing auxiliary signals belong to the completed model

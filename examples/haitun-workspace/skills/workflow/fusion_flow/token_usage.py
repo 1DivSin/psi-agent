@@ -15,7 +15,7 @@ from ._atomic_io import atomic_write_text
 type ExecutorKind = Literal["Agent", "Program", "Human"]
 type RunUsageStatus = Literal["running", "completed", "failed", "cancelled"]
 
-_REPORT_VERSION = 1
+_REPORT_VERSION = 2
 _FILENAME = "token-usage.json"
 
 
@@ -26,14 +26,33 @@ class TokenCount:
     model_calls: int
     input_tokens: int | None
     output_tokens: int | None
+    cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.model_calls) is not int or self.model_calls < 0:
             raise ValueError("model_calls must be a non-negative integer")
         _validate_optional_count(self.input_tokens, "input_tokens")
         _validate_optional_count(self.output_tokens, "output_tokens")
+        _validate_optional_count(self.cached_input_tokens, "cached_input_tokens")
+        _validate_optional_count(self.cache_creation_input_tokens, "cache_creation_input_tokens")
         if (self.input_tokens is None) != (self.output_tokens is None):
             raise ValueError("input_tokens and output_tokens must both be known or both be null")
+        if self.input_tokens is None and (
+            self.cached_input_tokens is not None or self.cache_creation_input_tokens is not None
+        ):
+            raise ValueError("cache token counts require a known input_tokens total")
+        if self.input_tokens is not None:
+            if self.cached_input_tokens is not None and self.cached_input_tokens > self.input_tokens:
+                raise ValueError("cached_input_tokens must not exceed input_tokens")
+            if self.cache_creation_input_tokens is not None and self.cache_creation_input_tokens > self.input_tokens:
+                raise ValueError("cache_creation_input_tokens must not exceed input_tokens")
+            if (
+                self.cached_input_tokens is not None
+                and self.cache_creation_input_tokens is not None
+                and self.cached_input_tokens + self.cache_creation_input_tokens > self.input_tokens
+            ):
+                raise ValueError("cache token breakdown must not exceed input_tokens")
 
     @property
     def complete(self) -> bool:
@@ -45,12 +64,39 @@ class TokenCount:
             return None
         return self.input_tokens + self.output_tokens
 
+    @property
+    def cache_read_complete(self) -> bool:
+        return self.cached_input_tokens is not None
+
+    @property
+    def cache_creation_complete(self) -> bool:
+        return self.cache_creation_input_tokens is not None
+
+    @property
+    def uncached_input_tokens(self) -> int | None:
+        if self.input_tokens is None or self.cached_input_tokens is None or self.cache_creation_input_tokens is None:
+            return None
+        return self.input_tokens - self.cached_input_tokens - self.cache_creation_input_tokens
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        if self.input_tokens is None or self.cached_input_tokens is None:
+            return None
+        if self.input_tokens == 0:
+            return 0.0
+        return self.cached_input_tokens / self.input_tokens
+
     def merged(self, other: TokenCount) -> TokenCount:
         complete = self.complete and other.complete
         return TokenCount(
             model_calls=self.model_calls + other.model_calls,
             input_tokens=cast(int, self.input_tokens) + cast(int, other.input_tokens) if complete else None,
             output_tokens=cast(int, self.output_tokens) + cast(int, other.output_tokens) if complete else None,
+            cached_input_tokens=_merge_optional_count(self.cached_input_tokens, other.cached_input_tokens),
+            cache_creation_input_tokens=_merge_optional_count(
+                self.cache_creation_input_tokens,
+                other.cache_creation_input_tokens,
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -60,6 +106,12 @@ class TokenCount:
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "complete": self.complete,
+            "cached_input_tokens": self.cached_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "uncached_input_tokens": self.uncached_input_tokens,
+            "cache_hit_rate": self.cache_hit_rate,
+            "cache_read_complete": self.cache_read_complete,
+            "cache_creation_complete": self.cache_creation_complete,
         }
 
 
@@ -224,7 +276,10 @@ class TokenUsageStore:
                 workflow_id=workflow_id,
                 flow_path=flow_path,
             )
-            records = _parse_steps(payload["steps"])
+            records = _parse_steps(
+                payload["steps"],
+                version=cast(int, payload["version"]),
+            )
         return cls(
             run_dir,
             run_id=run_id,
@@ -301,6 +356,8 @@ class TokenUsageReporter:
         model_calls: int,
         input_tokens: int | None,
         output_tokens: int | None,
+        cached_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
     ) -> None:
         if self._store is None:
             return
@@ -315,6 +372,8 @@ class TokenUsageReporter:
                     model_calls=model_calls,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    cached_input_tokens=cached_input_tokens,
+                    cache_creation_input_tokens=cache_creation_input_tokens,
                 ),
             )
         except Exception as error:
@@ -343,10 +402,22 @@ class TokenUsageReporter:
 
 
 def _merge_counts(counts: Iterable[TokenCount]) -> TokenCount:
-    result = TokenCount(model_calls=0, input_tokens=0, output_tokens=0)
+    result = TokenCount(
+        model_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        cached_input_tokens=0,
+        cache_creation_input_tokens=0,
+    )
     for count in counts:
         result = result.merged(count)
     return result
+
+
+def _merge_optional_count(left: int | None, right: int | None) -> int | None:
+    if left is None or right is None:
+        return None
+    return left + right
 
 
 def _validate_optional_count(value: object, name: str) -> None:
@@ -388,7 +459,7 @@ def _load_payload(source: str) -> dict[str, object]:
         "totals",
         "steps",
     }
-    if set(payload) != expected or payload["version"] != _REPORT_VERSION:
+    if set(payload) != expected or payload["version"] not in {1, _REPORT_VERSION}:
         raise ValueError("unsupported token usage sidecar schema")
     if payload["status"] != "running" or payload["error_type"] is not None:
         raise ValueError("resumable token usage report must have running status")
@@ -410,7 +481,7 @@ def _require_identity(
         raise ValueError("token usage sidecar identity does not match the workflow run")
 
 
-def _parse_steps(value: object) -> tuple[StepTokenUsage, ...]:
+def _parse_steps(value: object, *, version: int) -> tuple[StepTokenUsage, ...]:
     if not isinstance(value, list):
         raise ValueError("token usage steps must be an array")
     records: list[StepTokenUsage] = []
@@ -420,7 +491,7 @@ def _parse_steps(value: object) -> tuple[StepTokenUsage, ...]:
         raw_attempts = raw_step.get("attempts")
         if not isinstance(raw_attempts, list):
             raise ValueError("token usage attempts must be an array")
-        attempts = tuple(_parse_attempt(item) for item in raw_attempts)
+        attempts = tuple(_parse_attempt(item, version=version) for item in raw_attempts)
         records.append(
             StepTokenUsage(
                 step_id=cast(str, raw_step.get("step_id")),
@@ -432,7 +503,7 @@ def _parse_steps(value: object) -> tuple[StepTokenUsage, ...]:
     return tuple(records)
 
 
-def _parse_attempt(value: object) -> AttemptTokenUsage:
+def _parse_attempt(value: object, *, version: int) -> AttemptTokenUsage:
     if not isinstance(value, dict):
         raise ValueError("token usage attempt must be an object")
     return AttemptTokenUsage(
@@ -442,5 +513,9 @@ def _parse_attempt(value: object) -> AttemptTokenUsage:
             model_calls=cast(int, value.get("model_calls")),
             input_tokens=cast(int | None, value.get("input_tokens")),
             output_tokens=cast(int | None, value.get("output_tokens")),
+            cached_input_tokens=(cast(int | None, value.get("cached_input_tokens")) if version >= 2 else None),
+            cache_creation_input_tokens=(
+                cast(int | None, value.get("cache_creation_input_tokens")) if version >= 2 else None
+            ),
         ),
     )

@@ -298,8 +298,13 @@ The report aggregates every model call by logical Step, dispatcher attempt, and
 `foreach` iteration across Human waits/resumes. Agent output-repair turns merge
 into the same dispatcher attempt. `complete` is false and token totals are JSON
 `null` whenever any contributing model call omitted provider usage; `model_calls`
-remains available. This sidecar is observability state only and never changes
-workflow Artifacts, checkpoints, or the public result mapping.
+remains available. Cache reads and cache creation are aggregated independently as
+`cached_input_tokens` and `cache_creation_input_tokens`; missing provider metrics
+remain `null` rather than becoming false zeroes. When both cache categories are
+known, the report also derives `uncached_input_tokens`; `cache_hit_rate` requires
+only a known input total and cache-read count. Version-1 running reports resume as
+version 2 with unknown cache details. This sidecar is observability state only and
+never changes workflow Artifacts, checkpoints, or the public result mapping.
 
 Persisted Human-run documents use the strict state-v3 schema, including the
 workflow/plan-bound checkpoint and per-iteration fields. State-v2 documents,

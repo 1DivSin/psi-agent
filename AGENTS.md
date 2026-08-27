@@ -193,10 +193,12 @@ SSE 流中的特殊字段：
    而内部协议把 0 choice 当心跳跳过。AI 层因此把最后一份有效 usage 规范化为单 choice 辅助帧：
    ```json
    {"choices": [{"delta": {}, "finish_reason": "usage"}],
-    "psi_usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T}}
+    "psi_usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T,
+                  "cached_input_tokens": C, "cache_creation_input_tokens": W}}
    ```
    `usage` 属于 `AUXILIARY_FINISH_REASONS`，不得覆盖真实终止原因。Session 在一次 Agent run
    内累加每轮模型请求；任一轮没有有效 usage 时，聚合 token 值保持未知，不能把已知部分当精确总量。
+   缓存读取与缓存创建分别聚合；provider 未报告的缓存字段必须保持 `null`，不能当作零命中。
 
 ### 协议归属
 
