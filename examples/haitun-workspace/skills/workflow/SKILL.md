@@ -70,6 +70,54 @@ The skill's job is to:
 4. If it reaches a Human Step, pass the nested `$fusion_flow/control.request` fields to the existing `clarify` tool, end the turn, and resume from the next user message.
 5. Return only the final workflow output Artifact mapping.
 
+## Artifact Contracts
+
+Artifacts may declare a top-level JSON type and a format/meaning description.
+The runner carries these contracts into every related Agent, Human, and Program
+Step. Agent output contracts also become the JSON Schema properties of
+`submit_step_result`; the runtime validates declared top-level types on workflow
+inputs, ordinary Step outputs, downstream Step inputs, and final outputs.
+
+Write each contract as a standalone directive line. A workflow comment makes
+the contract global:
+
+```fusionflow
+-- @artifact trip_request [object]: Required keys are origin, destination, start_date, days, and budget.
+/*
+ * @artifact itinerary [array]: One object per day, ordered by day; each object contains day, city, transportation, breakfast, attraction, lunch, dinner, and accommodation.
+ */
+```
+
+The supported types are `null`, `boolean`, `integer`, `number`, `string`,
+`object`, and `array`. The description is included in prompts and tool schemas;
+use it to state required fields, exact labels, ordering, empty-value semantics,
+units, and provenance rules.
+
+A contract can instead live in a Step instruction. This works both in an
+inline JSON-escaped newline and in a companion instruction Markdown file:
+
+```fusionflow
+step_instruction(search_step) == "Search only the supplied route and dates.\n@artifact flight_candidates [array]: Preserve every returned flight_number, price, departure_time, arrival_time, origin, and destination; [] means the tool returned no matches.";
+```
+
+An instruction may declare contracts only for Artifacts consumed or produced
+by that Step. Repeating the same contract is allowed; conflicting declarations,
+unknown Artifact IDs, and unrelated instruction declarations fail before Step
+dispatch. Ordinary instruction prose is still passed through unchanged, but
+only exact `@artifact` directive lines become structured runtime contracts.
+
+The built-in validator enforces the declared top-level JSON type. Nested field
+requirements remain prompt/schema descriptions; when they must be guaranteed
+mechanically, add a deterministic Program validation Step. For a `foreach`
+output, the declared contract describes the collected aggregate Artifact; each
+iteration submits one element, and the aggregate is validated downstream or at
+workflow output. A reserved `$fusion_flow/program_error` value from the actual
+Program producer remains deliverable even when its success-value type differs;
+Agent and Human outputs cannot use that envelope to bypass validation.
+For a single-output Program Step, a non-`string` contract changes stdout from
+verbatim text to one strict JSON value of the declared type; untyped and
+`string` outputs retain the existing verbatim-stdout behavior.
+
 ## Intent Routing
 
 Natural-language workflow requests map to these actions:
