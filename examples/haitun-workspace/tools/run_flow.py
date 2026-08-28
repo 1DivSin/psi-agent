@@ -22,11 +22,13 @@ from typing import Any, cast
 import anyio
 import anyio.lowlevel
 from anyio.abc import ByteReceiveStream, Process
+from json_repair import repair_json
 from loguru import logger
 
 from psi_agent.session.agent import SessionAgent, current_tool_ai_socket
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
+from psi_agent.session.protocol import AgentTokenUsage
 from psi_agent.session.schedule_registry import ScheduleRegistry
 from psi_agent.session.tool_registry import FileEntry, ToolFunction, ToolRegistry
 
@@ -59,6 +61,7 @@ from fusion_flow.job_store import (  # noqa: E402
     new_opaque_id,
 )
 from fusion_flow.step_timing import StepTimingReporter  # noqa: E402
+from fusion_flow.token_usage import TokenUsageReporter  # noqa: E402
 from fusion_flow.workflow_execution import (  # noqa: E402
     ExecutionCheckpoint,
     ExecutionPlanError,
@@ -84,12 +87,28 @@ _STEP_SYSTEM_PROMPT = (
 )
 _JSON_FENCE_OPEN = re.compile(r"[ \t]*(?P<fence>`{3,})json[ \t]*", re.IGNORECASE)
 _JSON_FENCE_CLOSE = re.compile(r"[ \t]*(?P<fence>`{3,})[ \t]*")
+_JSON_WHITESPACE = frozenset(" \t\r\n")
 _HUMAN_PREPARER_SYSTEM_PROMPT = (
     "You prepare exactly one assigned FusionFlow Human step for another person. "
     "Use the workspace-confined read tool only when useful to inspect an instruction reference. "
     "Do not change files, perform the task, ask the person directly, or start another workflow. "
     "Your final response must be exactly the requested JSON question contract."
 )
+_PROGRAM_RUNTIME_GUIDANCE = {
+    "nt": (
+        " This host is Windows. For a declared Python script, select runtime='python'; do not "
+        "select python3 unless workspace inspection has proved that exact executable works."
+    ),
+    "posix": (" This host is POSIX. For a declared Python script, prefer runtime='python3' when it is available."),
+}
+
+
+def _program_runtime_guidance(os_name: str) -> str:
+    """Return Program runtime guidance for one supported host family."""
+
+    return _PROGRAM_RUNTIME_GUIDANCE["nt" if os_name == "nt" else "posix"]
+
+
 _PROGRAM_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Program step. "
     "The user message contains one JSON execution contract; treat every field literally. "
@@ -111,7 +130,7 @@ _PROGRAM_SYSTEM_PROMPT = (
     "Adaptation is allowed only when the execution contract sets repair_authorized to true; even "
     "then, state a concrete adaptation reason and keep the declared input artifacts immutable. "
     "Never fabricate missing values or turn a process or format failure into success. After the "
-    "authoritative attempt, call submit_program_result exactly once and by itself."
+    "authoritative attempt, call submit_program_result exactly once and by itself." + _program_runtime_guidance(os.name)
 )
 _STEP_TOOL_SESSION_ID = f"{__name__}_step"
 _STEP_TOOLS_LOAD_LOCK = anyio.Lock()
@@ -434,9 +453,11 @@ class _AgentSessionAdapter:
         *,
         ai_socket: str,
         get_tool_registry: Callable[[], Awaitable[ToolRegistry]],
+        token_usage_reporter: TokenUsageReporter,
     ) -> None:
         self._ai_socket = ai_socket
         self._get_tool_registry = get_tool_registry
+        self._token_usage_reporter = token_usage_reporter
         self._handles: dict[str, AgentHandle] = {}
 
     def _handle(self, context: CompletionContext) -> AgentHandle:
@@ -528,6 +549,30 @@ class _AgentSessionAdapter:
         if invocation.context is None or set(invocation.context) != {_AGENT_SESSION_CONTEXT_KEY}:
             raise ExecutionPlanError("G4 Agent SessionRunner received an invalid invocation context")
         _reject_unsupported_agent_routing(config)
+        input_tokens = 0
+        output_tokens = 0
+        usage_complete = True
+
+        def record_usage(usage: AgentTokenUsage) -> None:
+            nonlocal input_tokens, output_tokens, usage_complete
+            if usage.complete:
+                input_tokens += cast(int, usage.input_tokens)
+                output_tokens += cast(int, usage.output_tokens)
+            else:
+                usage_complete = False
+            self._token_usage_reporter.record(
+                step_id=context.step_id,
+                executor_id=context.executor_id,
+                executor_kind="Agent",
+                attempt=context.dispatch.attempt,
+                iteration_index=context.dispatch.iteration_index,
+                model_calls=usage.model_calls,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            )
+
         config_token = _CURRENT_AGENT_CONFIG.set(config)
         try:
             outputs = await _complete_agent_step(
@@ -535,6 +580,7 @@ class _AgentSessionAdapter:
                 context,
                 ai_socket=self._ai_socket,
                 tool_registry=tool_registry,
+                record_usage=record_usage,
             )
         finally:
             _CURRENT_AGENT_CONFIG.reset(config_token)
@@ -557,7 +603,9 @@ class _AgentSessionAdapter:
                 sort_keys=True,
                 separators=(",", ":"),
                 allow_nan=False,
-            )
+            ),
+            input_tokens=input_tokens if usage_complete else None,
+            output_tokens=output_tokens if usage_complete else None,
         )
 
 
@@ -661,6 +709,63 @@ def _extract_single_json_fence(value: str) -> str | None:
     return None
 
 
+def _remove_trailing_json_commas(value: str) -> tuple[str, int]:
+    """Remove unambiguous JSON trailing commas in one string-aware pass."""
+
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    previous_significant: str | None = None
+    repair_count = 0
+
+    for index, character in enumerate(value):
+        if in_string:
+            repaired.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+
+        if character == '"':
+            in_string = True
+            previous_significant = character
+            repaired.append(character)
+            continue
+
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(value) and value[lookahead] in _JSON_WHITESPACE:
+                lookahead += 1
+            if (
+                lookahead < len(value)
+                and value[lookahead] in "}]"
+                and previous_significant not in {"{", "[", ",", ":", None}
+            ):
+                repair_count += 1
+                continue
+
+        repaired.append(character)
+        if character not in _JSON_WHITESPACE:
+            previous_significant = character
+
+    return "".join(repaired), repair_count
+
+
+def _canonical_json_value(value: object) -> str:
+    """Return a type-preserving canonical form of one parsed JSON value."""
+
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
 def _parse_agent_step_result(
     value: str,
     *,
@@ -688,6 +793,55 @@ def _parse_agent_step_result(
             f"outputs for {step_id!r} must match exactly: expected {sorted(expected)}, got {sorted(actual)}"
         )
     return result
+
+
+def _parse_agent_step_result_with_json_repair(
+    value: str,
+    *,
+    step_id: str,
+    output_ids: tuple[str, ...],
+) -> tuple[dict[str, object], int, str]:
+    """Use json-repair, accepting only the trailing-comma-safe equivalent."""
+
+    fenced = _extract_single_json_fence(value)
+    candidate = value if fenced is None else fenced
+    response_form = "raw" if fenced is None else "json_fence"
+    trailing_comma_repaired, repair_count = _remove_trailing_json_commas(candidate)
+    if repair_count == 0:
+        raise _AgentStepResultParseError(f"response for step {step_id!r} has no repairable trailing comma")
+
+    expected = _parse_agent_step_result(
+        trailing_comma_repaired,
+        step_id=step_id,
+        output_ids=output_ids,
+    )
+
+    try:
+        repaired = repair_json(
+            candidate,
+            return_objects=False,
+            skip_json_loads=True,
+            logging=False,
+            stream_stable=False,
+            strict=True,
+            ensure_ascii=False,
+        )
+    except Exception as error:
+        raise _AgentStepResultParseError(f"json-repair failed for step {step_id!r}") from error
+    if not isinstance(repaired, str):
+        raise _AgentStepResultParseError(f"json-repair returned a non-string result for step {step_id!r}")
+
+    try:
+        result = _parse_agent_step_result(
+            repaired,
+            step_id=step_id,
+            output_ids=output_ids,
+        )
+    except ValueError as error:
+        raise _AgentStepResultParseError(f"json-repair returned invalid strict JSON for step {step_id!r}") from error
+    if _canonical_json_value(result) != _canonical_json_value(expected):
+        raise _AgentStepResultParseError(f"json-repair changed more than trailing commas for step {step_id!r}")
+    return result, repair_count, response_form
 
 
 def _parse_resource_capacities(value: str) -> Mapping[str, ResourceCapacity] | None:
@@ -1560,6 +1714,7 @@ async def _complete_program_step(
     *,
     ai_socket: str,
     tool_registry: ToolRegistry,
+    record_usage: Callable[[AgentTokenUsage], None] | None = None,
 ) -> dict[str, object]:
     """Run one Program through a narrow Agent and a deterministic process tool."""
 
@@ -1902,6 +2057,7 @@ async def _complete_program_step(
         conversation,
         "Execute this exact Program contract:\n" + encoded_contract,
         stop_when=lambda: submitted is not None,
+        record_usage=record_usage,
     )
     if submitted is not None:
         return submitted
@@ -2026,14 +2182,19 @@ async def _complete_step_agent(
     *,
     stop_when: Callable[[], bool] | None = None,
     extra_params: Mapping[str, object] | None = None,
+    record_usage: Callable[[AgentTokenUsage], None] | None = None,
 ) -> str:
     run_params = None if extra_params is None else dict(extra_params)
     user_message = {"role": "user", "content": message}
     run = agent.run_streamed(user_message, run_params)
-    async with aclosing(run) as chunks:
-        async for _ in chunks:
-            if stop_when is not None and stop_when():
-                return ""
+    try:
+        async with aclosing(run) as chunks:
+            async for _ in chunks:
+                if stop_when is not None and stop_when():
+                    return ""
+    finally:
+        if record_usage is not None:
+            record_usage(run.token_usage)
 
     result = run.result
     if result is None:
@@ -2060,6 +2221,7 @@ async def _complete_agent_step(
     *,
     ai_socket: str,
     tool_registry: ToolRegistry,
+    record_usage: Callable[[AgentTokenUsage], None] | None = None,
 ) -> dict[str, object]:
     workspace = _workspace_dir()
     agent_config = _CURRENT_AGENT_CONFIG.get()
@@ -2159,12 +2321,14 @@ async def _complete_agent_step(
 
     for attempt in range(3):
         submission_error = None
+        repair_response: str | None = None
         response = await _complete_step_agent(
             agent,
             conversation,
             message,
             stop_when=stop_after_submission,
             extra_params=extra_params,
+            record_usage=record_usage,
         )
         if submission_error is not None:
             submitted = None
@@ -2180,9 +2344,33 @@ async def _complete_agent_step(
                 )
             except _AgentStepResultParseError as error:
                 validation_error = error
+                repair_response = response
             except ValueError as error:
                 validation_error = error
         if attempt == 2:
+            if repair_response is not None:
+                try:
+                    repaired, repair_count, response_form = _parse_agent_step_result_with_json_repair(
+                        repair_response,
+                        step_id=context.step_id,
+                        output_ids=context.output_ids,
+                    )
+                except ValueError:
+                    pass
+                else:
+                    logger.bind(
+                        event="fusion_flow.agent_step_json_repaired",
+                        step_id=context.step_id,
+                        executor_id=context.executor_id,
+                        invocation_id=context.dispatch.invocation_id or context.step_id,
+                        iteration_index=context.dispatch.iteration_index,
+                        workflow_attempt=context.dispatch.attempt,
+                        response_attempt=attempt + 1,
+                        repair_kind="json_repair_trailing_comma",
+                        repair_count=repair_count,
+                        response_form=response_form,
+                    ).warning("FusionFlow Agent Step accepted safe trailing-comma output from json-repair")
+                    return repaired
             raise ValueError(f"step {context.step_id!r} result remained invalid after 3 attempts") from validation_error
         message = (
             f"Your previous step result was invalid: {validation_error}\n"
@@ -2199,6 +2387,7 @@ async def _prepare_human_step(
     *,
     ai_socket: str,
     tool_registry: ToolRegistry,
+    record_usage: Callable[[AgentTokenUsage], None] | None = None,
 ) -> str:
     agent, conversation = await _create_step_agent(
         ai_socket,
@@ -2219,7 +2408,12 @@ async def _prepare_human_step(
         "options may contain at most four strings; recommended is a 1-based option index or 0; "
         "default is only for open-ended input. Do not add Markdown or prose."
     )
-    response = await _complete_step_agent(agent, conversation, message)
+    response = await _complete_step_agent(
+        agent,
+        conversation,
+        message,
+        record_usage=record_usage,
+    )
     return _prepared_question_json(_parse_prepared_human_question(response))
 
 
@@ -2284,6 +2478,12 @@ async def _execute_persisted_run(
         workflow_id=run.checkpoint.workflow_id,
         flow_path=run.flow_path,
     )
+    token_usage_reporter = await TokenUsageReporter.open(
+        artifact_store.run_dir,
+        run_id=run.run_id,
+        workflow_id=run.checkpoint.workflow_id,
+        flow_path=run.flow_path,
+    )
     await artifact_store.persist(run.checkpoint.values)
     step_tools: ToolRegistry | None = None
     human_tools: ToolRegistry | None = None
@@ -2308,13 +2508,29 @@ async def _execute_persisted_run(
     agent_sessions = _AgentSessionAdapter(
         ai_socket=ai_socket,
         get_tool_registry=get_step_tools,
+        token_usage_reporter=token_usage_reporter,
     )
 
     async def complete_program(invocation: ProgramInvocation) -> dict[str, object]:
+        def record_usage(usage: AgentTokenUsage) -> None:
+            token_usage_reporter.record(
+                step_id=invocation.binding_name,
+                executor_id=invocation.name,
+                executor_kind="Program",
+                attempt=invocation.dispatch.attempt,
+                iteration_index=invocation.dispatch.iteration_index,
+                model_calls=usage.model_calls,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            )
+
         return await _complete_program_step(
             invocation,
             ai_socket=ai_socket,
             tool_registry=await get_step_tools(),
+            record_usage=record_usage,
         )
 
     async def prepare_human(prompt: str, context: CompletionContext) -> str:
@@ -2326,11 +2542,27 @@ async def _execute_persisted_run(
                 owns_human_gate = False
                 await anyio.sleep_forever()
                 raise AssertionError("sleep_forever returned unexpectedly")
+
+            def record_usage(usage: AgentTokenUsage) -> None:
+                token_usage_reporter.record(
+                    step_id=context.step_id,
+                    executor_id=context.executor_id,
+                    executor_kind="Human",
+                    attempt=context.dispatch.attempt,
+                    iteration_index=context.dispatch.iteration_index,
+                    model_calls=usage.model_calls,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cached_input_tokens=usage.cached_input_tokens,
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                )
+
             return await _prepare_human_step(
                 prompt,
                 context,
                 ai_socket=ai_socket,
                 tool_registry=await get_human_tools(),
+                record_usage=record_usage,
             )
         except BaseException:
             if owns_human_gate:
@@ -2365,6 +2597,7 @@ async def _execute_persisted_run(
             await lease.save(updated)
             run_state = updated
             await timing_reporter.persist()
+            await token_usage_reporter.persist()
 
     human_requests: list[HumanRequestSpec] = []
     outputs: dict[str, object] | None = None
@@ -2411,8 +2644,13 @@ async def _execute_persisted_run(
                 await lease.save(recoverable)
                 if _is_cancellation(error):
                     await timing_reporter.persist()
+                    await token_usage_reporter.persist()
                 else:
                     await timing_reporter.finalize(
+                        status="failed",
+                        error_type=type(error).__name__,
+                    )
+                    await token_usage_reporter.finalize(
                         status="failed",
                         error_type=type(error).__name__,
                     )
@@ -2433,6 +2671,7 @@ async def _execute_persisted_run(
         with anyio.CancelScope(shield=True):
             await lease.save(waiting)
             await timing_reporter.persist()
+            await token_usage_reporter.persist()
         return _human_request_payload(waiting.run_id, request)
 
     if outputs is None:
@@ -2446,6 +2685,10 @@ async def _execute_persisted_run(
     with anyio.CancelScope(shield=True):
         await lease.save(completed)
         await timing_reporter.finalize(
+            status="completed",
+            error_type=None,
+        )
+        await token_usage_reporter.finalize(
             status="completed",
             error_type=None,
         )
@@ -2516,10 +2759,25 @@ async def run_flow(
         return step_tools
 
     async def complete_program(invocation: ProgramInvocation) -> dict[str, object]:
+        def record_usage(usage: AgentTokenUsage) -> None:
+            token_usage_reporter.record(
+                step_id=invocation.binding_name,
+                executor_id=invocation.name,
+                executor_kind="Program",
+                attempt=invocation.dispatch.attempt,
+                iteration_index=invocation.dispatch.iteration_index,
+                model_calls=usage.model_calls,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            )
+
         return await _complete_program_step(
             invocation,
             ai_socket=ai_socket,
             tool_registry=await get_step_tools(),
+            record_usage=record_usage,
         )
 
     artifact_store = await _new_artifact_store(flow_path)
@@ -2529,15 +2787,23 @@ async def run_flow(
         workflow_id=compiled.graph.workflow_id,
         flow_path=flow_path,
     )
+    token_usage_reporter = await TokenUsageReporter.open(
+        artifact_store.run_dir,
+        run_id=artifact_store.run_dir.name,
+        workflow_id=compiled.graph.workflow_id,
+        flow_path=flow_path,
+    )
     await artifact_store.persist(initial_checkpoint.values)
     agent_sessions = _AgentSessionAdapter(
         ai_socket=ai_socket,
         get_tool_registry=get_step_tools,
+        token_usage_reporter=token_usage_reporter,
     )
 
     async def observe_checkpoint(checkpoint: ExecutionCheckpoint) -> None:
         await artifact_store.persist(checkpoint.values)
         await timing_reporter.persist()
+        await token_usage_reporter.persist()
 
     try:
         outputs = await _run_with_agent_sessions(
@@ -2563,9 +2829,17 @@ async def run_flow(
                 status="cancelled" if _is_cancellation(error) else "failed",
                 error_type=type(error).__name__,
             )
+            await token_usage_reporter.finalize(
+                status="cancelled" if _is_cancellation(error) else "failed",
+                error_type=type(error).__name__,
+            )
         raise
     with anyio.CancelScope(shield=True):
         await timing_reporter.finalize(
+            status="completed",
+            error_type=None,
+        )
+        await token_usage_reporter.finalize(
             status="completed",
             error_type=None,
         )
@@ -2644,7 +2918,19 @@ async def run_flow_resume(
                             workflow_id=run.checkpoint.workflow_id,
                             flow_path=run.flow_path,
                         )
+                        token_usage_reporter = await TokenUsageReporter.open(
+                            artifact_store.run_dir,
+                            run_id=run.run_id,
+                            workflow_id=run.checkpoint.workflow_id,
+                            flow_path=run.flow_path,
+                        )
                         await timing_reporter.finalize(
+                            status="failed",
+                            error_type=(
+                                type(definition_error).__name__ if definition_error is not None else "ValueError"
+                            ),
+                        )
+                        await token_usage_reporter.finalize(
                             status="failed",
                             error_type=(
                                 type(definition_error).__name__ if definition_error is not None else "ValueError"

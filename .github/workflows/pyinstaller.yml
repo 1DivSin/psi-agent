@@ -4,7 +4,7 @@ name: PyInstaller
 #   1. 跨平台可编译性的兜底 —— 三平台全编, 编不过这里先红 (nuitka.yml 只在发版
 #      时才编, 不承担这个职责);
 #   2. OSS 发版通道的上游 —— `haitun-inno-setup` 产出的
-#      `haitun-agent-installer-pyinstaller` 由 oss-publish.yml 消费。
+#      `haitun-agent-installers` 由 oss-publish.yml 消费。
 #
 # 触发面保持宽口径 (任何分支的任何推送 + PR): 兜底职责要求编得越勤越好, 收窄
 # 会让特性分支上的编译问题拖到开 PR 才暴露。
@@ -48,6 +48,7 @@ jobs:
         --collect-submodules hikari
         --collect-submodules matplotlib
         --collect-submodules antlr4
+        --collect-submodules json_repair
         --collect-submodules keyring
     steps:
       - uses: actions/checkout@v7
@@ -55,6 +56,10 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync
+      # 协议 HTML 是 spa-v2/legal/ 下两份 md 的生成物, 入库以免 build 与 installer 两个 job 都要跑生成器。
+      # 这一步防的是「改了 md 忘了重新生成」—— 那会让安装器与产品内展示过时协议。
+      - name: Check legal HTML is in sync with docs
+        run: uv run python scripts/gen_legal_html.py --check
       - run: uv pip install pyinstaller "mcp[cli,rich,ws]" "any-llm-sdk[all]"
       - uses: actions/setup-node@v7
         with:
@@ -113,18 +118,49 @@ jobs:
         env:
           HAITUN_DOWNLOAD_BASE_URL: ${{ vars.HAITUN_DOWNLOAD_BASE_URL }}
           HAITUN_UPDATE_INTERVAL_HOURS: ${{ vars.HAITUN_UPDATE_INTERVAL_HOURS }}
-          HAITUN_UPDATE_INSTALLER_NAME: ${{ vars.HAITUN_UPDATE_INSTALLER_NAME }}
         run: |
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=amd64"
           & ".github\inno-setup\build-haitun-launcher.ps1"
+      - name: Inject runtime .env
+        shell: pwsh
+        env:
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+        run: |
+          # 只把 key 写进打包目录，不落库；PR 分支没有 secret 时生成空 .env，打包照常成功。
+          $path = "examples\haitun-workspace\.env"
+          $lines = [System.Collections.Generic.List[string]]::new()
+          if ($env:SERPER_API_KEY) {
+            $lines.Add("SERPER_API_KEY=$env:SERPER_API_KEY")
+          }
+          [System.IO.File]::WriteAllText($path, ($lines -join "`r`n"), [System.Text.UTF8Encoding]::new($false))
+          Write-Output "runtime .env prepared (SERPER_API_KEY present: $([bool]$env:SERPER_API_KEY))"
       - shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile ".github\inno-setup\ChineseSimplified.isl"
-      - shell: pwsh
-        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp /O"installer-output" ".github\inno-setup\haitun.iss"'
+      - name: Compute MSYS fingerprint
+        shell: pwsh
+        run: |
+          $fp = & ".github\inno-setup\compute-msys-fingerprint.ps1" -MsysDir "examples\haitun-workspace\msys64"
+          Set-Content -LiteralPath "examples\haitun-workspace\msys64\msys-version.txt" -Value $fp -Encoding UTF8 -NoNewline
+          Write-Output "MSYS_FINGERPRINT=$fp" >> $env:GITHUB_ENV
+      - name: Build installers
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc /Qp /DMSYS_FINGERPRINT="$env:MSYS_FINGERPRINT" /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $iscc /Qp /DCOMPONENT_APP /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $iscc /Qp /DCOMPONENT_MSYS /DMSYS_FINGERPRINT="$env:MSYS_FINGERPRINT" /O"installer-output" ".github\inno-setup\haitun.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Collect version files
+        shell: pwsh
+        run: |
+          Copy-Item -Force "examples\haitun-workspace\haitun-version.txt" "installer-output\"
+          Copy-Item -Force "examples\haitun-workspace\msys64\msys-version.txt" "installer-output\"
       - uses: actions/upload-artifact@v7
         with:
-          name: haitun-agent-installer-pyinstaller
-          path: installer-output/HaiTun Agent Setup.exe
+          name: haitun-agent-installers
+          path: installer-output

@@ -28,25 +28,20 @@ if ([string]::IsNullOrWhiteSpace($intervalHours) -or
     $intervalHours = '24'
 }
 
-$installerName = [Environment]::GetEnvironmentVariable('HAITUN_UPDATE_INSTALLER_NAME')
-if ([string]::IsNullOrWhiteSpace($installerName)) {
-    $installerName = 'HaiTun_Agent_Setup.exe'
-}
-
 if (-not (Test-Path $WorkspaceDir)) {
     New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
 }
 
 $confPath = Join-Path $WorkspaceDir 'haitun-update.conf'
+$versionPath = Join-Path $WorkspaceDir 'haitun-version.txt'
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllLines($confPath, @(
-    "HAITUN_VERSION=$version",
     "HAITUN_UPDATE_BASE_URL=$baseUrl",
-    "HAITUN_UPDATE_INTERVAL_HOURS=$intervalHours",
-    "HAITUN_UPDATE_INSTALLER_NAME=$installerName"
+    "HAITUN_UPDATE_INTERVAL_HOURS=$intervalHours"
 ), $utf8NoBom)
+[System.IO.File]::WriteAllText($versionPath, $version + "`r`n", $utf8NoBom)
 
-Write-Host "Wrote $confPath (version=$version)"
+Write-Host "Wrote $confPath and $versionPath (version=$version)"
 
 Push-Location $InnoSetupDir
 try {

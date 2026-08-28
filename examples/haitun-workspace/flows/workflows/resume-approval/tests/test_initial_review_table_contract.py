@@ -159,9 +159,5 @@ def test_talent_agent_receives_staged_files_and_cleanup_waits_for_persistence() 
     assert workflow.index("step_name(stage_initial_review_step)") < workflow.index(
         "step_name(cleanup_temporary_files_step)"
     )
-    assert (
-        "depends_on(cleanup_temporary_files_step, assert_initial_review_handoff_ready_step) == True;" in workflow
-    )
-    assert (
-        "depends_on(cleanup_temporary_files_step, assert_repair_merge_round_2_program_ready_step)" not in workflow
-    )
+    assert "depends_on(cleanup_temporary_files_step, assert_initial_review_handoff_ready_step) == True;" in workflow
+    assert "depends_on(cleanup_temporary_files_step, assert_repair_merge_round_2_program_ready_step)" not in workflow

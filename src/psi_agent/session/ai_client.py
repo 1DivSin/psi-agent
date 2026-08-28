@@ -15,7 +15,10 @@ from loguru import logger
 from psi_agent._sockets import resolve_connector_and_endpoint
 from psi_agent.protocol import (
     FINISH_REASON_ERROR,
+    FINISH_REASON_TOOL_CALLS,
+    FINISH_REASON_USAGE,
     SSE_DONE,
+    is_auxiliary_finish,
     parse_sse_data,
 )
 from psi_agent.session.protocol import AiDelta
@@ -40,13 +43,45 @@ class AiClient:
         if isinstance(value, bool):
             return 0
         if isinstance(value, int):
-            return value
+            return value if value >= 0 else 0
         if isinstance(value, str):
             try:
                 return int(value)
             except ValueError:
                 return 0
         return 0
+
+    @staticmethod
+    def _as_token_count(value: object) -> int | None:
+        """Validate one usage count without turning unknown values into zero."""
+
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+    @classmethod
+    def _usage_counts(
+        cls,
+        usage_signal: dict[str, object],
+    ) -> tuple[int | None, int | None, int | None, int | None]:
+        input_tokens = cls._as_token_count(usage_signal.get("prompt_tokens"))
+        output_tokens = cls._as_token_count(usage_signal.get("completion_tokens"))
+        cached_input_tokens = cls._as_token_count(usage_signal.get("cached_input_tokens"))
+        cache_creation_input_tokens = cls._as_token_count(usage_signal.get("cache_creation_input_tokens"))
+        if input_tokens is None:
+            return input_tokens, output_tokens, None, None
+        if cached_input_tokens is not None and cached_input_tokens > input_tokens:
+            cached_input_tokens = None
+        if cache_creation_input_tokens is not None and cache_creation_input_tokens > input_tokens:
+            cache_creation_input_tokens = None
+        if (
+            cached_input_tokens is not None
+            and cache_creation_input_tokens is not None
+            and cached_input_tokens + cache_creation_input_tokens > input_tokens
+        ):
+            cached_input_tokens = None
+            cache_creation_input_tokens = None
+        return input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens
 
     async def stream(self, request_body: dict) -> AsyncGenerator[AiDelta]:
         started = time.perf_counter()
@@ -58,6 +93,7 @@ class AiClient:
         tools = request_body.get("tools")
         message_count = len(messages) if isinstance(messages, list) else 0
         tool_count = len(tools) if isinstance(tools, list) else 0
+        pending_tool_terminal: AiDelta | None = None
         try:
             connector, endpoint = self._build_connector_and_endpoint()
             async with (
@@ -130,15 +166,18 @@ class AiClient:
                         delta_data = {}
                     compaction_signal = data.get("psi_compaction", {})
                     compaction_needed = isinstance(compaction_signal, dict) and compaction_signal.get("needed", False)
-                    candidate_finish_reason = c.get("finish_reason")
-                    if finish_reason is None and isinstance(candidate_finish_reason, str):
-                        finish_reason = candidate_finish_reason
-                    yield AiDelta(
+                    usage_signal = data.get("psi_usage", {})
+                    has_usage = isinstance(usage_signal, dict) and c.get("finish_reason") == FINISH_REASON_USAGE
+                    usage_counts = self._usage_counts(usage_signal) if has_usage else (None, None, None, None)
+                    current_finish = c.get("finish_reason")
+                    if finish_reason is None and isinstance(current_finish, str):
+                        finish_reason = current_finish
+                    parsed_delta = AiDelta(
                         content=delta_data.get("content"),
                         reasoning=delta_data.get("reasoning"),
                         kind=delta_data.get("kind") if isinstance(delta_data.get("kind"), str) else None,
                         tool_calls=delta_data.get("tool_calls"),
-                        finish_reason=candidate_finish_reason,
+                        finish_reason=current_finish,
                         compaction_needed=compaction_needed,
                         prompt_tokens=self._as_int(compaction_signal.get("prompt_tokens"))
                         if isinstance(compaction_signal, dict)
@@ -146,7 +185,26 @@ class AiClient:
                         compaction_threshold=self._as_int(compaction_signal.get("threshold"))
                         if isinstance(compaction_signal, dict)
                         else 0,
+                        input_tokens=usage_counts[0],
+                        output_tokens=usage_counts[1],
+                        cached_input_tokens=usage_counts[2],
+                        cache_creation_input_tokens=usage_counts[3],
                     )
+                    if pending_tool_terminal is not None and not is_auxiliary_finish(current_finish):
+                        # Trailing auxiliary signals belong to the completed model
+                        # call. Preserve the historical terminal boundary if a
+                        # normal business frame follows instead.
+                        yield pending_tool_terminal
+                        return
+                    if current_finish == FINISH_REASON_TOOL_CALLS:
+                        if pending_tool_terminal is None:
+                            pending_tool_terminal = parsed_delta
+                        else:
+                            logger.warning("Ignoring duplicate tool_calls terminal finish in SSE stream")
+                        continue
+                    yield parsed_delta
+                if pending_tool_terminal is not None:
+                    yield pending_tool_terminal
                 logger.debug("SSE stream consumed successfully")
         finally:
             logger.bind(

@@ -27,10 +27,16 @@ static int   g_env_len;
 #endif
 #define HAITUN_UPDATE_INTERVAL_MS \
     ((DWORD)((HAITUN_UPDATE_INTERVAL_HOURS) * 60ULL * 60ULL * 1000ULL))
+#define UPDATE_MIN_FREE_BYTES (3ULL * 1024ULL * 1024ULL * 1024ULL)
 
-static WCHAR g_local_version[64];
-static WCHAR g_version_url[MAX_UPDATE_URL];
-static WCHAR g_installer_url[MAX_UPDATE_URL];
+static WCHAR g_local_haitun_version[UPDATE_VERSION_BUF];
+static WCHAR g_local_msys_version[UPDATE_VERSION_BUF];
+static WCHAR g_update_base_url[MAX_UPDATE_URL];
+static WCHAR g_haitun_version_url[MAX_UPDATE_URL];
+static WCHAR g_msys_version_url[MAX_UPDATE_URL];
+static WCHAR g_full_installer_url[MAX_UPDATE_URL];
+static WCHAR g_app_installer_url[MAX_UPDATE_URL];
+static WCHAR g_msys_installer_url[MAX_UPDATE_URL];
 static DWORD g_update_interval_ms = HAITUN_UPDATE_INTERVAL_MS;
 
 /* ---- helpers ---- */
@@ -162,6 +168,41 @@ static void load_env_file(const WCHAR *path)
     HeapFree(GetProcessHeap(), 0, buf);
 }
 
+static void trim_whitespace(WCHAR *s);
+
+static int read_local_text_file(const WCHAR *path, WCHAR *out, int out_cch)
+{
+    HANDLE h;
+    DWORD size = 0;
+    DWORD read = 0;
+    char raw[4097];
+
+    out[0] = L'\0';
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    size = GetFileSize(h, NULL);
+    if (size == INVALID_FILE_SIZE || size == 0 || size >= sizeof(raw)) {
+        CloseHandle(h);
+        return 0;
+    }
+    if (!ReadFile(h, raw, size, &read, NULL) || read == 0) {
+        CloseHandle(h);
+        return 0;
+    }
+    CloseHandle(h);
+    raw[read] = '\0';
+    {
+        int n = MultiByteToWideChar(CP_UTF8, 0, raw, (int)read, out, out_cch - 1);
+        if (n <= 0)
+            return 0;
+        out[n] = L'\0';
+    }
+    trim_whitespace(out);
+    return 1;
+}
+
 /* ---- update check ---- */
 
 static void trim_whitespace(WCHAR *s)
@@ -258,17 +299,16 @@ static int starts_with_https(const WCHAR *s)
 
 static void configure_updater(void)
 {
-    const WCHAR *v = get_env_value(L"HAITUN_VERSION");
     const WCHAR *base = get_env_value(L"HAITUN_UPDATE_BASE_URL");
     const WCHAR *interval = get_env_value(L"HAITUN_UPDATE_INTERVAL_HOURS");
-    const WCHAR *installer = get_env_value(L"HAITUN_UPDATE_INSTALLER_NAME");
 
-    g_local_version[0] = L'\0';
-    g_version_url[0] = L'\0';
-    g_installer_url[0] = L'\0';
+    g_update_base_url[0] = L'\0';
+    g_haitun_version_url[0] = L'\0';
+    g_msys_version_url[0] = L'\0';
+    g_full_installer_url[0] = L'\0';
+    g_app_installer_url[0] = L'\0';
+    g_msys_installer_url[0] = L'\0';
 
-    if (v && v[0])
-        lstrcpynW(g_local_version, v, 64);
     if (interval && interval[0]) {
         int hours = 0;
         const WCHAR *p;
@@ -278,14 +318,54 @@ static void configure_updater(void)
             g_update_interval_ms = (DWORD)((DWORD)hours * 60u * 60u * 1000u);
     }
     if (base && base[0] && starts_with_https(base)) {
-        const WCHAR *installer_name =
-            (installer && installer[0]) ? installer : L"HaiTun_Agent_Setup.exe";
-        join_url(g_version_url, MAX_UPDATE_URL, base, L"version.txt");
-        join_url(g_installer_url, MAX_UPDATE_URL, base, installer_name);
+        lstrcpynW(g_update_base_url, base, MAX_UPDATE_URL);
+        join_url(g_haitun_version_url, MAX_UPDATE_URL, base, L"haitun-version.txt");
+        join_url(g_msys_version_url, MAX_UPDATE_URL, base, L"msys-version.txt");
+        join_url(g_full_installer_url, MAX_UPDATE_URL, base, L"HaiTun_Agent_Setup.exe");
+        join_url(g_app_installer_url, MAX_UPDATE_URL, base, L"HaiTun_Agent_App_Setup.exe");
+        join_url(g_msys_installer_url, MAX_UPDATE_URL, base, L"msys-setup.exe");
     }
 }
 
-static void launch_installer_file(const WCHAR *path)
+static void load_local_versions(void)
+{
+    WCHAR path[MAX_PATH + 64];
+
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\haitun-version.txt");
+    read_local_text_file(path, g_local_haitun_version, UPDATE_VERSION_BUF);
+
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\..\\msys64\\msys-version.txt");
+    read_local_text_file(path, g_local_msys_version, UPDATE_VERSION_BUF);
+}
+
+static int update_disk_space_ok(void)
+{
+    ULARGE_INTEGER free_bytes;
+    WCHAR root[4];
+
+    if (lstrlenW(g_dir) < 3)
+        return 1;
+    lstrcpynW(root, g_dir, 4);
+    if (!GetDiskFreeSpaceExW(root, &free_bytes, NULL, NULL))
+        return 1;
+    return free_bytes.QuadPart >= UPDATE_MIN_FREE_BYTES;
+}
+
+static int update_pending(void)
+{
+    WCHAR path[MAX_PATH + 64];
+    WCHAR text[4096];
+
+    lstrcpyW(path, g_dir);
+    lstrcatW(path, L"\\..\\rollback-state.json");
+    if (!read_local_text_file(path, text, 4096))
+        return 0;
+    return wcsstr(text, L"\"status\": \"pending\"") != NULL;
+}
+
+static void launch_installer_file(const WCHAR *path, const WCHAR *fallback_url)
 {
     WCHAR cmd[1024];
     STARTUPINFOW si = {sizeof(si)};
@@ -301,7 +381,7 @@ static void launch_installer_file(const WCHAR *path)
         if (pi.hProcess) CloseHandle(pi.hProcess);
         return;
     }
-    ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
+    ShellExecuteW(NULL, L"open", fallback_url, NULL, NULL, SW_SHOWNORMAL);
 }
 
 /* ---- download progress window ---- */
@@ -350,7 +430,7 @@ static DWORD WINAPI progress_window_thread(LPVOID unused)
     if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
         return 0;
 
-    hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
+    hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME,
                            L"HaiTunDownloadProgress", L"正在更新",
                            WS_POPUP | WS_CAPTION,
                            CW_USEDEFAULT, CW_USEDEFAULT, 360, 100,
@@ -405,43 +485,78 @@ static void hide_download_progress(HWND hwnd)
 static DWORD WINAPI update_check_thread(LPVOID unused)
 {
     (void)unused;
-    if (!g_local_version[0] || !g_version_url[0] || !g_installer_url[0])
+    if (!g_update_base_url[0])
         return 0;
 
     for (;;) {
-        WCHAR latest[UPDATE_VERSION_BUF];
-        latest[0] = L'\0';
-        if (fetch_remote_text(g_version_url, latest, UPDATE_VERSION_BUF) &&
-            latest[0] && lstrcmpW(latest, g_local_version) != 0) {
-            WCHAR msg[512];
-            wsprintfW(msg,
-                      L"HaiTun Agent 发现新版本 %s，当前版本为 %s。\n\n"
-                      L"是否现在下载并更新？",
-                      latest, g_local_version);
-            if (MessageBoxW(NULL, msg, L"发现新版本",
-                            MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES) {
+        WCHAR remote_haitun[UPDATE_VERSION_BUF];
+        WCHAR remote_msys[UPDATE_VERSION_BUF];
+        int got_haitun, got_msys, app_diff, msys_diff;
+
+        remote_haitun[0] = L'\0';
+        remote_msys[0] = L'\0';
+        got_haitun = fetch_remote_text(g_haitun_version_url, remote_haitun,
+                                       UPDATE_VERSION_BUF);
+        got_msys = fetch_remote_text(g_msys_version_url, remote_msys,
+                                     UPDATE_VERSION_BUF);
+
+        if (got_haitun && got_msys && !update_pending()) {
+            app_diff = lstrcmpW(remote_haitun, g_local_haitun_version) != 0;
+            msys_diff = lstrcmpW(remote_msys, g_local_msys_version) != 0;
+            if (app_diff || msys_diff) {
+                WCHAR msg[512];
                 WCHAR temp_dir[MAX_PATH];
                 WCHAR temp_path[MAX_PATH];
+                const WCHAR *kind;
+                const WCHAR *installer_url;
+                const WCHAR *temp_name;
                 HRESULT hr;
                 HWND progress;
-                if (GetTempPathW(MAX_PATH, temp_dir) && temp_dir[0]) {
-                    wsprintfW(temp_path, L"%sHaiTun-Agent-Setup-%s.exe", temp_dir, latest);
-                    progress = show_download_progress(latest);
-                    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-                    hr = URLDownloadToFileW(NULL, g_installer_url, temp_path, 0, NULL);
-                    CoUninitialize();
-                    hide_download_progress(progress);
-                    if (hr == S_OK) {
-                        launch_installer_file(temp_path);
+
+                if (app_diff && msys_diff) {
+                    kind = L"海豚与环境";
+                    installer_url = g_full_installer_url;
+                    temp_name = L"HaiTun-Agent-Setup.exe";
+                } else if (app_diff) {
+                    kind = L"海豚";
+                    installer_url = g_app_installer_url;
+                    temp_name = L"HaiTun-Agent-App-Setup.exe";
+                } else {
+                    kind = L"环境";
+                    installer_url = g_msys_installer_url;
+                    temp_name = L"msys-setup.exe";
+                }
+
+                wsprintfW(msg,
+                          L"HaiTun Agent 发现%s组件有新版本。\n\n"
+                          L"是否现在下载并更新？",
+                          kind);
+                if (MessageBoxW(NULL, msg, L"发现新版本",
+                                MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES) {
+                    if (!update_disk_space_ok()) {
+                        MessageBoxW(NULL,
+                                    L"磁盘空间不足，更新至少需要 3GB 空闲空间。",
+                                    L"更新失败",
+                                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+                    } else if (GetTempPathW(MAX_PATH, temp_dir) && temp_dir[0]) {
+                        wsprintfW(temp_path, L"%s%s", temp_dir, temp_name);
+                        progress = show_download_progress(kind);
+                        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+                        hr = URLDownloadToFileW(NULL, installer_url, temp_path, 0, NULL);
+                        CoUninitialize();
+                        hide_download_progress(progress);
+                        if (hr == S_OK) {
+                            launch_installer_file(temp_path, installer_url);
+                        } else {
+                            MessageBoxW(NULL, L"自动下载失败，将打开浏览器下载页面。", L"更新失败",
+                                        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
+                            ShellExecuteW(NULL, L"open", installer_url, NULL, NULL, SW_SHOWNORMAL);
+                        }
                     } else {
                         MessageBoxW(NULL, L"自动下载失败，将打开浏览器下载页面。", L"更新失败",
                                     MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
-                        ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
+                        ShellExecuteW(NULL, L"open", installer_url, NULL, NULL, SW_SHOWNORMAL);
                     }
-                } else {
-                    MessageBoxW(NULL, L"自动下载失败，将打开浏览器下载页面。", L"更新失败",
-                                MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
-                    ShellExecuteW(NULL, L"open", g_installer_url, NULL, NULL, SW_SHOWNORMAL);
                 }
             }
         }
@@ -490,13 +605,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
         load_env_file(conf_path);
     }
 
+    /* 3.6. load local component versions (app + msys64) */
+    load_local_versions();
+
     /* 4. prepend MSYS2 to PATH */
     {
         WCHAR usr[512], ucrt[512], old_path[PATH_BUF];
         lstrcpyW(usr, g_dir);
-        lstrcatW(usr, L"\\msys64\\usr\\bin");
+        lstrcatW(usr, L"\\..\\msys64\\usr\\bin");
         lstrcpyW(ucrt, g_dir);
-        lstrcatW(ucrt, L"\\msys64\\ucrt64\\bin");
+        lstrcatW(ucrt, L"\\..\\msys64\\ucrt64\\bin");
 
         WCHAR *existing = find_env_var(L"PATH");
         if (existing) {
@@ -600,9 +718,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
             CloseHandle(hIn);
     }
 
-    /* 8. background update checker (checks download server version.txt) */
+    /* 8. background update checker (checks app and msys version files) */
     configure_updater();
-    if (g_local_version[0] && g_version_url[0] && g_installer_url[0]) {
+    if (g_update_base_url[0]) {
         HANDLE hThread = CreateThread(NULL, 0, update_check_thread, NULL, 0, NULL);
         if (hThread)
             CloseHandle(hThread);

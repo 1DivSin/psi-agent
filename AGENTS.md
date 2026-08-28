@@ -78,6 +78,7 @@ src/
     ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）
     ├── _run.py                 # YAML 配置批量启动（psi-agent run config.yml）
     ├── _logging.py              # loguru 配置，verbose→DEBUG
+    ├── _tls.py                  # 出站 HTTPS 的 TLS 上下文（AuthManager↔AI 层共享；绕开 PQ ClientHello 被丢）
     ├── ai/
     │   ├── AGENTS.md                # AI 层设计文档
     │   ├── __init__.py               # Ai + serve_ai
@@ -119,6 +120,7 @@ src/
         ├── __init__.py              # Gateway dataclass + run()
         ├── _manager.py             # 共享类型 + helpers
         ├── _ai_manager.py         # AIManager
+        ├── _free_model.py          # 免费模型哨兵 key → 登录 token（同源校验）
         ├── _session_manager.py    # SessionManager
         ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
         ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
@@ -139,6 +141,8 @@ src/
 ```
 
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
+
+`scripts/` 放不属于包的仓库工具。目前一个：`gen_legal_html.py` 把 `spa-v2/legal/` 下两份协议 md 生成为 `spa-v2/public/{terms,privacy}.html`，**安装器协议页与产品内协议链接共用这一份产物**（安装器以 `dontcopy` 引同一路径）。它是生成物、入库、CI 用 `--check` 守同步；设计见 `docs/superpowers/specs/2026-08-15-installer-tos-consent-design.md`。
 
 各层的详细设计文档见：
 - **AI 层**: `src/psi_agent/ai/AGENTS.md` — provider 配置、请求透传、错误处理、context compaction 触发
@@ -184,6 +188,17 @@ SSE 流中的特殊字段：
    `psi_compaction` 和 `finish_reason="compaction_needed"` 均为 psi-agent 内部扩展。
    其中 `prompt_tokens` / `threshold` **不是纯日志字段**：Session 用它们做压缩冷却判断
    （`session/AGENTS.md`「压缩冷却」），省略会让冷却退化成 fail-open、退回连续重压。
+
+4. **Usage 信号（SSE 层面）**：provider 的流式 token 用量通常位于 `choices=[]` 的尾帧，
+   而内部协议把 0 choice 当心跳跳过。AI 层因此把最后一份有效 usage 规范化为单 choice 辅助帧：
+   ```json
+   {"choices": [{"delta": {}, "finish_reason": "usage"}],
+    "psi_usage": {"prompt_tokens": N, "completion_tokens": M, "total_tokens": T,
+                  "cached_input_tokens": C, "cache_creation_input_tokens": W}}
+   ```
+   `usage` 属于 `AUXILIARY_FINISH_REASONS`，不得覆盖真实终止原因。Session 在一次 Agent run
+   内累加每轮模型请求；任一轮没有有效 usage 时，聚合 token 值保持未知，不能把已知部分当精确总量。
+   缓存读取与缓存创建分别聚合；provider 未报告的缓存字段必须保持 `null`，不能当作零命中。
 
 ### 协议归属
 
@@ -369,6 +384,14 @@ uv build                         # 构建
 3. **异常与取消安全**：检查改动点及其邻近代码是否异常安全——被 `cancel` 时会不会出问题？是否存在 cancel 时资源泄露（未关闭的 socket / `AppRunner` / 文件 / 子进程 / 上游 streaming 连接）？清理代码必须放在 `finally`、`except` 或 `async with` 上下文管理器（`__aexit__`）中，跨 `await` 的清理用 `anyio.CancelScope(shield=True)` 保护。注意 `CancelledError` 是 `BaseException`，不在 `Exception` 之下——`except Exception` 不会（也不应）吞掉它；严禁用 `except BaseException` 误吞取消信号。
 
 4. **测试补充**：为新增 / 变更的逻辑补 unit test；涉及跨组件交互（socket、SSE、agent loop、错误传播）的补 integration test。测试目录镜像 `src/psi_agent/`，集成测试放 `tests/integration/`。改完后跑 `uv run pytest` 确认通过。
+
+## 云端服务边界（psi-cloud）
+
+C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-cloud`（独立 git 仓库）。psi-agent 是可安装的客户端包，塞进服务端目录会让打包与依赖边界变浑。
+
+- 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步）。
+- 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
+- 本机侧只有 `gateway/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 
 ## 未来扩展方向
 

@@ -41,6 +41,7 @@ __all__ = [
     "AgentRunResult",
     "AgentRunStatus",
     "AgentStopCause",
+    "AgentTokenUsage",
     "AiDelta",
     "ChatCompletionChunk",
     "DeltaMessage",
@@ -97,6 +98,81 @@ class AgentStopCause(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class AgentTokenUsage:
+    """Token usage accumulated across every model call in one agent run.
+
+    Counts remain ``None`` unless every started model call reported usage.
+    This prevents a partial provider response from being presented as an exact
+    total.  ``model_calls`` is still useful when token counts are unavailable.
+    """
+
+    model_calls: int
+    input_tokens: int | None
+    output_tokens: int | None
+    cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        counts = {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+        }
+        if type(self.model_calls) is not int or self.model_calls < 0:
+            raise ValueError("model_calls must be a non-negative integer")
+        for name, value in counts.items():
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer or null")
+        if (self.input_tokens is None) != (self.output_tokens is None):
+            raise ValueError("input_tokens and output_tokens must both be known or both be null")
+        if self.input_tokens is None and (
+            self.cached_input_tokens is not None or self.cache_creation_input_tokens is not None
+        ):
+            raise ValueError("cache token counts require a known input_tokens total")
+        if self.input_tokens is not None:
+            cache_counts = tuple(
+                value for value in (self.cached_input_tokens, self.cache_creation_input_tokens) if value is not None
+            )
+            if any(value > self.input_tokens for value in cache_counts) or (
+                len(cache_counts) == 2 and sum(cache_counts) > self.input_tokens
+            ):
+                raise ValueError("cache token breakdown must not exceed input_tokens")
+
+    @property
+    def total_tokens(self) -> int | None:
+        if self.input_tokens is None or self.output_tokens is None:
+            return None
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def complete(self) -> bool:
+        return self.input_tokens is not None and self.output_tokens is not None
+
+    @property
+    def cache_read_complete(self) -> bool:
+        return self.cached_input_tokens is not None
+
+    @property
+    def cache_creation_complete(self) -> bool:
+        return self.cache_creation_input_tokens is not None
+
+    @property
+    def uncached_input_tokens(self) -> int | None:
+        if self.input_tokens is None or self.cached_input_tokens is None or self.cache_creation_input_tokens is None:
+            return None
+        return self.input_tokens - self.cached_input_tokens - self.cache_creation_input_tokens
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        if self.input_tokens is None or self.cached_input_tokens is None:
+            return None
+        if self.input_tokens == 0:
+            return 0.0
+        return self.cached_input_tokens / self.input_tokens
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunResult:
     """Immutable terminal state of one fully-consumed ``SessionAgent`` run.
 
@@ -113,6 +189,14 @@ class AgentRunResult:
     never reported one."""
     model_turns: int
     """How many model requests this run issued (rounds of the agent loop)."""
+    token_usage: AgentTokenUsage = AgentTokenUsage(
+        model_calls=0,
+        input_tokens=0,
+        output_tokens=0,
+        cached_input_tokens=0,
+        cache_creation_input_tokens=0,
+    )
+    """Exact aggregate usage when every model call reported it."""
 
     @property
     def is_complete(self) -> bool:
@@ -164,3 +248,11 @@ class AiDelta:
     """Upstream-reported prompt tokens carried by the compaction signal (0 = unknown)."""
     compaction_threshold: int = 0
     """The threshold the signal was raised against (0 = unknown)."""
+    input_tokens: int | None = None
+    """Prompt/input tokens from a normalized usage signal."""
+    output_tokens: int | None = None
+    """Completion/output tokens from a normalized usage signal."""
+    cached_input_tokens: int | None = None
+    """Input tokens served from a provider prompt cache, when reported."""
+    cache_creation_input_tokens: int | None = None
+    """Input tokens written to a provider prompt cache, when reported."""

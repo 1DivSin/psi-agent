@@ -9,7 +9,44 @@ from aiohttp import web
 from any_llm.api import ChatCompletionChunk, acompletion
 from loguru import logger
 
-from psi_agent.protocol import make_compaction_signal, make_error_chunk
+from psi_agent.protocol import make_compaction_signal, make_error_chunk, make_usage_signal
+
+
+def _optional_token_count(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _cache_token_counts(usage: object) -> tuple[int | None, int | None]:
+    """Read normalized cache details without treating missing metrics as zero."""
+
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached_input_tokens = _optional_token_count(getattr(details, "cached_tokens", None))
+    if cached_input_tokens is None:
+        cached_input_tokens = _optional_token_count(getattr(usage, "cache_read_input_tokens", None))
+
+    cache_creation_input_tokens = _optional_token_count(getattr(details, "cache_creation_tokens", None))
+    if cache_creation_input_tokens is None:
+        cache_creation_input_tokens = _optional_token_count(getattr(usage, "cache_creation_input_tokens", None))
+
+    prompt_tokens = _optional_token_count(getattr(usage, "prompt_tokens", None))
+    if prompt_tokens is None:
+        return None, None
+    if cached_input_tokens is not None and cached_input_tokens > prompt_tokens:
+        logger.warning("Ignoring cached input token count greater than total prompt tokens")
+        cached_input_tokens = None
+    if cache_creation_input_tokens is not None and cache_creation_input_tokens > prompt_tokens:
+        logger.warning("Ignoring cache creation token count greater than total prompt tokens")
+        cache_creation_input_tokens = None
+    if (
+        cached_input_tokens is not None
+        and cache_creation_input_tokens is not None
+        and cached_input_tokens + cache_creation_input_tokens > prompt_tokens
+    ):
+        logger.warning("Ignoring cache token breakdown greater than total prompt tokens")
+        return None, None
+    return cached_input_tokens, cache_creation_input_tokens
 
 
 async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
@@ -29,6 +66,14 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     model = request.app["model"]
     api_key = request.app["api_key"]
     base_url = request.app["base_url"]
+    # ``client_args`` 走的是 provider 的 client 构造, 不是请求体 —— 换掉 TLS
+    # 上下文只能从这里进去, any-llm 内部自己 new httpx client。client 由
+    # ``serve_ai`` 按 provider 建 (不收 http_client 的 provider 拿到 None)、
+    # 进程退出时关。见 psi_agent._tls 与 _build_http_client。
+    # 用 get 而不是 []: 这个 handler 也被不经 ``serve_ai`` 装配的 app 用 (测试、
+    # 将来的嵌入式用法), 少一个键不该变成 500。缺了就走 any-llm 默认 client。
+    http_client = request.app.get("http_client")
+    client_args: dict[str, Any] = {"client_args": {"http_client": http_client}} if http_client else {}
 
     logger.debug(f"Body keys before pop: {list(body)}")
     messages = body.pop("messages", [])
@@ -67,6 +112,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     upstream_error = False
     client_gone = False
     compaction_needed = False
+    token_usage: dict[str, int | None] = {}
     stream: AsyncIterator[ChatCompletionChunk] | None = None
     try:
         stream = cast(
@@ -81,6 +127,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                 stream=True,
                 api_key=api_key,
                 api_base=base_url,
+                **client_args,
                 **body,
             ),
         )
@@ -88,19 +135,36 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
         max_context_tokens: int = request.app.get("max_context_tokens", 0)
         compaction_usage: dict[str, int] = {}
         async for chunk in stream:
-            if max_context_tokens > 0 and chunk.usage and chunk.usage.prompt_tokens > max_context_tokens:
-                compaction_needed = True
-                compaction_usage = {
+            if chunk.usage:
+                cached_input_tokens, cache_creation_input_tokens = _cache_token_counts(chunk.usage)
+                token_usage = {
                     "prompt_tokens": chunk.usage.prompt_tokens,
                     "completion_tokens": chunk.usage.completion_tokens,
                     "total_tokens": chunk.usage.total_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "cache_creation_input_tokens": cache_creation_input_tokens,
                 }
+            if max_context_tokens > 0 and chunk.usage and chunk.usage.prompt_tokens > max_context_tokens:
+                compaction_needed = True
+                compaction_usage = {"prompt_tokens": chunk.usage.prompt_tokens}
                 logger.debug(
                     f"Compaction needed: prompt_tokens={chunk.usage.prompt_tokens} > threshold={max_context_tokens}"
                 )
             data = chunk.model_dump_json()
             logger.debug(f"SSE chunk: {data[:1000]}")
             await response.write(f"data: {data}\n\n".encode())
+        if token_usage:
+            signal = json.dumps(
+                make_usage_signal(
+                    prompt_tokens=cast(int, token_usage["prompt_tokens"]),
+                    completion_tokens=cast(int, token_usage["completion_tokens"]),
+                    total_tokens=cast(int, token_usage["total_tokens"]),
+                    cached_input_tokens=token_usage["cached_input_tokens"],
+                    cache_creation_input_tokens=token_usage["cache_creation_input_tokens"],
+                )
+            )
+            logger.debug(f"SSE usage signal: {signal[:500]}")
+            await response.write(f"data: {signal}\n\n".encode())
         if compaction_needed:
             signal = json.dumps(
                 make_compaction_signal(

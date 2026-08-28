@@ -12,7 +12,7 @@ psi-agent. The workspace tool compiles source into Core IR, lowers it to a
 Sessions, runs Program-backed Steps through specialized Program Agents with
 structured process capture, and checkpoints Human-backed Steps across turns.
 
-> **Workspace boundary.** Store one-off authored G4 files under the workspace-managed `flows/` directory. Reusable declarations have one canonical bundle: `flows/workflows/<slug>/`, containing `<slug>.workflow` or `<slug>.g4` (`.workflow` takes precedence if both exist). The skill ships no runnable example workflows. Every run persists all materialized Artifacts as Markdown under its workflow bundle's `runs/<run-id>/artifacts/` directory. Agent and Program Steps additionally publish `runs/<run-id>/step-timings.json`, including retries and foreach iteration timing. Human Steps additionally persist private checkpoints under the ignored workspace `.psi/fusion-flow/runs/` directory; non-Human runs remain non-resumable.
+> **Workspace boundary.** Store one-off authored G4 files under the workspace-managed `flows/` directory. Reusable declarations have one canonical bundle: `flows/workflows/<slug>/`, containing `<slug>.workflow` or `<slug>.g4` (`.workflow` takes precedence if both exist). The skill ships no runnable example workflows. Every run persists all materialized Artifacts as Markdown under its workflow bundle's `runs/<run-id>/artifacts/` directory. Human Steps additionally persist private checkpoints under the ignored workspace `.psi/fusion-flow/runs/` directory; non-Human runs remain non-resumable.
 
 > **Legacy handoff.** An explicit `.flow.ts`, Fuclaw, or `@agent-flow/core`
 > request belongs to the `flow` skill under `skills/fusion-flow-legacy/`.
@@ -219,7 +219,8 @@ Paths are relative to the workspace:
 | `flows/workflows/<slug>/<slug>.workflow` or `<slug>.g4` | reusable G4 source (`.workflow` preferred when both exist) |
 | `flows/workflows/<slug>/instructions/*.md` | optional long-form instructions for that reusable source |
 | `<workflow-bundle>/runs/<run-id>/artifacts/*.md` | one Markdown file for every materialized Artifact in one run |
-| `<workflow-bundle>/runs/<run-id>/step-timings.json` | resumable timing report for Agent/Program Steps; includes attempts and foreach iterations |
+| `<workflow-bundle>/runs/<run-id>/step-timings.json` | resumable Agent/Program step timing report with attempts and foreach iterations |
+| `<workflow-bundle>/runs/<run-id>/token-usage.json` | private per-Step model-call and token-usage observability for that run |
 | `.psi/fusion-flow/runs/<run-id>.json` | private resumable state for workflows containing Human Steps |
 
 ## Authoring Mode
@@ -468,10 +469,15 @@ Agent-backed Steps execute through the shared `flow.agent()` and
 `flow.session()` primitives inside `fusion_flow.execution.run()`. Their
 completion callback must return a mapping keyed exactly by the declared output
 Artifact IDs. A normally completed Agent turn may return either one strict JSON
-object or one standalone `json` fence. Malformed JSON is retried, never
-heuristically repaired; after three invalid attempts the Step fails without
-publishing any Artifact, regardless of output cardinality. Invalid raw text is
-never bound or broadcast as an output compatibility route.
+object or one standalone `json` fence. Malformed JSON is returned to the model
+for output-only correction without rerunning the Step. If the third ordinary
+text response is still invalid, the runtime may remove only unambiguous trailing
+commas by trying `json-repair` once. The repaired result is accepted only when it
+is canonically identical, including JSON value types, to a string-aware pass that
+removes trailing commas and nothing else; strict parsing and exact-key validation
+then run again. Every other malformed result fails without publishing any
+Artifact, regardless of output cardinality; invalid raw text is never bound or
+broadcast.
 
 A Human Step may request an approval, choose among up to four options, or accept open-ended/structured input. Its dedicated preparation Agent receives the resolved instruction text, consumed Artifacts, and output contract, then emits the arguments for the existing `clarify` tool. It never asks the user itself, and its question text never becomes a produced Artifact. The next user response becomes the Human Step result after `run_flow_resume`. Multiple output Artifacts require a JSON object keyed exactly by those Artifact IDs; a zero-output Human Step acts as a pure gate.
 

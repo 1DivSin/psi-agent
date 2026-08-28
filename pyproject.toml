@@ -20,6 +20,7 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "rich>=15.0.0",
     "any-llm-sdk>=1.21.0",
+    "json-repair>=0.63.0,<0.64",
     "platformdirs>=4.10.1",
     "keyring>=25.0.0",
     "lark-channel-sdk>=1.2.0",
