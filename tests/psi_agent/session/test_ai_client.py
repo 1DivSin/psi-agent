@@ -6,6 +6,7 @@ import socket as _s
 import pytest
 from aiohttp import web
 
+import psi_agent.session.ai_client as ai_client_module
 from psi_agent.session.ai_client import AiClient
 
 
@@ -42,6 +43,69 @@ async def test_ai_client_simple_content():
         assert deltas[-1].finish_reason == "stop"
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.anyio
+async def test_ai_client_emits_structured_latency_events(monkeypatch: pytest.MonkeyPatch):
+    events: list[dict[str, object]] = []
+
+    class FakeLogger:
+        def bind(self, **fields: object) -> FakeLogger:
+            events.append(fields)
+            return self
+
+        def info(self, _message: str) -> None:
+            return None
+
+        def debug(self, _message: str) -> None:
+            return None
+
+        def warning(self, _message: str) -> None:
+            return None
+
+        def error(self, _message: str) -> None:
+            return None
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        payload = {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+        await resp.write(f"data: {json.dumps(payload)}\n\n".encode())
+        compaction = {
+            "choices": [{"delta": {}, "finish_reason": "compaction_needed"}],
+            "psi_compaction": {"needed": True, "prompt_tokens": 120, "threshold": 100},
+        }
+        await resp.write(f"data: {json.dumps(compaction)}\n\n".encode())
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    monkeypatch.setattr(ai_client_module, "logger", FakeLogger())
+    app = web.Application()
+    app.router.add_post("/chat/completions", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sock = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    await web.SockSite(runner, sock).start()
+    try:
+        client = AiClient(ai_socket=f"http://127.0.0.1:{port}")
+        deltas = [
+            delta
+            async for delta in client.stream(
+                {"messages": [{"role": "user", "content": "hi"}], "tools": [], "stream": True}
+            )
+        ]
+    finally:
+        await runner.cleanup()
+
+    assert any(delta.content == "ok" for delta in deltas)
+    by_name = {event["event"]: event for event in events}
+    assert set(by_name) == {"ai_request_headers", "ai_request_ttft", "ai_request_complete"}
+    assert by_name["ai_request_headers"]["status"] == 200
+    assert by_name["ai_request_ttft"]["message_count"] == 1
+    assert by_name["ai_request_complete"]["finish_reason"] == "stop"
+    assert by_name["ai_request_complete"]["delta_count"] == 2
 
 
 @pytest.mark.anyio

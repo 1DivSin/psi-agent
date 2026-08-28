@@ -11,6 +11,7 @@ import anyio
 import pytest
 from aiohttp import web
 
+import psi_agent.session.agent as agent_module
 from psi_agent.session.agent import AgentRun, SessionAgent, current_tool_ai_socket
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
@@ -92,8 +93,32 @@ class MockAIServer:
             await self._runner.cleanup()
 
 
+class RecordingLogger:
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self._events = events
+
+    def bind(self, **fields: object) -> RecordingLogger:
+        self._events.append(fields)
+        return self
+
+    def debug(self, _message: str) -> None:
+        return None
+
+    def info(self, _message: str) -> None:
+        return None
+
+    def warning(self, _message: str) -> None:
+        return None
+
+    def error(self, _message: str) -> None:
+        return None
+
+
 @pytest.mark.anyio
-async def test_agent_simple_response(tmp_path: Path) -> None:
+async def test_agent_simple_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(agent_module, "logger", RecordingLogger(events))
+
     async def handler(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
         await resp.prepare(request)
@@ -113,6 +138,12 @@ async def test_agent_simple_response(tmp_path: Path) -> None:
 
         all_content = "".join(c.content or "" for c in chunks)
         assert "Hello world" in all_content
+
+        by_name = {event["event"]: event for event in events if "event" in event}
+        assert {"agent_turn_prepare", "agent_turn_context", "agent_turn_complete"} <= set(by_name)
+        assert by_name["agent_turn_prepare"]["tool_count"] == 0
+        assert by_name["agent_turn_complete"]["status"] == "completed"
+        assert by_name["agent_turn_complete"]["model_turns"] == 1
     finally:
         await mock_server.cleanup()
 
@@ -545,7 +576,11 @@ async def test_agent_tool_throws_exception_unit(tmp_path: Path) -> None:
 async def test_agent_does_not_execute_tool_with_invalid_arguments(
     arguments: str,
     error_fragment: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(agent_module, "logger", RecordingLogger(events))
+
     handler = await _make_inline_ai_handler([_tc("no_args", arguments), _stop("recovered")])
     app = web.Application()
     app.router.add_post("/chat/completions", handler)
@@ -584,6 +619,10 @@ async def test_agent_does_not_execute_tool_with_invalid_arguments(
         reasoning = "".join(chunk.reasoning or "" for chunk in chunks)
         assert error_fragment in reasoning
         assert "recovered" in "".join(chunk.content or "" for chunk in chunks)
+        tool_events = [event for event in events if event.get("event") == "agent_tool_complete"]
+        assert len(tool_events) == 1
+        assert tool_events[0]["tool_name"] == "no_args"
+        assert tool_events[0]["status"] == "invalid_arguments"
     finally:
         await runner.cleanup()
 
