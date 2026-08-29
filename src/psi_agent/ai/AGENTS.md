@@ -93,6 +93,15 @@ AI 层强制 `stream_options={"include_usage": True}` 获取上游 token 用量�
 AI 层同时从 `prompt_tokens_details.cached_tokens` 提取缓存读取量，并在 provider 适配器提供时
 保留缓存创建量。缺失的缓存指标发送为 `null`，不得用 `0` 代替未知。
 
+Anthropic 原生流的完整 usage 可能出现在 `message_start` 或 `message_delta`，不能只读取
+`message_stop`。兼容层把 `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+规范化为内部 `prompt_tokens`，并分别保留后两项。仓库没有主动添加 `cache_control`，但兼容
+provider / 中转仍可能自动缓存并返回这两个字段；是否真的发生缓存只以上游 usage 为准。
+
+上游的第一个业务 terminal 必须暂存到 iterator 结束。下游顺序固定为 usage 辅助帧、可选
+compaction 辅助帧、业务 terminal，随后才是 `[DONE]`。这样收到 `tool_calls` 就关闭流的消费者
+也不会先于最终 usage 退出。terminal 原有的 content / tool_calls 与 finish reason 不拆分。
+
 信号由 `psi_agent.protocol.make_compaction_signal(prompt_tokens=…, threshold=…)` 构造，形状见根 `AGENTS.md`「核心通信协议」。`prompt_tokens` / `threshold` 不是日志字段——Session 用它们做压缩冷却判断（见 `session/AGENTS.md`），省略会让冷却退化成 fail-open。
 
 `psi_compaction` 是 psi-agent 内部扩展字段，非 OpenAI 标准。仅 OpenAI / Anthropic / Gemini 及兼容 provider 支持 `usage` 返回；Groq / Mistral / Ollama 等 strip `stream_options`，compaction 不触发。

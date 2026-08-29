@@ -4,13 +4,68 @@ import contextlib
 import json
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import anyio
 import pytest
 from aiohttp import ClientSession, ClientTimeout, web
 
-from psi_agent.ai.server import handle_chat_completions
+from psi_agent.ai.server import _anthropic_stream_usage, handle_chat_completions
+
+
+def test_anthropic_delta_usage_preserves_cache_breakdown() -> None:
+    event = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=367,
+            output_tokens=2,
+            cache_read_input_tokens=5758,
+            cache_creation_input_tokens=719,
+        )
+    )
+
+    usage = _anthropic_stream_usage(event)
+
+    assert usage is not None
+    assert usage.prompt_tokens == 6844
+    assert usage.completion_tokens == 2
+    assert usage.total_tokens == 6846
+    assert usage.prompt_tokens_details.cached_tokens == 5758
+    assert usage.prompt_tokens_details.cache_creation_tokens == 719
+
+
+def test_anthropic_message_start_usage_is_supported() -> None:
+    event = SimpleNamespace(
+        usage=None,
+        message=SimpleNamespace(
+            usage=SimpleNamespace(
+                input_tokens=5,
+                output_tokens=1,
+                cache_read_input_tokens=37,
+                cache_creation_input_tokens=4,
+            )
+        ),
+    )
+
+    usage = _anthropic_stream_usage(event)
+
+    assert usage is not None
+    assert usage.prompt_tokens == 46
+    assert usage.prompt_tokens_details.cached_tokens == 37
+    assert usage.prompt_tokens_details.cache_creation_tokens == 4
+
+
+def test_anthropic_output_only_delta_does_not_replace_complete_usage() -> None:
+    event = SimpleNamespace(
+        usage=SimpleNamespace(
+            input_tokens=None,
+            output_tokens=9,
+            cache_read_input_tokens=None,
+            cache_creation_input_tokens=None,
+        )
+    )
+
+    assert _anthropic_stream_usage(event) is None
 
 
 class _CompactionFakeChunk:
@@ -170,7 +225,14 @@ async def test_compaction_signal_when_usage_exceeds_threshold(tmp_path: Path, mo
             "cached_input_tokens": None,
             "cache_creation_input_tokens": None,
         }
-        compaction_chunk = chunks[-1]
+        terminal_index = next(
+            index for index, chunk in enumerate(chunks) if chunk["choices"][0]["finish_reason"] == "stop"
+        )
+        usage_index = chunks.index(usage_chunk)
+        compaction_chunk = next(chunk for chunk in chunks if "psi_compaction" in chunk)
+        compaction_index = chunks.index(compaction_chunk)
+        assert usage_index < terminal_index
+        assert compaction_index < terminal_index
         assert "psi_compaction" in compaction_chunk
         assert compaction_chunk["psi_compaction"]["needed"] is True
         assert compaction_chunk["psi_compaction"]["prompt_tokens"] == 50000

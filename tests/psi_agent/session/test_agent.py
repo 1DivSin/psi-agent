@@ -1649,6 +1649,72 @@ async def test_run_streamed_accumulates_usage_across_tool_rounds(tmp_path: Path)
 
 
 @pytest.mark.anyio
+async def test_run_streamed_records_usage_before_consumer_closes_after_tool_result(tmp_path: Path) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(
+            _sse_usage(
+                90,
+                7,
+                cached_input_tokens=60,
+                cache_creation_input_tokens=10,
+            ).encode()
+        )
+        tool_call = {
+            "id": "tool-call",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "echo", "arguments": '{"message":"done"}'},
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        }
+        await response.write(f"data: {json.dumps(tool_call)}\n\n".encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    async def echo(message: str) -> str:
+        return message
+
+    tool = ToolFunction.from_callable(echo)
+    server = MockAIServer(tmp_path)
+    socket_path = await server.start(handler)
+    try:
+        agent = SessionAgent(
+            ai_client=AiClient(socket_path),
+            tool_registry=ToolRegistry(
+                files={"__test__": FileEntry(file_hash="", tools={"echo": tool}, funcs={"echo": echo})}
+            ),
+            conversation=Conversation(path=tmp_path / "early-close-usage.jsonl"),
+        )
+        run = agent.run_streamed({"role": "user", "content": "use the tool"})
+        async with aclosing(run) as chunks:
+            async for chunk in chunks:
+                if chunk.reasoning and chunk.reasoning.startswith("[Tool Result:"):
+                    break
+    finally:
+        await server.cleanup()
+
+    assert run.token_usage.model_calls == 1
+    assert run.token_usage.input_tokens == 90
+    assert run.token_usage.output_tokens == 7
+    assert run.token_usage.cached_input_tokens == 60
+    assert run.token_usage.cache_creation_input_tokens == 10
+    assert run.token_usage.complete
+
+
+@pytest.mark.anyio
 async def test_run_streamed_result_incomplete_on_length(tmp_path: Path) -> None:
     """A non-``stop`` model reason keeps its raw value and reads as incomplete."""
     run = await _run_streamed_against(tmp_path, _sse_chunk(content="truncated", finish="length").encode())

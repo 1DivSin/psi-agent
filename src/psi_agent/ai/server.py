@@ -7,15 +7,74 @@ from typing import Any, cast
 import anyio
 from aiohttp import web
 from any_llm.api import ChatCompletionChunk, acompletion
+from any_llm.providers.anthropic import base as anthropic_base
+from any_llm.types.completion import CompletionUsage, PromptTokensDetails
 from loguru import logger
 
-from psi_agent.protocol import make_compaction_signal, make_error_chunk, make_usage_signal
+from psi_agent.protocol import is_terminal_finish, make_compaction_signal, make_error_chunk, make_usage_signal
 
 
 def _optional_token_count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def _anthropic_stream_usage(event: object) -> object | None:
+    """Normalize usage carried by Anthropic message start/delta events.
+
+    any-llm currently reads streaming usage only from ``message_stop``. Some
+    Anthropic-compatible relays follow the wire protocol and report the final
+    cache breakdown on ``message_delta`` instead, so that conversion silently
+    loses all usage. Return an OpenAI-compatible usage object only when the
+    event contains a complete input-token count; output-only deltas must not
+    overwrite an earlier complete measurement.
+    """
+
+    usage = getattr(event, "usage", None)
+    if usage is None:
+        usage = getattr(getattr(event, "message", None), "usage", None)
+    input_tokens = _optional_token_count(getattr(usage, "input_tokens", None))
+    if input_tokens is None:
+        return None
+
+    cached_input_tokens = _optional_token_count(getattr(usage, "cache_read_input_tokens", None)) or 0
+    cache_creation_input_tokens = (
+        _optional_token_count(getattr(usage, "cache_creation_input_tokens", None)) or 0
+    )
+    output_tokens = _optional_token_count(getattr(usage, "output_tokens", None)) or 0
+    prompt_tokens = input_tokens + cached_input_tokens + cache_creation_input_tokens
+
+    return CompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=prompt_tokens + output_tokens,
+        prompt_tokens_details=PromptTokensDetails(
+            cached_tokens=cached_input_tokens,
+            cache_creation_tokens=cache_creation_input_tokens,
+        ),
+    )
+
+
+def _install_anthropic_stream_usage_compat(provider: str) -> None:
+    """Preserve Anthropic cache usage until any-llm handles delta usage."""
+
+    if provider.casefold() != "anthropic":
+        return
+
+    if getattr(anthropic_base, "_psi_stream_usage_compat", False):
+        return
+
+    original_converter = anthropic_base._create_openai_chunk_from_anthropic_chunk
+
+    def convert_with_usage(event: object, model_id: str) -> ChatCompletionChunk:
+        chunk = original_converter(event, model_id)
+        if usage := _anthropic_stream_usage(event):
+            chunk.usage = usage
+        return chunk
+
+    anthropic_base._create_openai_chunk_from_anthropic_chunk = convert_with_usage
+    anthropic_base._psi_stream_usage_compat = True
 
 
 def _cache_token_counts(usage: object) -> tuple[int | None, int | None]:
@@ -66,6 +125,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     model = request.app["model"]
     api_key = request.app["api_key"]
     base_url = request.app["base_url"]
+    _install_anthropic_stream_usage_compat(provider)
     # ``client_args`` 走的是 provider 的 client 构造, 不是请求体 —— 换掉 TLS
     # 上下文只能从这里进去, any-llm 内部自己 new httpx client。client 由
     # ``serve_ai`` 按 provider 建 (不收 http_client 的 provider 拿到 None)、
@@ -113,6 +173,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
     client_gone = False
     compaction_needed = False
     token_usage: dict[str, int | None] = {}
+    terminal_data: str | None = None
     stream: AsyncIterator[ChatCompletionChunk] | None = None
     try:
         stream = cast(
@@ -152,6 +213,16 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                 )
             data = chunk.model_dump_json()
             logger.debug(f"SSE chunk: {data[:1000]}")
+            serialized_chunk = json.loads(data)
+            choices = serialized_chunk.get("choices", [])
+            finish_reason = choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None
+            if is_terminal_finish(finish_reason):
+                # Auxiliary usage is emitted after the upstream iterator ends.
+                # Hold the first business terminal until then so tool-call
+                # consumers cannot close the stream before usage is delivered.
+                if terminal_data is None:
+                    terminal_data = data
+                continue
             await response.write(f"data: {data}\n\n".encode())
         if token_usage:
             signal = json.dumps(
@@ -163,7 +234,7 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
                     cache_creation_input_tokens=token_usage["cache_creation_input_tokens"],
                 )
             )
-            logger.debug(f"SSE usage signal: {signal[:500]}")
+            logger.info(f"SSE usage signal: {signal[:500]}")
             await response.write(f"data: {signal}\n\n".encode())
         if compaction_needed:
             signal = json.dumps(
@@ -174,6 +245,8 @@ async def handle_chat_completions(request: web.Request) -> web.StreamResponse:
             )
             logger.debug(f"SSE compaction signal: {signal[:500]}")
             await response.write(f"data: {signal}\n\n".encode())
+        if terminal_data is not None:
+            await response.write(f"data: {terminal_data}\n\n".encode())
     except ConnectionResetError:
         # Downstream client (session/channel) disconnected — e.g. user pressed
         # "stop". The finally block closes the upstream provider stream.

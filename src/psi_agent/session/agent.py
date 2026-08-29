@@ -655,6 +655,7 @@ class SessionAgent:
                     _output_tokens: int | None = None
                     _cached_input_tokens: int | None = None
                     _cache_creation_input_tokens: int | None = None
+                    _usage_recorded = False
 
                     async with aclosing(self._ai_client.stream(request_body)) as stream:
                         async for delta in stream:
@@ -712,6 +713,18 @@ class SessionAgent:
                                 raise AgentError(accumulated_content or accumulated_reasoning or "Unknown AI error")
 
                             if finish_reason == FINISH_REASON_TOOL_CALLS:
+                                # Record before yielding tool progress. Workflow
+                                # adapters may close the stream as soon as their
+                                # submit tool succeeds, before control returns
+                                # below the tool-execution block.
+                                if _result_sink is not None:
+                                    _result_sink._record_model_usage(
+                                        _input_tokens,
+                                        _output_tokens,
+                                        _cached_input_tokens,
+                                        _cache_creation_input_tokens,
+                                    )
+                                    _usage_recorded = True
                                 logger.info("AI requested tool calls, processing...")
                                 ordered_calls = [accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls)]
 
@@ -831,7 +844,7 @@ class SessionAgent:
 
                                 break
 
-                    if _result_sink is not None:
+                    if _result_sink is not None and not _usage_recorded:
                         _result_sink._record_model_usage(
                             _input_tokens,
                             _output_tokens,
