@@ -136,6 +136,17 @@ apply.
 The runner materializes every `./...` Step instruction through one injected
 instruction resolver before dispatching any Step, caches shared references, and
 passes the resulting text consistently to Agent, Human, and Program executors.
+Standalone `@artifact id [type]: description` lines in G4 comments or resolved
+Step instructions add optional Artifact contracts without changing the grammar.
+The runner checks their identities and conflicts, injects related contracts into
+Step prompts and `CompletionContext`, exposes Agent output contracts through the
+`submit_step_result` JSON Schema, and validates declared top-level JSON types at
+runtime. Instruction-local declarations are limited to that Step's inputs and
+outputs. Foreach types describe the collected aggregate rather than one
+iteration element. Only a reserved error envelope proven to originate from a
+Program output bypasses its normal success-value type.
+For one-output Program Steps, a declared non-string type parses stdout as one
+strict JSON value; untyped and explicitly string outputs remain verbatim text.
 The public workspace adapter accepts UTF-8 Markdown files relative to the
 containing `.workflow` or `.g4` file and rejects bundle escapes. If a validated
 instruction file in a workflow whose executors are all Agent cannot be read,
