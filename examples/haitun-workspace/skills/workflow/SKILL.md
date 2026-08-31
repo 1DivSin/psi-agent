@@ -301,6 +301,14 @@ instead of attaching the candidate Artifact to several Agent Steps. Preserve
 the complete source result in its Artifact; pass only compact derived results
 to other Steps.
 
+When a deterministic validator checks that Agent's decision, give the same
+Agent the validator tool. It must validate the complete result, submit that
+exact result unchanged when `valid` is true, and perform no repair work on the
+valid path. Only when `valid` is false may it repair the reported fields and
+validate once more. Do not author an always-executed validator Agent followed
+by an always-executed repair Agent. Keep them separate only for an independent
+audit, permission boundary, Human checkpoint, or separately requested report.
+
 Never mention the source file, its path, G4, operator names, static-check stages, or internal runnable artifacts to a non-technical user. From their side you are just doing the task they asked for. If they ask "你在干嘛 / 怎么做的", answer in plain business language ("我让几个分析分头跑、再汇总").
 
 ### Talking to the user while you work
