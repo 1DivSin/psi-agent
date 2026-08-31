@@ -115,8 +115,23 @@ def test_make_usage_signal_shape() -> None:
             "prompt_tokens": 1200,
             "completion_tokens": 34,
             "total_tokens": 1234,
+            "cached_input_tokens": None,
+            "cache_creation_input_tokens": None,
         },
     }
+
+
+def test_make_usage_signal_preserves_cache_breakdown() -> None:
+    signal = make_usage_signal(
+        prompt_tokens=1200,
+        completion_tokens=34,
+        total_tokens=1234,
+        cached_input_tokens=800,
+        cache_creation_input_tokens=100,
+    )
+
+    assert signal["psi_usage"]["cached_input_tokens"] == 800
+    assert signal["psi_usage"]["cache_creation_input_tokens"] == 100
 
 
 def test_sse_done_constant() -> None:

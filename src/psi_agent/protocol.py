@@ -176,6 +176,8 @@ def make_usage_signal(
     prompt_tokens: int,
     completion_tokens: int,
     total_tokens: int,
+    cached_input_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Build the auxiliary token-usage frame emitted after one model call.
 
@@ -193,6 +195,8 @@ def make_usage_signal(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
         },
     }
 

@@ -11,6 +11,7 @@ import anyio
 import pytest
 from aiohttp import web
 
+import psi_agent.session.agent as agent_module
 from psi_agent.session.agent import AgentRun, SessionAgent, current_tool_ai_socket
 from psi_agent.session.ai_client import AiClient
 from psi_agent.session.conversation import Conversation
@@ -48,7 +49,13 @@ def _sse_chunk(content: str = "", reasoning: str = "", finish: str | None = None
     return f"data: {json.dumps(chunk)}\n\n"
 
 
-def _sse_usage(input_tokens: int, output_tokens: int) -> str:
+def _sse_usage(
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cached_input_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
+) -> str:
     chunk = {
         "id": "usage",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "usage"}],
@@ -56,6 +63,8 @@ def _sse_usage(input_tokens: int, output_tokens: int) -> str:
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
         },
     }
     return f"data: {json.dumps(chunk)}\n\n"
@@ -84,8 +93,32 @@ class MockAIServer:
             await self._runner.cleanup()
 
 
+class RecordingLogger:
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self._events = events
+
+    def bind(self, **fields: object) -> RecordingLogger:
+        self._events.append(fields)
+        return self
+
+    def debug(self, _message: str) -> None:
+        return None
+
+    def info(self, _message: str) -> None:
+        return None
+
+    def warning(self, _message: str) -> None:
+        return None
+
+    def error(self, _message: str) -> None:
+        return None
+
+
 @pytest.mark.anyio
-async def test_agent_simple_response(tmp_path: Path) -> None:
+async def test_agent_simple_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(agent_module, "logger", RecordingLogger(events))
+
     async def handler(request: web.Request) -> web.StreamResponse:
         resp = web.StreamResponse(status=200, reason="OK", headers={"Content-Type": "text/event-stream"})
         await resp.prepare(request)
@@ -105,6 +138,12 @@ async def test_agent_simple_response(tmp_path: Path) -> None:
 
         all_content = "".join(c.content or "" for c in chunks)
         assert "Hello world" in all_content
+
+        by_name = {event["event"]: event for event in events if "event" in event}
+        assert {"agent_turn_prepare", "agent_turn_context", "agent_turn_complete"} <= set(by_name)
+        assert by_name["agent_turn_prepare"]["tool_count"] == 0
+        assert by_name["agent_turn_complete"]["status"] == "completed"
+        assert by_name["agent_turn_complete"]["model_turns"] == 1
     finally:
         await mock_server.cleanup()
 
@@ -537,7 +576,11 @@ async def test_agent_tool_throws_exception_unit(tmp_path: Path) -> None:
 async def test_agent_does_not_execute_tool_with_invalid_arguments(
     arguments: str,
     error_fragment: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(agent_module, "logger", RecordingLogger(events))
+
     handler = await _make_inline_ai_handler([_tc("no_args", arguments), _stop("recovered")])
     app = web.Application()
     app.router.add_post("/chat/completions", handler)
@@ -576,6 +619,10 @@ async def test_agent_does_not_execute_tool_with_invalid_arguments(
         reasoning = "".join(chunk.reasoning or "" for chunk in chunks)
         assert error_fragment in reasoning
         assert "recovered" in "".join(chunk.content or "" for chunk in chunks)
+        tool_events = [event for event in events if event.get("event") == "agent_tool_complete"]
+        assert len(tool_events) == 1
+        assert tool_events[0]["tool_name"] == "no_args"
+        assert tool_events[0]["status"] == "invalid_arguments"
     finally:
         await runner.cleanup()
 
@@ -1483,7 +1530,15 @@ async def test_run_streamed_result_completed_on_model_stop(tmp_path: Path) -> No
 async def test_run_streamed_aggregates_single_model_usage(tmp_path: Path) -> None:
     run = await _run_streamed_against(
         tmp_path,
-        (_sse_chunk(content="done", finish="stop") + _sse_usage(120, 9)).encode(),
+        (
+            _sse_chunk(content="done", finish="stop")
+            + _sse_usage(
+                120,
+                9,
+                cached_input_tokens=80,
+                cache_creation_input_tokens=10,
+            )
+        ).encode(),
     )
 
     result = run.result
@@ -1492,6 +1547,10 @@ async def test_run_streamed_aggregates_single_model_usage(tmp_path: Path) -> Non
     assert result.token_usage.input_tokens == 120
     assert result.token_usage.output_tokens == 9
     assert result.token_usage.total_tokens == 129
+    assert result.token_usage.cached_input_tokens == 80
+    assert result.token_usage.cache_creation_input_tokens == 10
+    assert result.token_usage.uncached_input_tokens == 30
+    assert result.token_usage.cache_hit_rate == pytest.approx(2 / 3)
     assert result.token_usage.complete
 
 
@@ -1502,6 +1561,8 @@ async def test_run_streamed_marks_usage_incomplete_when_provider_omits_it(tmp_pa
     assert run.token_usage.model_calls == 1
     assert run.token_usage.input_tokens is None
     assert run.token_usage.output_tokens is None
+    assert run.token_usage.cached_input_tokens is None
+    assert run.token_usage.cache_creation_input_tokens is None
     assert not run.token_usage.complete
 
 
@@ -1535,10 +1596,24 @@ async def test_run_streamed_accumulates_usage_across_tool_rounds(tmp_path: Path)
                 ],
             }
             await response.write(f"data: {json.dumps(tool_call)}\n\n".encode())
-            await response.write(_sse_usage(80, 6).encode())
+            await response.write(
+                _sse_usage(
+                    80,
+                    6,
+                    cached_input_tokens=50,
+                    cache_creation_input_tokens=10,
+                ).encode()
+            )
         else:
             await response.write(_sse_chunk(content="done", finish="stop").encode())
-            await response.write(_sse_usage(110, 8).encode())
+            await response.write(
+                _sse_usage(
+                    110,
+                    8,
+                    cached_input_tokens=70,
+                    cache_creation_input_tokens=5,
+                ).encode()
+            )
         await response.write(b"data: [DONE]\n\n")
         return response
 
@@ -1568,6 +1643,9 @@ async def test_run_streamed_accumulates_usage_across_tool_rounds(tmp_path: Path)
     assert run.result.token_usage.input_tokens == 190
     assert run.result.token_usage.output_tokens == 14
     assert run.result.token_usage.total_tokens == 204
+    assert run.result.token_usage.cached_input_tokens == 120
+    assert run.result.token_usage.cache_creation_input_tokens == 15
+    assert run.result.token_usage.uncached_input_tokens == 55
 
 
 @pytest.mark.anyio

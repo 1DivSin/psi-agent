@@ -15,7 +15,10 @@ from psi_agent.ai.server import handle_chat_completions
 
 class _CompactionFakeChunk:
     def __init__(
-        self, content: str = "", finish_reason: str | None = None, usage: dict[str, int] | None = None
+        self,
+        content: str = "",
+        finish_reason: str | None = None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         self._content = content
         self._finish_reason = finish_reason
@@ -30,15 +33,49 @@ class _CompactionFakeChunk:
             "object": "chat.completion.chunk",
         }
         if self.usage:
-            d["usage"] = self.usage.__dict__
+            d["usage"] = self.usage.to_dict()
         return json.dumps(d)
 
 
+class _FakePromptTokenDetails:
+    def __init__(self, cached_tokens: int | None, cache_creation_tokens: int | None) -> None:
+        self.cached_tokens = cached_tokens
+        self.cache_creation_tokens = cache_creation_tokens
+
+    def to_dict(self) -> dict[str, int | None]:
+        return {
+            "cached_tokens": self.cached_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
+        }
+
+
 class _FakeUsage:
-    def __init__(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+    def __init__(
+        self,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        cached_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+    ) -> None:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.total_tokens = total_tokens
+        self.prompt_tokens_details = (
+            _FakePromptTokenDetails(cached_input_tokens, cache_creation_input_tokens)
+            if cached_input_tokens is not None or cache_creation_input_tokens is not None
+            else None
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "prompt_tokens_details": (
+                self.prompt_tokens_details.to_dict() if self.prompt_tokens_details is not None else None
+            ),
+        }
 
 
 class _CompactionTrackingStream:
@@ -130,6 +167,8 @@ async def test_compaction_signal_when_usage_exceeds_threshold(tmp_path: Path, mo
             "prompt_tokens": 50000,
             "completion_tokens": 200,
             "total_tokens": 50200,
+            "cached_input_tokens": None,
+            "cache_creation_input_tokens": None,
         }
         compaction_chunk = chunks[-1]
         assert "psi_compaction" in compaction_chunk
@@ -155,6 +194,40 @@ async def test_no_compaction_signal_when_under_threshold(tmp_path: Path, monkeyp
         assert usage_chunk["psi_usage"]["total_tokens"] == 5200
         for chunk in chunks:
             assert "psi_compaction" not in chunk
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.anyio
+async def test_usage_signal_preserves_provider_cache_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _CompactionTrackingStream(
+        [
+            _CompactionFakeChunk(content="Hello", finish_reason="stop"),
+            _CompactionFakeChunk(
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "cached_input_tokens": 70,
+                    "cache_creation_input_tokens": 10,
+                }
+            ),
+        ]
+    )
+    runner, socket_path = await _serve_compaction_handler(tmp_path, monkeypatch, stream)
+    try:
+        chunks = await _read_sse(socket_path)
+        usage_chunk = next(chunk for chunk in chunks if "psi_usage" in chunk)
+        assert usage_chunk["psi_usage"] == {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cached_input_tokens": 70,
+            "cache_creation_input_tokens": 10,
+        }
     finally:
         await runner.cleanup()
 

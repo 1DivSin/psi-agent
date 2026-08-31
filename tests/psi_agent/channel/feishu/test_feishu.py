@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
-from lark_channel import PolicyConfig
+from lark_channel import MediaBatchConfig, PolicyConfig, SafetyConfig
+from lark_channel.core.enum import LogLevel
 
 from psi_agent.channel._core import ChannelCore
 from psi_agent.channel._types import FileChunk, TextChunk
@@ -291,6 +292,11 @@ async def test_run_feishu_passes_policy_to_channel(monkeypatch):
     assert isinstance(policy, PolicyConfig)
     assert policy.require_mention is False
     assert policy.respond_to_mention_all is True
+    safety = captured["safety"]
+    assert isinstance(safety, SafetyConfig)
+    assert isinstance(safety.media_batch, MediaBatchConfig)
+    assert safety.media_batch.enabled is True
+    assert captured["log_level"] is LogLevel.WARNING
     # message + reject handlers both registered
     registered = {c.args[0] for c in channel.on.call_args_list}
     assert "message" in registered

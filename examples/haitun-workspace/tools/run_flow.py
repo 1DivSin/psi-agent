@@ -569,6 +569,8 @@ class _AgentSessionAdapter:
                 model_calls=usage.model_calls,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
             )
 
         config_token = _CURRENT_AGENT_CONFIG.set(config)
@@ -2520,6 +2522,8 @@ async def _execute_persisted_run(
                 model_calls=usage.model_calls,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
             )
 
         return await _complete_program_step(
@@ -2549,6 +2553,8 @@ async def _execute_persisted_run(
                     model_calls=usage.model_calls,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
+                    cached_input_tokens=usage.cached_input_tokens,
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens,
                 )
 
             return await _prepare_human_step(
@@ -2763,6 +2769,8 @@ async def run_flow(
                 model_calls=usage.model_calls,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
+                cached_input_tokens=usage.cached_input_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
             )
 
         return await _complete_program_step(
