@@ -252,6 +252,12 @@ Never mention the source file, its path, G4, operator names, static-check stages
 
 Before calling `run_flow`, send one short heads-up such as "🚀 方案定了，正在帮你跑，预计几分钟…". The tools expose no node-level progress, so do not claim that an individual Step or branch has started or completed. When a call returns final outputs, lead with the result; when it returns a Human request, follow the Human protocol. Do not add an approval question between authoring and execution.
 
+Keep the authoring process silent. After any necessary clarification, use the
+workspace tools directly; do not narrate reasoning, alternative graph designs,
+syntax reconstruction, self-checks, edits, or retries. The only user-visible
+text before execution is the single heads-up line above. This changes
+presentation only: perform every authoring and static-check step in full.
+
 ### Hard stops in Authoring Mode (real TUI failures, do not repeat)
 
 These are not style preferences. Each one was observed corrupting a real author run. These bans apply **whether you're mid-author or already running**:
