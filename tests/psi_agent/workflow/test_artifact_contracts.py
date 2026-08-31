@@ -242,7 +242,7 @@ async def test_same_type_comment_and_instruction_guidance_is_combined() -> None:
         assert contract.json_type == "object"
         assert "Keys are idx, query, and plan." in contract.description
         assert "exactly seven ordered day objects" in contract.description
-        assert "Keys are idx, query, and plan." in prompt
+        assert "Keys are idx, query, and plan." not in prompt
         assert "exactly seven ordered day objects" in prompt
         return {"result_data": {"idx": 1, "query": "trip", "plan": []}}
 
@@ -276,6 +276,8 @@ workflow enrich_flow {
     async def complete(prompt: str, context: CompletionContext) -> object:
         contexts.append(context)
         assert "one foreach iteration" in prompt
+        assert "Output Artifact contracts" not in prompt
+        assert "Return the value for output artifact" not in prompt
         return {"enriched_items": {"value": context.inputs["item"]}}
 
     outputs = await execute_workflow(source, inputs={"items": ["a", "b"]}, complete=complete)
@@ -293,6 +295,7 @@ async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
     sys.modules.pop("run_flow", None)
     module = importlib.import_module("run_flow")
     captured_schema: dict[str, object] = {}
+    captured_messages: list[str] = []
     responses = iter(
         (
             '{"result_data":"wrong type"}',
@@ -306,7 +309,8 @@ async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
         return object(), SimpleNamespace(messages=[])
 
     async def fake_complete_step_agent(agent, conversation, message, **kwargs):
-        del agent, conversation, message, kwargs
+        del agent, conversation, kwargs
+        captured_messages.append(message)
         return next(responses)
 
     monkeypatch.setattr(module, "_create_step_agent", fake_create_step_agent)
@@ -340,6 +344,44 @@ async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
             "type": "array",
         }
     }
+    assert captured_schema["required"] == ["result_data"]
+    assert captured_schema["additionalProperties"] is False
+    message = captured_messages[0]
+    assert "Execute exactly one assigned FusionFlow step" not in message
+    assert "Do not start another workflow" not in message
+    assert "Required output keys" not in message
+    assert "Reserved resources" not in message
+    assert "When the work is complete" not in message
+    assert "Step: transform_step" in message
+    assert "Executor: worker" in message
+    assert "Workspace root:" in message
+    assert (
+        'If submit_step_result is unavailable, return exactly one JSON object with exactly these keys: '
+        '["result_data"]; do not add prose or Markdown.'
+    ) in message
+
+    async def fake_custom_complete(agent, conversation, message, **kwargs):
+        del agent, conversation, kwargs
+        captured_messages.append(message)
+        return '{"result_data":[]}'
+
+    monkeypatch.setattr(module, "_complete_step_agent", fake_custom_complete)
+    config_token = module._CURRENT_AGENT_CONFIG.set(
+        module.AgentConfig(name="custom-worker", system_prompt="Follow the domain policy.")
+    )
+    try:
+        await module._complete_agent_step(
+            "Execute the step.",
+            context,
+            ai_socket="unix:///unused.sock",
+            tool_registry=SimpleNamespace(tools={}, get=lambda name: None),
+        )
+    finally:
+        module._CURRENT_AGENT_CONFIG.reset(config_token)
+    custom_message = captured_messages[-1]
+    assert "Execute exactly one assigned FusionFlow step" in custom_message
+    assert "Do not start another workflow" in custom_message
+    assert "call submit_step_result exactly once" in custom_message
 
 
 def test_run_flow_parses_typed_single_program_output() -> None:
