@@ -22,7 +22,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MACOS_DIR="$REPO_ROOT/.github/macos"
-WORKSPACE_SRC="$REPO_ROOT/examples/haitun-workspace"
+WORKSPACE_SRC="$REPO_ROOT/agents/feishu"
 ISS_FILE="$REPO_ROOT/.github/inno-setup/haitun.iss"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/macos-dist}"
 BUILD_DIR="$OUT_DIR/build"

@@ -3,7 +3,7 @@
 Some work cannot finish inside the turn that began it. Feishu authorization is the
 standard case: the code comes back only when the user gets around to tapping
 「同意授权」, so the wait is handed to a background task and the turn ends (see
-``examples/haitun-workspace/tools/_feishu_auth_watch.py`` for why waiting inside a
+``agents/feishu/tools/_feishu_auth_watch.py`` for why waiting inside a
 turn reads as "the bot is dead"). When that task finally succeeds, the thing the
 user actually asked for — 把文档建在他名下 —— is still undone, and there is no turn
 left to do it in: the background task has no tool loop, no model, no conversation.

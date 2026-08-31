@@ -34,7 +34,7 @@ AI 后端无状态，不保存任何信息。多个 Session 可以共享同一�
 JSONL 格式零依赖，逐行追加读写简单。现路径为 AppData ``{appdata}/histories/{session_id}.jsonl``（legacy ``{workspace}/histories/`` 双读），`session_id` 可由 CLI 传入以 resume。`SessionAgent.run()` 每次调用通过 ``async with self._conversation`` 进入上下文管理器——``Conversation`` 的 ``add / commit / rollback`` 实现回合级原子性。仅在回合成功完成（stop / tool_calls 全部执行 / unexpected finish / max rounds）时落盘；异常时 ``__aexit__`` 自动 ``rollback()`` 恢复内存到快照，磁盘不落地任何新消息。细节见 `session/AGENTS.md` / `gateway/AGENTS.md`。
 
 **为什么拆 agent / workspace / AppData 三区？**
-能力包（tools / system）与用户打开目录、进程记忆区解耦：同一 agent 可挂多个 workspace；定时任务 `schedules/` 跟着 **workspace** 走（同一 agent 挂不同 workspace 应有各自的提醒，见坑 17）；todos / history / Gateway `state/` 进 AppData（`platformdirs` / `--appdata` / `PSI_APPDATA`），避免写进用户项目树。路径助手在 ``psi_agent._appdata``（跨 Session/Gateway，避免循环导入）；**禁止**把 AppData 根塞进 Session ContextVar。分层细节见各层 `AGENTS.md`。
+能力包（tools / system）与用户打开目录、进程记忆区解耦：同一 agent 可挂多个 workspace；定时任务 `schedules/` 跟着 **workspace** 走（同一 agent 挂不同 workspace 应有各自的提醒，见坑 17）；todos / history / Gateway `state/` 进 AppData（`platformdirs` / `--appdata` / `PSI_APPDATA`），避免写进用户项目树。路径助手在 ``psi_agent._appdata``（跨 Session/Gateway，避免循环导入）；**禁止**把 AppData 根塞进 Session ContextVar。agent / workspace 两区的路径**机制**同样放在 gateway 包外的 ``psi_agent._workspace_paths``（桌面路径运算、mkdir、`tools/`+`skills/` 探测），品牌缺省名由 `gateway/_defaults.py` 作为参数传入——建 Session 的 manager 因此不反向依赖产品线包（见 `gateway/AGENTS.md`「工作区路径的机制与字面量分家」）。分层细节见各层 `AGENTS.md`。
 
 **为什么 socket 文件不自动 unlink？**
 支持热换 Server。每个 `session.post()` 新建 TCP/Unix 连接，由 `UnixConnector` 按路径重新 connect。只要新的服务进程绑定到同一 socket 路径，客户端无需重启即可继续通信。auto-unlink 会破坏这个能力——socket 文件需要保留，由新进程手动接管。
@@ -73,6 +73,7 @@ src/
     ├── _yaml.py               # 共享 YAML header 解析（scheduler + workspace system.py）
     ├── _sockets.py             # 共享 socket 工具（prefix-based transport 解析）
     ├── _appdata.py             # AppData 路径助手（todos/history/state；Session↔Gateway 共享）
+    ├── _workspace_paths.py     # 工作区/能力包路径机制（桌面路径、mkdir、tools+skills 探测）；不认识品牌名，缺省名由调用方传入
     ├── protocol.py             # 跨组件 SSE 协议归属（线格式类型 + finish_reason 常量 + 辅助帧/终止帧规则）
     ├── _feishu_routing.py      # 飞书群聊/私聊判定与路由键（Gateway↔Channel 共享）
     ├── _send_markers.py        # [SEND:] 解码：正则 + 空路径过滤（Channel↔Session 共享）
@@ -121,30 +122,52 @@ src/
     │   ├── cli/                    # 单次消息 CLI thin client
     │   ├── telegram/               # Telegram bot channel
     │   ├── feishu/                 # Feishu bot channel
-    └── gateway/
+    ├── runtime/                    # 实例注册表与生命周期（只认识内核，不认识任何接入形态）
+    │   ├── __init__.py             # 包说明 + 「不依赖 gateway」这条闸门的由来
+    │   ├── _manager.py             # 共享类型 + helpers
+    │   ├── _ai_manager.py          # AIManager
+    │   ├── _session_manager.py     # SessionManager
+    │   ├── _scheduler_manager.py   # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
+    │   ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
+    │   ├── _title_manager.py       # 会话标题 CRUD + AI 生成
+    │   ├── _summary_manager.py     # 任务摘要 CRUD + AI 生成
+    │   ├── _chat_manager.py        # SSE 流式对话管理
+    │   ├── _history_manager.py     # JSONL 历史读取
+    │   └── _todo_manager.py        # 会话 todo 列表读取
+    └── gateway/                     # 骨架层：两条产品线的共同装配 + 公共端点
         ├── AGENTS.md                # Gateway 层设计文档
         ├── __init__.py              # Gateway dataclass + run()
-        ├── _manager.py             # 共享类型 + helpers
-        ├── _ai_manager.py         # AIManager
-        ├── _free_model.py          # 免费模型哨兵 key → 登录 token（同源校验）
-        ├── _session_manager.py    # SessionManager
-        ├── _scheduler_manager.py  # SchedulerManager — 每 workspace 一个全量激活的调度 Session（触发其 schedules/）
-        ├── _router_manager.py      # RouterManager — 内部语义路由服务注册表
-        ├── _feishu_manager.py      # FeishuManager — 飞书 open_id → Session 路由
-        ├── _oauth_manager.py       # OAuthRelay — OAuth 回调中继（免手抄授权码）
-        ├── _title_manager.py       # 会话标题 CRUD + AI 生成
+        ├── server.py                # create_core_app + 核心 handler（/ais /routers /sessions /titles /summaries /defaults）
+        ├── _defaults.py             # ToC 品牌字面量 + GET /defaults 的解析入口
         ├── _state.py               # GatewayState — 状态持久化 (state/latest.json)
-        ├── server.py               # aiohttp REST handlers
-        ├── _chat_manager.py        # SSE 流式对话管理
-        ├── _history_manager.py     # JSONL 历史读取
-        ├── _workspace_manager.py   # 目录浏览
-        ├── _openapi.py             # OpenAPI schema 生成
-        ├── _attention.py           # AttentionHub — tray/webview 注意力提示
-        ├── _tray.py                # 系统托盘图标 (pystray)
-        ├── _webview.py            # 原生 webview 窗口 (pywebview)
-        ├── spa/                    # Vue 3 SPA v1（Vite + SFC）
-        └── spa-v2/                 # React SPA v2（任务工作台；默认 GET /）
+        ├── _openapi.py             # OpenAPI 装配（按产品线开关拼三份片段）
+        ├── _openapi_core.py        # 公共 path 片段
+        ├── desktop/                 # **ToC 专属层**
+        │   ├── _routes.py          # register_desktop_routes + ToC handler（/ui/* /workspace/* /auth/*）
+        │   ├── _free_model.py      # 免费模型哨兵 key → 登录 token（同源校验）
+        │   ├── _auth_manager.py    # AuthManager — 云端账号服务转发 + 登录态
+        │   ├── _auth_store.py      # 本机凭证加密落盘
+        │   ├── _workspace_manager.py  # 目录浏览（认识 Windows 盘符）
+        │   ├── _attention.py       # AttentionHub — tray/webview 注意力提示
+        │   ├── _tray.py            # 系统托盘图标 (pystray)
+        │   ├── _webview.py        # 原生 webview 窗口 (pywebview)
+        │   ├── _ui_prefs.py        # SPA 一次性 UI 标记
+        │   ├── _spa_shell.py       # SPA 外壳注入（app_name）
+        │   ├── _openapi.py         # ToC path 片段（/ui/* /workspace/*）
+        │   ├── spa/                # Vue 3 SPA v1（Vite + SFC）
+        │   └── spa-v2/             # React SPA v2（任务工作台；默认 GET /）
+        └── feishu/                  # **ToB 专属层**
+            ├── _routes.py          # register_feishu_routes + /feishu/*（含免登 /feishu/auth/*、/feishu/defaults、按身份过滤的 /feishu/sessions 一族）+ /feishu-web/；register_oauth_routes + /oauth/callback /oauth/code
+            ├── _auth.py            # FeishuAuth — code → user_access_token（app_secret 不下发前端）
+            ├── _identity.py        # 请求身份解析（open_id → 会话可见性过滤）
+            ├── _feishu_manager.py  # FeishuManager — 飞书 open_id → Session 路由
+            ├── _oauth_manager.py   # OAuthRelay — OAuth 回调中继（免手抄授权码；取件方全在 ToB 一侧）
+            └── _openapi.py         # ToB path 片段（FEISHU_PATHS /feishu/*）+ OAUTH_PATHS（/oauth/*，与 --gateway 正交）
 ```
+
+gateway 内部同样是**单向**的：骨架层不 import `desktop/` 与 `feishu/`，两条产品线由各自包内的 `register_desktop_routes()`（`desktop/_routes.py`）/ `register_feishu_routes()`（`feishu/_routes.py`）往骨架产出的 app 上贴。归属判据是「这段代码认识哪些概念」，不是「当前谁在调用」。A5 搬完模块后这条曾不成立——两个装配函数还留在 `server.py`，骨架为给它们备料反向 import 了 7 个产品符号；A7 把函数连同专属 handler 搬进产品包收掉。判据命令与 `_openapi.py` 那一处刻意例外（只碰 dict 数据、不碰产品行为）见 `gateway/AGENTS.md`「依赖方向」。
+
+`runtime/` 与 `gateway/` 的依赖方向**单一**：gateway 组装 runtime 的 manager 并接到 REST + Web UI 上，runtime 反过来对 gateway 一无所知。这条边由 `git grep -n "from psi_agent.gateway" -- src/psi_agent/runtime/` 必须无输出来守。
 
 项目使用 **src-layout**（`src/psi_agent/`），由 `uv sync` 安装为 editable package。
 
@@ -155,7 +178,8 @@ src/
 - **Session 层**: `src/psi_agent/session/AGENTS.md` — workspace 启动、agent loop、tool 加载调用、schedule 机制、history 持久化、context compaction
 - **Router 层**: `src/psi_agent/router/AGENTS.md` — 单目标分流、广播聚合、Fallback、组合与 SSE/隐私/取消不变量
 - **Channel 层**: `src/psi_agent/channel/AGENTS.md` — ChannelCore 公共部件、REPL/CLI/Telegram/Feishu 约定
-- **Gateway 层**: `src/psi_agent/gateway/AGENTS.md` — 生命周期管理、REST API、Web Console SPA、CI 打包
+- **Runtime 层**: `src/psi_agent/runtime/AGENTS.md` — AI / Session / Router 实例注册表与生命周期、标题/摘要/历史/todo 投影
+- **Gateway 层**: `src/psi_agent/gateway/AGENTS.md` — REST API、Web Console SPA、飞书路由、认证、CI 打包
 
 ## 核心通信协议
 
@@ -353,7 +377,7 @@ async def handler(request):
   - `tests/integration/conftest.py:112` — pytest async generator fixture 的返回类型局限（`yield` 导致函数被推断为 AsyncGenerator，与标注的 MockAIServer 冲突）
   - `src/psi_agent/gateway/server.py:257` — `anyio.to_thread.run_sync(file_field.file.read)` 返回类型 Any，ty 无法推断
   - `src/psi_agent/gateway/__init__.py:152,167,169`（3 处）— `anyio.to_thread.run_sync(webbrowser.open, ...)` / `anyio.to_thread.run_sync(tray.wait_stop, ...)` / `anyio.to_thread.run_sync(wv.wait_closed, ...)` 同上
-  - `src/psi_agent/gateway/_webview.py:40`（1 处）— `events.closing` 无法解析，因 webview 由 `__import__("webview")` 动态导入
+  - `src/psi_agent/gateway/desktop/_webview.py:40`（1 处）— `events.closing` 无法解析，因 webview 由 `__import__("webview")` 动态导入
   - `src/psi_agent/channel/cli/client.py:16` — `anyio.to_thread.run_sync(sys.stdin.read)` 同上
 - **例外**：`examples/` 下的示例 workspace（如 `a-serper-mcp-workspace/tools/_mcp.py`）含若干 `# ty: ignore`（动态 MCP 工具的运行时签名构造），属示例代码，不计入上述核心约定。
 
@@ -370,9 +394,9 @@ async def handler(request):
 ## 注释约定
 
 - **语种与风格跟随所在文件**，不跟随个人习惯：改一个文件前先看它现有的注释/docstring 是英文还是中文，然后与之保持一致。**单个 `.py` 文件内必须统一**
-- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/_feishu_manager.py`、`gateway/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`gateway/_session_manager.py` 通篇英文
+- 仓库整体是混合的（`src/` 与 `tests/` 均约 1:6 中英），但这不是「随便写」的许可——它是逐文件收敛的结果。典型：`gateway/feishu/_feishu_manager.py`、`runtime/_scheduler_manager.py` 与其对应测试通篇中文；`session/schedule_registry.py`、`session/agent.py`、`gateway/server.py`、`runtime/_session_manager.py` 通篇英文
 - **`刻意为之:` 是例外**，可嵌在英文注释里作反直觉行为的标记词（如 `# prompt = LLM turn on task_content; tool = direct ToolRegistry call (刻意为之).`）。它是全仓统一的检索词，配合「改动后自检清单」第 1 条使用，不算破坏语种一致性
-- 新建文件按**同层同类邻居**定语种（如 `gateway/_scheduler_manager.py` 对标 `gateway/_feishu_manager.py`），别按仓库全局比例猜
+- 新建文件按**同层同类邻居**定语种（如 `runtime/_scheduler_manager.py` 对标 `gateway/feishu/_feishu_manager.py`），别按仓库全局比例猜
 - 中文注释里避免全角 `，`、`（`、`）`、`：` 与 `×`——ruff 的 RUF001/002/003 报 ambiguous unicode，一律改半角 `,` `(` `)` `:` 和 `x`；`。`、`——`、`「」`、`→` 不在规则里，可用（本条以 `ruff check --isolated --select RUF001,RUF002,RUF003` 实测为准）
 
 ## 开发命令
@@ -392,12 +416,12 @@ uv build                         # 构建
 
 本仓常被同时 checkout 成多棵工作树并行施工（前端树 / workspace 树 / 参谋树）。约定如下：
 
-- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `examples/haitun-workspace/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
+- **一棵树只改一个区**：前端树只碰 `src/psi_agent/gateway/desktop/spa-v2/`（及必要的 Gateway 壳 / spa v1）；workspace 树主要碰 `agents/feishu/`，以及必要的 Session / Gateway 服务端。越区改动优先换树，而不是在本树顺手改
 - **同 remote ≠ 同磁盘**：别人把分支合进 `main`，不会自动出现在你的工作树里；要用 `git fetch` 后显式合并
 - **接 `main` 时停在自己的 `feat/…` 上**：`git fetch origin` → 先 commit 或 stash 保护 WIP → `git merge origin/main`。冲突以各层 `AGENTS.md` 为准（保留三区 / AppData / ContextVar 约定后再叠自己的功能）
 - **禁止**擅自 `git reset --hard origin/main`——它会丢掉本树的本地提交，除非用户明确要求
-- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `examples/haitun-workspace/AGENTS.md` 或 `spa-v2/AGENTS.md`
-- **各区验收命令看本层文档**：Python 侧见上面「开发命令」；前端侧见 `spa-v2/AGENTS.md`「本地开发」（`npm run build` 后经 Gateway 硬刷验收，该目录没有 `npm test`）
+- **阅读顺序**：根 `AGENTS.md` → `session/AGENTS.md` → `gateway/AGENTS.md` → `agents/feishu/AGENTS.md` 或 `gateway/desktop/spa-v2/AGENTS.md`
+- **各区验收命令看本层文档**：Python 侧见上面「开发命令」；前端侧见 `gateway/desktop/spa-v2/AGENTS.md`「本地开发」（`npm run build` 后经 Gateway 硬刷验收，该目录没有 `npm test`）
 
 ## 改动后自检清单（Definition of Done）
 
@@ -417,7 +441,7 @@ C 端注册登录的云端服务**不在本仓库**，在服务器 `/srv/psi-clo
 
 - 两侧只通过 HTTP 契约耦合。契约的权威定义是云端的 `/openapi.json`（自动生成，不会与实现脱同步）。
 - 云端的目录结构、模块契约与硬规则记在 `/srv/psi-cloud/AGENTS.md`，**本文不重复**。一句话概括：`core/` 是框架且不认识任何业务，`modules/` 下每个目录一块业务自报清单，认证是 `modules/auth`。
-- 本机侧只有 `gateway/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
+- 本机侧只有 `gateway/desktop/_auth_manager.py` 与 `_auth_store.py` 两个文件与它对接，**不持任何供应商密钥**。改动云端接口要同步上面那份设计文档。
 
 ## 未来扩展方向
 

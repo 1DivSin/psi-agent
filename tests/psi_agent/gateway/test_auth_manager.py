@@ -19,7 +19,7 @@ import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
 
-from psi_agent.gateway._auth_manager import AuthManager, classify_failure
+from psi_agent.gateway.desktop._auth_manager import AuthManager, classify_failure
 
 
 async def _manager(tmp_path: Path) -> AuthManager:
