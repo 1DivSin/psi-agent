@@ -11,9 +11,7 @@ _SKILL_PATH = _ROOT / "examples" / "haitun-workspace" / "skills" / "workflow" / 
 
 def _verifier_section() -> str:
     skill = _SKILL_PATH.read_text(encoding="utf-8")
-    return skill.split("### Adversarial verifier pattern", 1)[1].split(
-        "#### Full-featured in-context example", 1
-    )[0]
+    return skill.split("### Adversarial verifier pattern", 1)[1].split("#### Full-featured in-context example", 1)[0]
 
 
 def test_authoring_prompt_builds_verifier_from_visible_contract_and_evidence() -> None:
@@ -41,7 +39,7 @@ def test_authoring_prompt_builds_verifier_from_visible_contract_and_evidence() -
 
 
 def test_non_travel_release_notes_can_compile_analyze_build_verify_shape() -> None:
-    source = r'''
+    source = r"""
 const task_contract: Artifact;
 const change_evidence: Artifact;
 const change_analysis: Artifact;
@@ -78,21 +76,17 @@ workflow release_notes {
   step_name(verify_notes) == "Adversarially Verify Notes";
   step_instruction(verify_notes) == "Refute the candidate from the inputs; report checks and return corrected notes.";
 }
-'''
+"""
 
     compiled = compile_workflow(source)
     graph = compiled.graph
 
     assert [step.step_id for step in graph.steps] == ["analyze_changes", "build_notes", "verify_notes"]
     verifier_inputs = {
-        edge.artifact_id
-        for edge in graph.edges
-        if isinstance(edge, ConsumesEdge) and edge.step_id == "verify_notes"
+        edge.artifact_id for edge in graph.edges if isinstance(edge, ConsumesEdge) and edge.step_id == "verify_notes"
     }
     verifier_outputs = {
-        edge.artifact_id
-        for edge in graph.edges
-        if isinstance(edge, ProducesEdge) and edge.step_id == "verify_notes"
+        edge.artifact_id for edge in graph.edges if isinstance(edge, ProducesEdge) and edge.step_id == "verify_notes"
     }
     assert verifier_inputs == {"task_contract", "change_evidence", "candidate_notes"}
     assert verifier_outputs == {"verification_report", "final_notes"}
