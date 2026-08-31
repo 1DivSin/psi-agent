@@ -308,7 +308,7 @@ user.
 ### The 5-step author loop
 
 1. **Understand intent** — restate the user's goal in 1 sentence. If genuinely ambiguous, ask **one** clarifying question (don't grill them). Note whether the user looks like a *developer* (asked to edit Workflow G4 source or mentioned operators) — that's the only case where you show technical detail later. Everyone else gets the minimal plain-language summary.
-2. **Model the workflow** — complete the planning contract and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts.
+2. **Model the workflow** — complete the planning contract and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. When an Agent-built candidate can be checked and corrected from the same visible task contract and evidence, append the adversarial verifier pattern below.
 3. **Author one Workflow G4 source** — before writing, read `grammar/FusionFlow.g4` completely and treat it as the sole source of truth for FusionFlow syntax and preset operators. Use only declarations, assertions, terms, and operators documented there. Use the workspace-provided target path; never invent a second copy.
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
@@ -378,11 +378,59 @@ Read `grammar/FusionFlow.g4` completely before using these patterns. The grammar
 | --- | --- | --- |
 | **Fan-out + fan-in** | Several Steps each use `consumes(step) == [shared_artifact]`; one final Step uses `consumes(final_step) == [result_a, result_b]`. Set `max_concurrency` on the workflow when needed. | PR review, multi-perspective audit, content moderation. |
 | **Artifact pipeline** | Each Step produces the Artifact consumed by the next Step. Use `max_attempts` only when rerunning that individual Step is safe. | Writing, ETL, and refine-and-check work. |
+| **Adversarial verifier** | An independent final Agent Step consumes the task contract, the same evidence available to the builder, and its candidate. It tries to refute the candidate, records evidence for each check, and emits either the unchanged candidate or a corrected final Artifact. | Any reviewable Agent-built result whose claims, constraints, calculations, consistency, or output contract can be checked from visible inputs. |
 | **Per-item map** | Bind one List-valued source Artifact with `foreach_item`; use workflow `max_concurrency` or resources when a limit is needed. | Parallel processing with ordered results; ordinary failures are raised together after siblings finish. |
 | **Named Artifact selection** | Keep every candidate result explicit, then bind `selected_artifact == if(formula, artifact_a, artifact_b)` and use `selected_artifact` in ordinary dataflow. For priority selection, chain named intermediate Artifacts. | Eagerly run all candidate producers, then choose one value for downstream Steps. |
 | **Composite workflow** | Combine artifact chains, fan-out/fan-in, explicit bounded Agent Steps, and named Artifact selections. | When one simple pattern does not cover the task. |
 
 Before reporting a missing capability for a conditional request, first check whether eager value selection is sufficient. Named Artifact selection runs every candidate producer and only selects the value passed downstream. If the request requires lazy branch activation or guarantees that an unselected producer will not run, report that limitation instead of emitting an approximation. Never invent a keyword or operator to make the source look complete.
+
+### Adversarial verifier pattern
+
+Use this pattern as an authoring prompt, not as a fixed domain checklist. Add it
+when a builder produces a reviewable candidate and the verifier can perform a
+meaningful independent check from the same visible task contract and evidence.
+Do not add it to a side-effect-only Step or when correction would require facts
+that are absent from the consumed Artifacts.
+
+Author a final Agent-backed verifier Step that consumes:
+
+- the original task contract or requirements Artifact;
+- the same source evidence used to build the candidate; and
+- the candidate Artifact itself.
+
+Adapt the following prompt to the actual Artifact IDs and declared output
+contract. Put it in a companion instruction Markdown file when it is too long
+for one `step_instruction` string:
+
+```text
+You are an adversarial verifier for a candidate result. Do not call tools or
+introduce external facts. Treat the consumed task contract and source evidence
+as the complete ground truth, and treat the consumed candidate as untrusted.
+
+Build a checklist from the visible task contract. At minimum, try to refute:
+1. every explicit requirement and constraint;
+2. every factual claim that should be traceable to the supplied evidence;
+3. every derived value or calculation that can be recomputed;
+4. internal consistency across the whole candidate; and
+5. the requested output structure and completeness.
+
+Report PASS or FAIL for each applicable check with concrete evidence. Do not
+invent a check from hidden scoring feedback or task-specific knowledge that is
+absent from the consumed inputs. If every check passes, set the verdict to OK
+and preserve the candidate exactly. If any check fails, set the verdict to
+FIXED and produce a fully corrected final result using only the same inputs.
+Never leave placeholders. Return exactly the verifier Step's declared Artifact
+mapping: the verification report and the final result.
+```
+
+The verifier is one independent check-and-correct Step, not an evaluator-driven
+retry loop. It receives no privileged source and does not call the builder
+again. Declare a report Artifact and a final Artifact; expose only the final
+Artifact through `output_workflow` unless the user explicitly asks to receive
+the report too. For example, a release-note workflow can analyze a change set,
+build draft notes, then have the verifier check every statement against that
+same change evidence and correct unsupported or inconsistent claims.
 
 #### Full-featured in-context example
 
