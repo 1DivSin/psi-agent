@@ -1178,13 +1178,17 @@ def _build_dispatch(
                 allow_program_errors=True,
             )
 
-        prompt = (
-            f"Instruction:\n{instruction}\n\n"
-            f"Inputs: "
-            f"{json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}\n"
-            f"{_contracts_text('Input Artifact contracts', input_contracts)}\n"
-            f"{output_contract}"
-        )
+        prompt_parts = [
+            f"Instruction:\n{instruction}",
+            f"Inputs: {json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}",
+            _contracts_text("Input Artifact contracts", input_contracts),
+        ]
+        if foreach_iteration:
+            prompt_parts.append(
+                "This is one foreach iteration. Return one element for each output Artifact; "
+                "the runtime collects those elements into the declared aggregate Artifact."
+            )
+        prompt = "\n\n".join(prompt_parts)
         if complete is None:
             raise AssertionError("completion preflight did not select a completion")
         result = await complete(
