@@ -294,6 +294,13 @@ This is the flagship: turn a natural-language intent into a runnable G4 workflow
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
 
+Route each large database, search, or reference Artifact to exactly one
+downstream Agent that needs its full payload. If selection, assembly, or later
+correction all need the same candidates, keep those decisions with that Agent
+instead of attaching the candidate Artifact to several Agent Steps. Preserve
+the complete source result in its Artifact; pass only compact derived results
+to other Steps.
+
 Never mention the source file, its path, G4, operator names, static-check stages, or internal runnable artifacts to a non-technical user. From their side you are just doing the task they asked for. If they ask "你在干嘛 / 怎么做的", answer in plain business language ("我让几个分析分头跑、再汇总").
 
 ### Talking to the user while you work
