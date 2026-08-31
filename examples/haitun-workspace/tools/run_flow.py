@@ -2341,19 +2341,29 @@ async def _complete_agent_step(
         if agent_config.reasoning_effort is not None:
             extra_params["reasoning_effort"] = agent_config.reasoning_effort
         extra_params = {name: value for name, value in extra_params.items() if value is not None}
-    message = (
-        "Execute exactly one assigned FusionFlow step. Do not start another workflow.\n"
-        f"Workspace root: {workspace}\n"
-        "Resolve every relative file path against that workspace root.\n"
-        f"Step: {context.step_id}\n"
-        f"Executor: {context.executor_id}\n"
-        f"Reserved resources: {json.dumps(_resource_payload(context), ensure_ascii=False, sort_keys=True)}\n"
-        f"Required output keys: {json.dumps(context.output_ids, ensure_ascii=False)}\n"
-        f"{prompt}\n"
-        "When the work is complete, call submit_step_result exactly once and by itself. "
-        "If tool calling is unavailable, respond with exactly one JSON object keyed by exactly "
-        "those output keys, with no surrounding prose or Markdown."
+    uses_default_system_prompt = agent_config is None or agent_config.system_prompt == _STEP_SYSTEM_PROMPT
+    message_parts: list[str] = []
+    if not uses_default_system_prompt:
+        message_parts.append("Execute exactly one assigned FusionFlow step. Do not start another workflow.")
+    message_parts.extend(
+        (
+            f"Workspace root: {workspace}",
+            "Resolve every relative file path against that workspace root.",
+            f"Step: {context.step_id}",
+            f"Executor: {context.executor_id}",
+        )
     )
+    resources = _resource_payload(context)
+    if resources:
+        message_parts.append(f"Reserved resources: {json.dumps(resources, ensure_ascii=False, sort_keys=True)}")
+    message_parts.append(prompt)
+    if not uses_default_system_prompt:
+        message_parts.append("When the work is complete, call submit_step_result exactly once and by itself.")
+    message_parts.append(
+        "If submit_step_result is unavailable, return exactly one JSON object with exactly these keys: "
+        f"{json.dumps(context.output_ids, ensure_ascii=False)}; do not add prose or Markdown."
+    )
+    message = "\n".join(message_parts)
 
     def stop_after_submission() -> bool:
         nonlocal submission_error
