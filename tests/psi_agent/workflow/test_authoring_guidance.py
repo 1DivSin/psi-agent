@@ -39,3 +39,37 @@ def test_guidance_excludes_quality_and_repair_policy() -> None:
         "repair",
     ):
         assert excluded_policy not in planning
+
+
+def test_bounded_workflow_defaults_preserve_the_dynamic_carrier_limits() -> None:
+    skill = _SKILL_PATH.read_text(encoding="utf-8")
+    bounded = _section(skill, "Bounded workflow defaults")
+
+    for required_guidance in (
+        "at most 3 logical execution phases",
+        "at most 5 Agent Steps",
+        "at most 5 tool calls",
+        "try one alternative and then move on",
+        "workflow_timeout(workflow_id) == 600",
+        "good-enough result",
+        "Parallelize only independent work",
+    ):
+        assert required_guidance in bounded
+
+
+def test_bounded_defaults_are_domain_neutral_for_document_review() -> None:
+    skill = _SKILL_PATH.read_text(encoding="utf-8")
+    bounded = _section(skill, "Bounded workflow defaults")
+
+    assert "document-review workflow" in bounded
+    assert "independent reviews" in bounded
+    assert "dependent synthesis Step" in bounded
+    for domain_term in (
+        "TravelPlanner",
+        "flight",
+        "accommodation",
+        "restaurant",
+        "attraction",
+        "itinerary",
+    ):
+        assert domain_term not in bounded
