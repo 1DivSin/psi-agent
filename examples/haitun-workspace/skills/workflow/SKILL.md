@@ -321,29 +321,10 @@ only when a consumer needs all of their results. Keep this contract in the
 authoring context; do not expose framework planning detail to a non-technical
 user.
 
-### Bounded workflow defaults
-
-Keep every authored workflow small and fast. Follow these limits exactly:
-
-1. Use at most 3 logical execution phases and at most 5 Agent Steps total.
-2. Prefer sequential phases over deep nesting or excessive parallelism.
-3. Instruct each Agent Step to make at most 5 tool calls. If a tool returns no
-   results, try one alternative and then move on; do not loop or retry
-   repeatedly.
-4. Set `workflow_timeout(workflow_id) == 600` so the entire workflow completes
-   within 10 minutes. Bias toward a good-enough result that satisfies the
-   planning contract instead of slow optimization.
-5. Do not create Agent Steps for work that graph structure or a deterministic
-   Program Step can perform directly. Parallelize only independent work.
-
-For example, a document-review workflow can run independent reviews in
-parallel and then pass their results to one dependent synthesis Step; formatting
-that can be performed deterministically does not need another Agent Step.
-
 ### The 5-step author loop
 
 1. **Understand intent** — restate the user's goal in 1 sentence. If genuinely ambiguous, ask **one** clarifying question (don't grill them). Note whether the user looks like a *developer* (asked to edit Workflow G4 source or mentioned operators) — that's the only case where you show technical detail later. Everyone else gets the minimal plain-language summary.
-2. **Model the workflow** — complete the planning contract, apply the bounded workflow defaults, and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. When an Agent-built candidate can be checked and corrected from the same visible task contract and evidence, append the adversarial verifier pattern below.
+2. **Model the workflow** — complete the planning contract and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. When an Agent-built candidate can be checked and corrected from the same visible task contract and evidence, append the adversarial verifier pattern below.
 3. **Author one Workflow G4 source** — before writing, read `grammar/FusionFlow.g4` completely and treat it as the sole source of truth for FusionFlow syntax and preset operators. Use only declarations, assertions, terms, and operators documented there. Use the workspace-provided target path; never invent a second copy.
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
@@ -814,7 +795,6 @@ Before the initial `run_flow` call, inspect the source in order:
 - each operator uses the documented arity and supported shape;
 - each Step has a supported Agent, Human, or Program executor, name, instruction, and explicit data/control dependencies;
 - the planning contract covers intent, success, interfaces, responsibilities, constraint ownership, dependencies, and operational limits;
-- the source follows the bounded workflow defaults, including `workflow_timeout(workflow_id) == 600`;
 - no residual or unsupported operator is emitted.
 
 This manual source review is not a second tool or CLI invocation. Inside `run_flow`, `check_workflow` requires exactly one workflow, delegates graph semantics to `WorkflowGraphCompiler`, rejects unsupported residual assertions and graph values with explicit concepts that omit `Artifact`, requires every Step instruction and Program path, and rejects untyped or ambiguous executor declarations. Parsing, checking, and compilation all occur before dispatch.
