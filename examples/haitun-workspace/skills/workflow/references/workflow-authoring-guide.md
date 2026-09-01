@@ -58,9 +58,9 @@ the checked branch results only for deduplication, prioritization, or reporting.
 
 ### Research
 
-Use genuinely different discovery modes when the question warrants them, such
-as structure-first, content-first, chronology-first, primary-source-first, or
-contradiction-first. Record source identity, coverage, unavailable material,
+Use multiple modalities and genuinely different discovery modes when the
+question warrants them, such as structure-first, content-first,
+chronology-first, primary-source-first, or contradiction-first. Record source identity, coverage, unavailable material,
 and uncertainty. Finish with a completeness check when omissions matter.
 
 ### Migrate or transform
@@ -111,7 +111,7 @@ step needs all of the listed artifacts. A step that merely runs after another
 through ordering does not receive the earlier result unless that result is an
 explicit input.
 
-## Scale deliberately
+## Scale deliberately and avoid silent caps
 
 Use concurrency for a real user, service, memory, rate, mutation, or cost
 constraint. Avoid a silent cap: make limits visible in the input, contract, instruction, or a
@@ -129,7 +129,8 @@ requested coverage, and user-stated cost or latency limits.
   evidence available to its builder. It records concrete counterevidence and
   uncertainty rather than merely confirming the result.
 - Distinct checking lenses may cover factual support, consistency, boundaries,
-  reproducibility, safety, performance, or contract compliance. Each lens must
+  reproducibility, safety, performance, or contract compliance. Use different
+  lenses when the candidate has more than one independent way to fail. Each lens must
   state what would disprove the candidate.
 - A candidate panel is useful when several approaches deserve independent
   comparison. Judges receive all candidates and the same explicit criteria.
