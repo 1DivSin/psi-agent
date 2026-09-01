@@ -153,12 +153,7 @@ def test_foreach_submission_uses_declared_item_schema() -> None:
 
 def test_skill_documents_program_enforced_parameter_contracts() -> None:
     skill = (
-        Path(__file__).parents[3]
-        / "examples"
-        / "haitun-workspace"
-        / "skills"
-        / "workflow"
-        / "SKILL.md"
+        Path(__file__).parents[3] / "examples" / "haitun-workspace" / "skills" / "workflow" / "SKILL.md"
     ).read_text(encoding="utf-8")
 
     assert "program-enforced parameter and output constraints" in skill

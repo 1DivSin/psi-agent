@@ -290,9 +290,7 @@ def _artifact_contract_directives(text: str, *, context: str) -> dict[str, Artif
                 raise ValueError(f"Artifact schema in {context} at line {line_number} must be a JSON object")
             description = schema.get("description")
             if not isinstance(description, str) or not description.strip():
-                raise ValueError(
-                    f"Artifact schema in {context} at line {line_number} requires a non-empty description"
-                )
+                raise ValueError(f"Artifact schema in {context} at line {line_number} requires a non-empty description")
             if "type" not in schema:
                 raise ValueError(f"Artifact schema in {context} at line {line_number} requires a top-level type")
             contract = ArtifactContract(description=description, schema=schema)
@@ -378,8 +376,7 @@ def _json_values_equal(left: object, right: object) -> bool:
     if isinstance(left, list):
         right_list = cast(list[object], right)
         return len(left) == len(right_list) and all(
-            _json_values_equal(left_item, right_item)
-            for left_item, right_item in zip(left, right_list, strict=True)
+            _json_values_equal(left_item, right_item) for left_item, right_item in zip(left, right_list, strict=True)
         )
     if isinstance(left, Mapping):
         left_mapping = cast(Mapping[object, object], left)
