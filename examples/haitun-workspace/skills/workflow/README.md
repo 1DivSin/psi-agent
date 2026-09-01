@@ -46,6 +46,14 @@ launcher process CWD.
 This Skill ships no runnable workflow registry. Workspace owners may commit
 canonical reusable declarations under `flows/workflows/<slug>/`.
 
+## Authoring reference
+
+- `references/dynamic-workflow-authoring.md`: domain-neutral construction
+  guidance adapted from the extracted Claude Code v2.1.248 Workflow prompts and
+  mapped onto the capabilities FusionFlow G4 actually implements.
+- `references/PIEBALD_LICENSE.md`: the complete MIT notice carried by the
+  Piebald source repository for that adaptation.
+
 ## Modules
 
 - `grammar/FusionFlow.g4`: the syntax grammar; ordinary preset/external-operator arity remains checker-owned.

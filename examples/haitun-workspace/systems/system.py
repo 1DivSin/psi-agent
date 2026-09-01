@@ -980,12 +980,21 @@ class System:
         return f"""## Workflow (formal language; explicit legacy fallback)
 
 Workflow is defined by `FusionFlow.g4`. Use `workflow` and
-`run_flow` by default for multi-agent or multi-step work.
+`run_flow` only under the explicit orchestration authorization below.
 
 ### Reusable workflow registry
 
-When the user asks in natural language to save, list, load, or reuse a saved
-Workflow declaration (for example, `调用 daily-brief 的 workflow`):
+When the user asks in natural language to save, list, load, inspect, or reuse a
+saved Workflow declaration, first read the full skill instructions at:
+   {workflow_md}
+   Relative path: skills/workflow/SKILL.md
+
+A save, list, load, or inspect request is management-only. Perform the requested
+registry operation and do not call `run_flow` unless the user also asks to run
+or invoke the declaration.
+
+For an explicit saved-workflow invocation (for example,
+`调用 daily-brief 的 workflow`):
 1. Read the full skill instructions at:
    {workflow_md}
    Relative path: skills/workflow/SKILL.md
@@ -1006,20 +1015,22 @@ The reusable registry root is fixed at {workflow_registry_dir}.
 {flows_index}
 
 ### When to activate
-When the user describes a workflow-shaped task - multi-agent collaboration, parallel review,
-fan-out/fan-in, pipelines, multi-step research or scoring, or running a `.workflow`
-or `.g4` file - activate Workflow.
+Author or run Workflow only when the user explicitly requests a workflow,
+multi-agent orchestration, coordinated agents or roles, fan-out/fan-in, a
+multi-agent review or debate, a concrete `.workflow`/`.g4` run, or a saved
+workflow invocation. The authorization must come from the user's words or from
+a user-invoked Skill whose instructions explicitly require Workflow.
 
-**Multi-agent simulation is workflow-shaped - build a flow, do NOT role-play it yourself.**
-Any task that simulates several distinct agents/personas interacting is a Workflow task:
-a debate among N sides (三方辩论), a role-play conversation or roundtable (多角色对话/圆桌),
-a negotiation (谈判), red-team vs blue-team (红蓝对抗), a panel of experts / multi-expert
-review (多专家会诊/多角度评审), interviewer-vs-candidate, or any "let a few AIs each play a
-role and interact" request. When you recognize one, your DEFAULT action is to enter Workflow
-Authoring Mode and build a `.workflow` where each role is its own Agent Step.
-Use named Artifacts and explicit dependencies for parallel branches and a final synthesizer.
-Do NOT play the roles yourself in a single reply.
-Only skip the flow if the user explicitly says they want a one-off answer and not a tool.
+A task that merely benefits from parallelism, multiple perspectives, or
+several model calls does not count. Do not infer permission from task size,
+research depth, or a multi-step shape. Use the ordinary task path and available
+individual-subagent tools. If Workflow would materially change the cost or
+scale, briefly describe the proposed orchestration and its approximate cost or
+latency, then ask whether to use it before authoring or running anything.
+
+An explicit request to simulate several agents or roles is already opt-in.
+Build a `.workflow` where each role is its own Agent Step, use named Artifacts
+and explicit dependencies, and do not role-play all roles in one parent reply.
 
 To activate:
 1. Read the full skill instructions at:
