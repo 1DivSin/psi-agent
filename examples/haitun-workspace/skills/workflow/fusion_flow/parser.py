@@ -35,6 +35,20 @@ class ParseContext:
     operators: dict[str, Operator]
 
 
+def parse_workflow_comments(source: str) -> tuple[str, ...]:
+    """Return G4 line/block comment bodies from lexer tokens in source order."""
+
+    lexer = FusionFlowLexer(InputStream(source))
+    comments: list[str] = []
+    for token in lexer.getAllTokens():
+        if token.type == FusionFlowLexer.LINE_COMMENT:
+            comments.append((token.text or "")[2:])
+        elif token.type == FusionFlowLexer.BLOCK_COMMENT:
+            text = token.text or ""
+            comments.append(text[2:-2])
+    return tuple(comments)
+
+
 class _DiagnosticListener:
     """Collect ANTLR errors as one-based, half-open public source spans."""
 

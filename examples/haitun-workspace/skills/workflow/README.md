@@ -75,7 +75,7 @@ Workflow skill owns all of them.
 
 ## Current scope and known gaps
 
-The language contract now covers file-level identity declarations, assertions, `!`/`AND`/`OR` formulas and comparisons, arithmetic, Lists, JSON-style quoted text, and value-producing `if(condition, then, else)` expressions. Workflow blocks contain assertions; a standalone Bool-returning operator call is shorthand for that call asserted equal to `True`. Concepts and operator signatures come from an external catalog, so quoted text is accepted by the surface grammar while typed catalogs decide where text is valid. The 21 preset operators are split into five disjoint owner groups. The canonical dataflow operators `input_workflow(Workflow)`, `output_workflow(Workflow)`, `consumes(Step)`, and `produces(Step)` return ordinary List terms. Their artifact relation is always explicit on the RHS, including singleton forms such as `consumes(step) == [artifact]`; the removed `*_multi` spellings and former two-argument Bool relations have no compatibility aliases. `program_path` and `agent_system_prompt` remain typed executor configuration; a short `step_instruction` may contain quoted text and a longer one may use an explicit `./...` instruction-file reference. `FusionFlow.g4` fixes `if` at three arguments while ordinary preset and externally registered operators keep flexible call arity for checker-owned validation.
+The language contract now covers file-level identity declarations, assertions, `!`/`AND`/`OR` formulas and comparisons, arithmetic, Lists, JSON-style quoted text, and value-producing `if(condition, then, else)` expressions. Workflow blocks contain assertions; a standalone Bool-returning operator call is shorthand for that call asserted equal to `True`. Comments are hidden from syntax parsing but retained as lexer tokens for runtime annotations. Concepts and operator signatures come from an external catalog, so quoted text is accepted by the surface grammar while typed catalogs decide where text is valid. The 21 preset operators are split into five disjoint owner groups. The canonical dataflow operators `input_workflow(Workflow)`, `output_workflow(Workflow)`, `consumes(Step)`, and `produces(Step)` return ordinary List terms. Their artifact relation is always explicit on the RHS, including singleton forms such as `consumes(step) == [artifact]`; the removed `*_multi` spellings and former two-argument Bool relations have no compatibility aliases. `program_path` and `agent_system_prompt` remain typed executor configuration; a short `step_instruction` may contain quoted text and a longer one may use an explicit `./...` instruction-file reference. `FusionFlow.g4` fixes `if` at three arguments while ordinary preset and externally registered operators keep flexible call arity for checker-owned validation.
 
 For a compact, readable BNF and consistency with KEDispatcher, preset operators remain syntax sugar over the same flexible call rule instead of receiving separate arity-constrained grammar productions. After syntax parsing, the checker/catalog validates their arity and types. Because that information is intentionally not encoded structurally in the BNF, every preset operator in `FusionFlow.g4` documents its parameter types, return type, and explicit arity for human and agent readers; the grammar contract test enforces this documentation invariant.
 
@@ -136,15 +136,20 @@ apply.
 The runner materializes every `./...` Step instruction through one injected
 instruction resolver before dispatching any Step, caches shared references, and
 passes the resulting text consistently to Agent, Human, and Program executors.
-Standalone `@artifact id [type]: description` lines in G4 comments or resolved
-Step instructions add optional Artifact contracts without changing the grammar.
-The runner checks their identities and conflicts, injects related contracts into
-Step prompts and `CompletionContext`, exposes Agent output contracts through the
-`submit_step_result` JSON Schema, and validates declared top-level JSON types at
-runtime. Instruction-local declarations are limited to that Step's inputs and
-outputs. Foreach types describe the collected aggregate rather than one
-iteration element. Only a reserved error envelope proven to originate from a
-Program output bypasses its normal success-value type.
+G4 line and block comments remain lexer tokens on the hidden channel, so
+standalone `@artifact` annotations are parsed without rescanning source text.
+The legacy `@artifact id [type]: description` form declares a top-level type;
+`@artifact id = {...}` declares the supported executable JSON Schema subset,
+including parameter descriptions, required properties, array items, extra-key
+policy, size limits, numeric bounds, patterns, enums, and constants. The runner
+rejects unknown schema keywords, checks Artifact identities and conflicts,
+injects related contracts into Step prompts and `CompletionContext`, exposes the
+same output schema through `submit_step_result`, and recursively validates it at
+workflow, Step, and Program boundaries. Instruction-local declarations are
+limited to that Step's inputs and outputs. Foreach schemas describe the collected
+aggregate; an `items` schema also constrains each submitted iteration element.
+Only a reserved error envelope proven to originate from a Program output
+bypasses its normal success-value schema.
 For one-output Program Steps, a declared non-string type parses stdout as one
 strict JSON value; untyped and explicitly string outputs remain verbatim text.
 The public workspace adapter accepts UTF-8 Markdown files relative to the

@@ -64,6 +64,103 @@ def test_compile_reads_contracts_from_line_and_block_comments() -> None:
     }
 
 
+def test_compile_reads_machine_schema_and_parameter_descriptions_from_g4_comment() -> None:
+    schema = {
+        "type": "object",
+        "description": "One ranked result.",
+        "properties": {
+            "id": {"type": "string", "description": "Stable result identifier.", "minLength": 1},
+            "score": {"type": "number", "description": "Normalized score.", "minimum": 0, "maximum": 1},
+        },
+        "required": ["id", "score"],
+        "additionalProperties": False,
+    }
+    source = _single_step_source(
+        comments=f"-- @artifact result_data = {json.dumps(schema)}",
+        instruction='Keep literal comment text unchanged: "-- @artifact ignored [string]: not a comment".',
+    )
+
+    contract = compile_workflow(source).artifact_contracts["result_data"]
+
+    assert contract.to_dict() == schema
+    assert contract.to_tool_schema()["properties"] == schema["properties"]
+
+
+def test_compile_rejects_unsupported_schema_instead_of_silently_ignoring_it() -> None:
+    schema = {
+        "type": "object",
+        "description": "A result.",
+        "oneOf": [{"required": ["id"]}, {"required": ["name"]}],
+    }
+    source = _single_step_source(
+        comments=f"-- @artifact result_data = {json.dumps(schema)}",
+        instruction="Transform source_data into result_data.",
+    )
+
+    with pytest.raises(ValueError, match=r"unsupported Artifact schema keywords.*oneOf"):
+        compile_workflow(source)
+
+
+def test_compile_rejects_machine_schema_without_top_level_type() -> None:
+    schema = {
+        "description": "A result with one identifier.",
+        "properties": {"id": {"type": "string", "description": "Stable identifier."}},
+    }
+    source = _single_step_source(
+        comments=f"-- @artifact result_data = {json.dumps(schema)}",
+        instruction="Transform source_data into result_data.",
+    )
+
+    with pytest.raises(ValueError, match=r"requires a top-level type"):
+        compile_workflow(source)
+
+
+def test_enum_uses_json_equality_without_boolean_integer_coercion() -> None:
+    contracts = {
+        "result_data": ArtifactContract(
+            description="One enabled state.",
+            schema={"type": "boolean", "enum": [True]},
+        )
+    }
+
+    validate_artifact_values({"result_data": True}, contracts, context="output")
+    with pytest.raises(ValueError, match="must be JSON boolean"):
+        validate_artifact_values({"result_data": 1}, contracts, context="output")
+
+
+def test_foreach_submission_uses_declared_item_schema() -> None:
+    item_schema = {
+        "type": "object",
+        "description": "One normalized record.",
+        "properties": {"id": {"type": "string", "description": "Stable identifier."}},
+        "required": ["id"],
+        "additionalProperties": False,
+    }
+    contract = ArtifactContract(
+        description="Source-ordered normalized records.",
+        schema={"type": "array", "items": item_schema},
+    )
+
+    submission_schema = contract.to_tool_schema(foreach_iteration=True)
+
+    assert submission_schema["type"] == "object"
+    assert submission_schema["required"] == ["id"]
+    assert submission_schema["additionalProperties"] is False
+    assert submission_schema["description"] == (
+        "One element contributed by this foreach iteration. One normalized record."
+    )
+
+
+def test_skill_documents_program_enforced_parameter_contracts() -> None:
+    skill = (
+        Path(__file__).parents[3] / "examples" / "haitun-workspace" / "skills" / "workflow" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "program-enforced parameter and output constraints" in skill
+    assert "Unsupported or malformed\nschema keywords fail compilation" in skill
+    assert "recursively enforces declared object parameters" in skill
+
+
 def test_compile_rejects_contract_for_unknown_artifact() -> None:
     source = _single_step_source(
         comments="-- @artifact misspelled_result [array]: This name is not declared.",
@@ -184,6 +281,38 @@ async def test_workflow_input_type_is_validated_before_dispatch() -> None:
 
 
 @pytest.mark.anyio
+async def test_workflow_input_parameters_are_parsed_and_validated_before_dispatch() -> None:
+    schema = {
+        "type": "object",
+        "description": "A request with one non-empty query.",
+        "properties": {
+            "query": {"type": "string", "description": "The query text.", "minLength": 1},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+    source = _single_step_source(
+        comments=f"-- @artifact source_data = {json.dumps(schema)}",
+        instruction="Transform source_data into result_data.",
+    )
+    called = False
+
+    async def complete(prompt: str, context: CompletionContext) -> object:
+        nonlocal called
+        del prompt, context
+        called = True
+        return {"result_data": None}
+
+    with pytest.raises(ValueError, match=r"workflow inputs Artifact 'source_data' is missing required.*query"):
+        await execute_workflow(source, inputs={"source_data": {}}, complete=complete)
+    assert called is False
+
+    with pytest.raises(ValueError, match=r"workflow inputs Artifact 'source_data' contains undeclared.*extra"):
+        await execute_workflow(source, inputs={"source_data": {"query": "x", "extra": True}}, complete=complete)
+    assert called is False
+
+
+@pytest.mark.anyio
 async def test_step_output_type_is_validated() -> None:
     source = _single_step_source(
         instruction=(
@@ -202,6 +331,38 @@ async def test_step_output_type_is_validated() -> None:
     assert "outputs for step 'transform_step' Artifact 'result_data' must be JSON array" in str(
         caught.value.exceptions[0]
     )
+
+
+@pytest.mark.anyio
+async def test_step_output_nested_parameters_are_enforced_by_runtime() -> None:
+    schema = {
+        "type": "array",
+        "description": "Ranked result records.",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "description": "One ranked result.",
+            "properties": {
+                "id": {"type": "string", "description": "Stable identifier.", "pattern": "^[a-z]+-[0-9]+$"},
+                "score": {"type": "number", "description": "Normalized score.", "minimum": 0, "maximum": 1},
+            },
+            "required": ["id", "score"],
+            "additionalProperties": False,
+        },
+    }
+    source = _single_step_source(
+        comments=f"-- @artifact result_data = {json.dumps(schema)}",
+        instruction="Transform source_data into result_data.",
+    )
+
+    async def complete(prompt: str, context: CompletionContext) -> object:
+        del prompt, context
+        return {"result_data": [{"id": "bad id", "score": 2}]}
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await execute_workflow(source, inputs={"source_data": {}}, complete=complete)
+    [error] = caught.value.exceptions
+    assert "Artifact 'result_data'[0].id must match pattern" in str(error)
 
 
 @pytest.mark.anyio
@@ -283,6 +444,53 @@ workflow enrich_flow {
 
 
 @pytest.mark.anyio
+async def test_foreach_iteration_is_runtime_validated_against_item_schema() -> None:
+    schema = {
+        "type": "array",
+        "description": "Source-ordered normalized records.",
+        "items": {
+            "type": "object",
+            "description": "One normalized record.",
+            "properties": {
+                "id": {"type": "string", "description": "Stable identifier.", "minLength": 1},
+            },
+            "required": ["id"],
+            "additionalProperties": False,
+        },
+    }
+    source = f"""-- @artifact items [array]: Source strings.
+-- @artifact normalized_items = {json.dumps(schema)}
+const items: Artifact;
+const item: Artifact;
+const normalized_items: Artifact;
+const normalize_step: Step;
+const worker: Agent, Executor;
+
+workflow normalize_flow {{
+  input_workflow(normalize_flow) == [items];
+  foreach_item(normalize_step, items) == item;
+  produces(normalize_step) == [normalized_items];
+  output_workflow(normalize_flow) == [normalized_items];
+  step_executor(normalize_step) == worker;
+  step_name(normalize_step) == "Normalize";
+  step_instruction(normalize_step) == "Return one normalized record.";
+}}
+"""
+
+    async def complete(prompt: str, context: CompletionContext) -> object:
+        del prompt, context
+        return {"normalized_items": {"name": "missing-id"}}
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await execute_workflow(source, inputs={"items": ["a"]}, complete=complete)
+    [step_error] = caught.value.exceptions
+    assert isinstance(step_error, ExceptionGroup)
+    [item_error] = step_error.exceptions
+    assert "outputs for foreach step 'normalize_step' Artifact 'normalized_items'" in str(item_error)
+    assert "missing required properties" in str(item_error)
+
+
+@pytest.mark.anyio
 async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -319,7 +527,18 @@ async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
         output_contracts={
             "result_data": ArtifactContract(
                 description="Ordered objects with required id.",
-                json_type="array",
+                schema={
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "description": "One result.",
+                        "properties": {
+                            "id": {"type": "string", "description": "Stable identifier.", "minLength": 1},
+                        },
+                        "required": ["id"],
+                        "additionalProperties": False,
+                    },
+                },
             )
         },
     )
@@ -336,6 +555,15 @@ async def test_run_flow_uses_contract_in_submit_schema_and_correction_retry(
         "result_data": {
             "description": "Ordered objects with required id.",
             "type": "array",
+            "items": {
+                "type": "object",
+                "description": "One result.",
+                "properties": {
+                    "id": {"type": "string", "description": "Stable identifier.", "minLength": 1},
+                },
+                "required": ["id"],
+                "additionalProperties": False,
+            },
         }
     }
 
@@ -370,3 +598,44 @@ def test_run_flow_parses_typed_single_program_output() -> None:
 
     assert result == {"result_data": [{"id": "candidate-1"}]}
     assert module._program_output_mode(invocation.output_ids, invocation.output_contracts) == "strict_json_value"
+
+
+def test_run_flow_rejects_program_stdout_that_violates_nested_schema() -> None:
+    tools_dir = Path(__file__).parents[3] / "examples" / "haitun-workspace" / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    module = importlib.import_module("run_flow")
+    contract = ArtifactContract(
+        description="Result records with stable identifiers.",
+        schema={
+            "type": "array",
+            "items": {
+                "type": "object",
+                "description": "One result.",
+                "properties": {"id": {"type": "string", "description": "Stable identifier."}},
+                "required": ["id"],
+                "additionalProperties": False,
+            },
+        },
+    )
+    invocation = ProgramInvocation(
+        name="program",
+        argv=("./program.py",),
+        stdin="{}\n",
+        cwd=".",
+        binding_name="program_step",
+        dispatch=DispatchContext(),
+        output_ids=("result_data",),
+        output_contracts={"result_data": contract},
+    )
+    attempt = module._ProgramProcessResult(
+        argv=("python", "program.py"),
+        exit_code=0,
+        stdout=b'[{"name":"missing-id"}]',
+        stderr=b"",
+    )
+
+    result = module._program_result_outputs(invocation, [attempt])
+
+    assert result["result_data"]["$fusion_flow/program_error"]["kind"] == "invalid_output_contract"
+    assert "missing required properties" in result["result_data"]["$fusion_flow/program_error"]["message"]

@@ -315,5 +315,10 @@ RBRACE : '}';
 LBRACK : '[';
 RBRACK : ']';
 WS : [ \t\r\n]+ -> skip;
-LINE_COMMENT : '--' ~[\r\n]* -> skip;
-BLOCK_COMMENT : '/*' .*? '*/' -> skip;
+/*
+ * Comments stay invisible to the syntax parser but remain lexer tokens so
+ * runtime annotations such as @artifact can be read without rescanning source
+ * text or confusing comment markers inside JSON string literals.
+ */
+LINE_COMMENT : '--' ~[\r\n]* -> channel(HIDDEN);
+BLOCK_COMMENT : '/*' .*? '*/' -> channel(HIDDEN);

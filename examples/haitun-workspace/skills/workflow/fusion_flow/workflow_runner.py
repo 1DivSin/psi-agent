@@ -10,14 +10,14 @@ from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from os import PathLike
 from os.path import isabs
-from typing import Literal, cast
+from typing import Literal, TypeGuard, cast
 
 from .checker import check_workflow, collect_core_ir_diagnostics
 from .contracts import Diagnostic
 from .core_ir import Assertion, CompoundTerm, Concept, Constant, Operator
 from .execution.model import AgentConfig
 from .graph_compiler import WorkflowGraphCompilation, WorkflowGraphCompiler
-from .parser import ParseContext, parse_workflow
+from .parser import ParseContext, parse_workflow, parse_workflow_comments
 from .step_timing import StepTiming, StepTimingMetadata
 from .workflow_execution import (
     CheckpointObserver,
@@ -39,10 +39,11 @@ type JsonArtifactType = Literal["null", "boolean", "integer", "number", "string"
 
 @dataclass(frozen=True, slots=True)
 class ArtifactContract:
-    """Optional top-level JSON type and human-readable Artifact semantics."""
+    """Machine-enforced JSON Schema subset plus human-readable semantics."""
 
     description: str
     json_type: JsonArtifactType | None = None
+    schema: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         supported_types = {"null", "boolean", "integer", "number", "string", "object", "array"}
@@ -50,20 +51,47 @@ class ArtifactContract:
             raise ValueError(f"unsupported Artifact JSON type: {self.json_type!r}")
         if not isinstance(self.description, str) or not self.description.strip():
             raise ValueError("Artifact contract description must be non-empty")
+        if not isinstance(self.schema, Mapping) or not all(isinstance(key, str) for key in self.schema):
+            raise ValueError("Artifact contract schema must be a JSON object")
+        schema = dict(self.schema)
+        schema_description = schema.get("description")
+        if schema_description is not None and (
+            not isinstance(schema_description, str) or schema_description.strip() != self.description.strip()
+        ):
+            raise ValueError("Artifact contract schema description conflicts with its description")
+        schema_type = schema.get("type")
+        if schema_type is not None and schema_type not in supported_types:
+            raise ValueError(f"unsupported Artifact JSON type: {schema_type!r}")
+        if self.json_type is not None and schema_type is not None and self.json_type != schema_type:
+            raise ValueError("Artifact contract json_type conflicts with schema type")
+        normalized_type = self.json_type if self.json_type is not None else cast(JsonArtifactType | None, schema_type)
+        if normalized_type is not None:
+            schema["type"] = normalized_type
+        schema["description"] = self.description.strip()
+        _validate_artifact_schema(schema)
+        object.__setattr__(self, "description", self.description.strip())
+        object.__setattr__(self, "json_type", normalized_type)
+        object.__setattr__(self, "schema", schema)
 
     def to_dict(self) -> dict[str, object]:
-        """Return the contract in stable JSON-ready form."""
+        """Return a detached JSON Schema fragment in stable JSON-ready form."""
 
-        payload: dict[str, object] = {"description": self.description.strip()}
-        if self.json_type is not None:
-            payload["type"] = self.json_type
-        return payload
+        return cast(dict[str, object], json.loads(json.dumps(self.schema, ensure_ascii=False, allow_nan=False)))
 
     def to_tool_schema(self, *, foreach_iteration: bool = False) -> dict[str, object]:
         """Return the JSON Schema fragment used by ``submit_step_result``."""
 
         if not foreach_iteration:
             return self.to_dict()
+        items = self.schema.get("items")
+        if self.json_type == "array" and isinstance(items, Mapping):
+            item_schema = cast(dict[str, object], json.loads(json.dumps(items, ensure_ascii=False, allow_nan=False)))
+            item_description = item_schema.get("description")
+            prefix = "One element contributed by this foreach iteration."
+            item_schema["description"] = (
+                prefix if not isinstance(item_description, str) else f"{prefix} {item_description.strip()}"
+            )
+            return item_schema
         return {
             "description": (
                 "One element contributed by this foreach iteration. "
@@ -72,13 +100,143 @@ class ArtifactContract:
         }
 
 
-_ARTIFACT_CONTRACT_DIRECTIVE = re.compile(
+_LEGACY_ARTIFACT_CONTRACT_DIRECTIVE = re.compile(
     r"^\s*@artifact\s+(?P<artifact>[A-Za-z_][A-Za-z0-9_.-]*)"
     r"(?:\s+\[(?P<json_type>null|boolean|integer|number|string|object|array)\])?"
     r"\s*:\s*(?P<description>\S.*)\s*$",
     re.IGNORECASE,
 )
+_SCHEMA_ARTIFACT_CONTRACT_DIRECTIVE = re.compile(
+    r"^\s*@artifact\s+(?P<artifact>[A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(?P<schema>\{.*\})\s*$",
+    re.IGNORECASE,
+)
+_SUPPORTED_SCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "const",
+        "description",
+        "enum",
+        "items",
+        "maxItems",
+        "maxLength",
+        "maxProperties",
+        "maximum",
+        "minItems",
+        "minLength",
+        "minProperties",
+        "minimum",
+        "pattern",
+        "properties",
+        "required",
+        "type",
+    }
+)
 _PROGRAM_ERROR_KEY = "$fusion_flow/program_error"
+
+
+def _is_json_value(value: object) -> bool:
+    if value is None or type(value) in {bool, int, str}:
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    return isinstance(value, Mapping) and all(
+        isinstance(key, str) and _is_json_value(item) for key, item in value.items()
+    )
+
+
+def _non_negative_integer(value: object) -> TypeGuard[int]:
+    return type(value) is int and value >= 0
+
+
+def _finite_number(value: object) -> TypeGuard[int | float]:
+    return type(value) is int or (type(value) is float and math.isfinite(value))
+
+
+def _validate_artifact_schema(schema: Mapping[str, object], *, path: str = "$") -> None:
+    """Validate the supported JSON Schema subset before workflow dispatch."""
+
+    unsupported = sorted(schema.keys() - _SUPPORTED_SCHEMA_KEYWORDS)
+    if unsupported:
+        raise ValueError(f"unsupported Artifact schema keywords at {path}: {unsupported}")
+    description = schema.get("description")
+    if description is not None and (not isinstance(description, str) or not description.strip()):
+        raise ValueError(f"Artifact schema description at {path} must be non-empty text")
+    json_type = schema.get("type")
+    supported_types = {"null", "boolean", "integer", "number", "string", "object", "array"}
+    if json_type is not None and json_type not in supported_types:
+        raise ValueError(f"unsupported Artifact schema type at {path}: {json_type!r}")
+
+    properties = schema.get("properties")
+    if properties is not None:
+        if json_type not in (None, "object") or not isinstance(properties, Mapping):
+            raise ValueError(f"Artifact schema properties at {path} require an object schema")
+        for key, child in properties.items():
+            if not isinstance(key, str) or not isinstance(child, Mapping):
+                raise ValueError(f"Artifact schema property definitions at {path} must be JSON objects")
+            _validate_artifact_schema(cast(Mapping[str, object], child), path=f"{path}.{key}")
+
+    required = schema.get("required")
+    if required is not None:
+        if json_type not in (None, "object") or not isinstance(required, list):
+            raise ValueError(f"Artifact schema required at {path} requires an object schema")
+        if not all(isinstance(key, str) for key in required) or len(set(required)) != len(required):
+            raise ValueError(f"Artifact schema required at {path} must contain unique property names")
+        if isinstance(properties, Mapping) and not set(required).issubset(properties):
+            unknown = sorted(set(required) - set(properties))
+            raise ValueError(f"Artifact schema required at {path} names undefined properties: {unknown}")
+
+    additional = schema.get("additionalProperties")
+    if additional is not None:
+        if json_type not in (None, "object") or not isinstance(additional, (bool, Mapping)):
+            raise ValueError(f"Artifact schema additionalProperties at {path} must be boolean or a schema")
+        if isinstance(additional, Mapping):
+            _validate_artifact_schema(cast(Mapping[str, object], additional), path=f"{path}.*")
+
+    items = schema.get("items")
+    if items is not None:
+        if json_type not in (None, "array") or not isinstance(items, Mapping):
+            raise ValueError(f"Artifact schema items at {path} requires an array schema")
+        _validate_artifact_schema(cast(Mapping[str, object], items), path=f"{path}[]")
+
+    for minimum_name, maximum_name, allowed_type in (
+        ("minItems", "maxItems", "array"),
+        ("minLength", "maxLength", "string"),
+        ("minProperties", "maxProperties", "object"),
+    ):
+        minimum = schema.get(minimum_name)
+        maximum = schema.get(maximum_name)
+        if minimum is not None and (json_type not in (None, allowed_type) or not _non_negative_integer(minimum)):
+            raise ValueError(f"Artifact schema {minimum_name} at {path} is invalid")
+        if maximum is not None and (json_type not in (None, allowed_type) or not _non_negative_integer(maximum)):
+            raise ValueError(f"Artifact schema {maximum_name} at {path} is invalid")
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise ValueError(f"Artifact schema {minimum_name} exceeds {maximum_name} at {path}")
+
+    minimum = schema.get("minimum")
+    maximum = schema.get("maximum")
+    if minimum is not None and (json_type not in (None, "integer", "number") or not _finite_number(minimum)):
+        raise ValueError(f"Artifact schema minimum at {path} is invalid")
+    if maximum is not None and (json_type not in (None, "integer", "number") or not _finite_number(maximum)):
+        raise ValueError(f"Artifact schema maximum at {path} is invalid")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError(f"Artifact schema minimum exceeds maximum at {path}")
+
+    pattern = schema.get("pattern")
+    if pattern is not None:
+        if json_type not in (None, "string") or not isinstance(pattern, str):
+            raise ValueError(f"Artifact schema pattern at {path} requires a string schema")
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"Artifact schema pattern at {path} is invalid: {error}") from error
+
+    enum = schema.get("enum")
+    if enum is not None and (not isinstance(enum, list) or not enum or not all(_is_json_value(item) for item in enum)):
+        raise ValueError(f"Artifact schema enum at {path} must be a non-empty JSON array")
+    if "const" in schema and not _is_json_value(schema["const"]):
+        raise ValueError(f"Artifact schema const at {path} must be a finite JSON value")
 
 
 def _combine_artifact_contracts(
@@ -88,9 +246,13 @@ def _combine_artifact_contracts(
     artifact_id: str,
     context: str,
 ) -> ArtifactContract:
-    """Combine compatible declarations while preserving all semantic guidance."""
+    """Combine identical machine constraints while preserving semantic guidance."""
 
-    if existing.json_type is not None and addition.json_type is not None and existing.json_type != addition.json_type:
+    existing_schema = existing.to_dict()
+    addition_schema = addition.to_dict()
+    existing_schema.pop("description", None)
+    addition_schema.pop("description", None)
+    if existing_schema != addition_schema:
         raise ValueError(f"conflicting Artifact contracts for {artifact_id!r} in {context}")
     existing_description = existing.description.strip()
     addition_description = addition.description.strip()
@@ -101,7 +263,7 @@ def _combine_artifact_contracts(
     )
     return ArtifactContract(
         description=description,
-        json_type=existing.json_type or addition.json_type,
+        schema=existing_schema,
     )
 
 
@@ -111,17 +273,36 @@ def _artifact_contract_directives(text: str, *, context: str) -> dict[str, Artif
     contracts: dict[str, ArtifactContract] = {}
     for line_number, line in enumerate(text.splitlines(), start=1):
         cleaned = re.sub(r"^\s*\*\s?", "", line)
-        match = _ARTIFACT_CONTRACT_DIRECTIVE.fullmatch(cleaned)
-        if match is None:
+        schema_match = _SCHEMA_ARTIFACT_CONTRACT_DIRECTIVE.fullmatch(cleaned)
+        legacy_match = _LEGACY_ARTIFACT_CONTRACT_DIRECTIVE.fullmatch(cleaned)
+        if schema_match is None and legacy_match is None:
             if cleaned.lstrip().casefold().startswith("@artifact"):
                 raise ValueError(f"malformed Artifact contract in {context} at line {line_number}: {cleaned.strip()}")
             continue
-        json_type_text = match.group("json_type")
-        contract = ArtifactContract(
-            description=match.group("description"),
-            json_type=(None if json_type_text is None else cast(JsonArtifactType, json_type_text.casefold())),
-        )
-        artifact_id = match.group("artifact")
+        if schema_match is not None:
+            try:
+                schema = json.loads(schema_match.group("schema"))
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"malformed Artifact schema in {context} at line {line_number}: {error.msg}"
+                ) from error
+            if not isinstance(schema, dict):
+                raise ValueError(f"Artifact schema in {context} at line {line_number} must be a JSON object")
+            description = schema.get("description")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError(f"Artifact schema in {context} at line {line_number} requires a non-empty description")
+            if "type" not in schema:
+                raise ValueError(f"Artifact schema in {context} at line {line_number} requires a top-level type")
+            contract = ArtifactContract(description=description, schema=schema)
+            artifact_id = schema_match.group("artifact")
+        else:
+            assert legacy_match is not None
+            json_type_text = legacy_match.group("json_type")
+            contract = ArtifactContract(
+                description=legacy_match.group("description"),
+                json_type=(None if json_type_text is None else cast(JsonArtifactType, json_type_text.casefold())),
+            )
+            artifact_id = legacy_match.group("artifact")
         existing = contracts.get(artifact_id)
         if existing is not None:
             contract = _combine_artifact_contracts(
@@ -134,46 +315,11 @@ def _artifact_contract_directives(text: str, *, context: str) -> dict[str, Artif
     return contracts
 
 
-def _workflow_comments(source: str) -> tuple[str, ...]:
-    """Extract G4 comments without mistaking comment markers inside strings."""
-
-    comments: list[str] = []
-    index = 0
-    while index < len(source):
-        if source[index] == '"':
-            index += 1
-            while index < len(source):
-                if source[index] == "\\":
-                    index += 2
-                elif source[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-            continue
-        if source.startswith("--", index):
-            end = source.find("\n", index + 2)
-            if end == -1:
-                end = len(source)
-            comments.append(source[index + 2 : end])
-            index = end
-            continue
-        if source.startswith("/*", index):
-            end = source.find("*/", index + 2)
-            if end == -1:
-                end = len(source)
-            comments.append(source[index + 2 : end])
-            index = min(end + 2, len(source))
-            continue
-        index += 1
-    return tuple(comments)
-
-
 def _source_artifact_contracts(source: str) -> dict[str, ArtifactContract]:
-    """Read Artifact directives only from comments, which the G4 lexer skips."""
+    """Read Artifact directives from comment tokens emitted by the G4 lexer."""
 
     contracts: dict[str, ArtifactContract] = {}
-    for comment_index, comment in enumerate(_workflow_comments(source), start=1):
+    for comment_index, comment in enumerate(parse_workflow_comments(source), start=1):
         additions = _artifact_contract_directives(comment, context=f"workflow comment {comment_index}")
         _merge_artifact_contracts(contracts, additions, context="workflow comments")
     return contracts
@@ -220,6 +366,115 @@ def _artifact_type_matches(value: object, json_type: JsonArtifactType) -> bool:
     raise AssertionError(f"unhandled Artifact JSON type: {json_type}")
 
 
+def _json_values_equal(left: object, right: object) -> bool:
+    """Compare JSON values without treating booleans as the numbers 0 and 1."""
+
+    if type(left) in {int, float} and type(right) in {int, float}:
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        right_list = cast(list[object], right)
+        return len(left) == len(right_list) and all(
+            _json_values_equal(left_item, right_item) for left_item, right_item in zip(left, right_list, strict=True)
+        )
+    if isinstance(left, Mapping):
+        left_mapping = cast(Mapping[object, object], left)
+        right_mapping = cast(Mapping[object, object], right)
+        return set(left_mapping) == set(right_mapping) and all(
+            _json_values_equal(left_mapping[key], right_mapping[key]) for key in left_mapping
+        )
+    return left == right
+
+
+def _validate_artifact_value(
+    value: object,
+    schema: Mapping[str, object],
+    *,
+    context: str,
+) -> None:
+    if not _is_json_value(value):
+        raise ValueError(f"{context} must be a finite JSON value")
+    json_type = schema.get("type")
+    if json_type is not None and not _artifact_type_matches(value, cast(JsonArtifactType, json_type)):
+        raise ValueError(f"{context} must be JSON {json_type}, got {type(value).__name__}")
+
+    enum = schema.get("enum")
+    if isinstance(enum, list) and not any(_json_values_equal(value, candidate) for candidate in enum):
+        raise ValueError(f"{context} must equal one of the declared enum values")
+    if "const" in schema and not _json_values_equal(value, schema["const"]):
+        raise ValueError(f"{context} must equal the declared const value")
+
+    if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
+        object_value = cast(Mapping[str, object], value)
+        minimum = schema.get("minProperties")
+        maximum = schema.get("maxProperties")
+        if isinstance(minimum, int) and len(object_value) < minimum:
+            raise ValueError(f"{context} must contain at least {minimum} properties")
+        if isinstance(maximum, int) and len(object_value) > maximum:
+            raise ValueError(f"{context} must contain at most {maximum} properties")
+        required = schema.get("required")
+        if isinstance(required, list):
+            missing = [key for key in required if key not in object_value]
+            if missing:
+                raise ValueError(f"{context} is missing required properties: {missing}")
+        properties = schema.get("properties")
+        property_schemas = cast(Mapping[str, object], properties) if isinstance(properties, Mapping) else {}
+        for key, child_schema in property_schemas.items():
+            if key in object_value:
+                _validate_artifact_value(
+                    object_value[key],
+                    cast(Mapping[str, object], child_schema),
+                    context=f"{context}.{key}",
+                )
+        additional = schema.get("additionalProperties", True)
+        extras = sorted(set(object_value) - set(property_schemas))
+        if additional is False and extras:
+            raise ValueError(f"{context} contains undeclared properties: {extras}")
+        if isinstance(additional, Mapping):
+            for key in extras:
+                _validate_artifact_value(
+                    object_value[key],
+                    cast(Mapping[str, object], additional),
+                    context=f"{context}.{key}",
+                )
+
+    if isinstance(value, list):
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise ValueError(f"{context} must contain at least {minimum} items")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise ValueError(f"{context} must contain at most {maximum} items")
+        items = schema.get("items")
+        if isinstance(items, Mapping):
+            for index, item in enumerate(value):
+                _validate_artifact_value(
+                    item,
+                    cast(Mapping[str, object], items),
+                    context=f"{context}[{index}]",
+                )
+
+    if isinstance(value, str):
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise ValueError(f"{context} must contain at least {minimum} characters")
+        if isinstance(maximum, int) and len(value) > maximum:
+            raise ValueError(f"{context} must contain at most {maximum} characters")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise ValueError(f"{context} must match pattern {pattern!r}")
+
+    if _finite_number(value) and type(value) is not bool:
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if _finite_number(minimum) and value < minimum:
+            raise ValueError(f"{context} must be at least {minimum}")
+        if _finite_number(maximum) and value > maximum:
+            raise ValueError(f"{context} must be at most {maximum}")
+
+
 def validate_artifact_values(
     values: Mapping[str, object],
     contracts: Mapping[str, ArtifactContract],
@@ -227,11 +482,11 @@ def validate_artifact_values(
     context: str,
     program_error_artifact_ids: Collection[str] = (),
 ) -> None:
-    """Validate every present value with a declared top-level JSON type."""
+    """Validate every present value with its machine-enforced schema."""
 
     for artifact_id, value in values.items():
         contract = contracts.get(artifact_id)
-        if contract is None or contract.json_type is None:
+        if contract is None:
             continue
         if (
             artifact_id in program_error_artifact_ids
@@ -240,9 +495,39 @@ def validate_artifact_values(
             and isinstance(value.get(_PROGRAM_ERROR_KEY), Mapping)
         ):
             continue
-        if not _artifact_type_matches(value, contract.json_type):
-            raise ValueError(
-                f"{context} Artifact {artifact_id!r} must be JSON {contract.json_type}, got {type(value).__name__}"
+        _validate_artifact_value(
+            value,
+            contract.schema,
+            context=f"{context} Artifact {artifact_id!r}",
+        )
+
+
+def _validate_foreach_iteration_values(
+    values: Mapping[str, object],
+    contracts: Mapping[str, ArtifactContract],
+    *,
+    context: str,
+    program_error_artifact_ids: Collection[str] = (),
+) -> None:
+    """Validate one foreach contribution against each aggregate's item schema."""
+
+    for artifact_id, value in values.items():
+        contract = contracts.get(artifact_id)
+        if contract is None:
+            continue
+        if (
+            artifact_id in program_error_artifact_ids
+            and isinstance(value, dict)
+            and set(value) == {_PROGRAM_ERROR_KEY}
+            and isinstance(value.get(_PROGRAM_ERROR_KEY), Mapping)
+        ):
+            continue
+        items = contract.schema.get("items")
+        if isinstance(items, Mapping):
+            _validate_artifact_value(
+                value,
+                cast(Mapping[str, object], items),
+                context=f"{context} Artifact {artifact_id!r}",
             )
 
 
@@ -1075,9 +1360,14 @@ def _build_dispatch(
                 result,
                 named_mapping_required=named_mapping_required,
             )
-            # A foreach invocation produces one element. The aggregate value is
-            # validated when a downstream Step or the workflow output sees it.
-            if not foreach_iteration:
+            if foreach_iteration:
+                _validate_foreach_iteration_values(
+                    outputs,
+                    output_contracts,
+                    context=f"outputs for foreach step {step.step_id!r}",
+                    program_error_artifact_ids=(output_ids if allow_program_errors else ()),
+                )
+            else:
                 validate_artifact_values(
                     outputs,
                     output_contracts,
@@ -1155,7 +1445,14 @@ def _build_dispatch(
                     program_result,
                     output_contracts,
                 )
-                if not foreach_iteration:
+                if foreach_iteration:
+                    _validate_foreach_iteration_values(
+                        outputs,
+                        output_contracts,
+                        context=f"outputs for foreach step {step.step_id!r}",
+                        program_error_artifact_ids=output_ids,
+                    )
+                else:
                     validate_artifact_values(
                         outputs,
                         output_contracts,

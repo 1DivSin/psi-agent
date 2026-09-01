@@ -1626,7 +1626,13 @@ def _program_result_outputs(
         contract = invocation.output_contracts.get(artifact_id)
         if contract is not None and contract.json_type not in (None, "string"):
             try:
-                return {artifact_id: _parse_strict_json_value(stdout)}
+                outputs = {artifact_id: _parse_strict_json_value(stdout)}
+                validate_artifact_values(
+                    outputs,
+                    invocation.output_contracts,
+                    context=f"outputs for Program step {invocation.binding_name!r}",
+                )
+                return outputs
             except (json.JSONDecodeError, OverflowError, RecursionError, ValueError) as error:
                 return _program_error_outputs(
                     invocation,
@@ -1649,6 +1655,11 @@ def _program_result_outputs(
         actual = set(outputs)
         if actual != expected:
             raise ValueError(f"expected output keys {sorted(expected)}, got {sorted(actual)}")
+        validate_artifact_values(
+            outputs,
+            invocation.output_contracts,
+            context=f"outputs for Program step {invocation.binding_name!r}",
+        )
     except ValueError as error:
         return _program_error_outputs(
             invocation,
