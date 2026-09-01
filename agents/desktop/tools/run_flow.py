@@ -69,12 +69,10 @@ from fusion_flow.workflow_execution import (  # noqa: E402
     generate_plan,
 )
 from fusion_flow.workflow_runner import (  # noqa: E402
-    ArtifactContract,
     CompiledWorkflow,
     CompletionContext,
     ProgramInvocation,
     compile_workflow,
-    validate_artifact_values,
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow  # noqa: E402
 
@@ -1542,25 +1540,6 @@ def _program_result_outputs(
     invocation: ProgramInvocation,
     attempts: list[_ProgramProcessResult],
 ) -> dict[str, object]:
-    def validate_outputs(outputs: dict[str, object]) -> dict[str, object]:
-        if invocation.dispatch.iteration_index is not None:
-            return outputs
-        try:
-            validate_artifact_values(
-                outputs,
-                invocation.output_contracts,
-                context=f"outputs for Program step {invocation.binding_name!r}",
-            )
-        except ValueError as error:
-            return _program_error_outputs(
-                invocation,
-                phase="output_format",
-                kind="invalid_output_contract",
-                message=str(error),
-                attempts=attempts,
-            )
-        return outputs
-
     if not attempts:
         return _program_error_outputs(
             invocation,
@@ -1610,24 +1589,7 @@ def _program_result_outputs(
             )
         return {}
     if len(invocation.output_ids) == 1:
-        artifact_id = invocation.output_ids[0]
-        contract = invocation.output_contracts.get(artifact_id)
-        if contract is not None and contract.json_type not in (None, "string"):
-            try:
-                outputs = {artifact_id: _parse_strict_json_value(stdout)}
-            except (json.JSONDecodeError, OverflowError, RecursionError, ValueError) as error:
-                return _program_error_outputs(
-                    invocation,
-                    phase="output_format",
-                    kind="invalid_output_contract",
-                    message=(
-                        f"Program step {invocation.binding_name!r} stdout must be one "
-                        f"strict JSON {contract.json_type} value: {error}"
-                    ),
-                    attempts=attempts,
-                )
-            return validate_outputs(outputs)
-        return validate_outputs({artifact_id: stdout})
+        return {invocation.output_ids[0]: stdout}
 
     try:
         outputs = _parse_strict_agent_mapping(
@@ -1646,29 +1608,23 @@ def _program_result_outputs(
             message=str(error),
             attempts=attempts,
         )
-    return validate_outputs(outputs)
+    return outputs
 
 
-def _program_output_mode(
-    output_ids: tuple[str, ...],
-    output_contracts: Mapping[str, ArtifactContract] | None = None,
-) -> str:
+def _program_output_mode(output_ids: tuple[str, ...]) -> str:
     if not output_ids:
         return "none"
     if len(output_ids) == 1:
-        contracts = {} if output_contracts is None else output_contracts
-        contract = contracts.get(output_ids[0])
-        if contract is not None and contract.json_type not in (None, "string"):
-            return "strict_json_value"
         return "stdout_verbatim"
     return "strict_json_object"
 
 
-def _program_output_contract_payload(invocation: ProgramInvocation) -> dict[str, dict[str, object]]:
-    foreach_iteration = invocation.dispatch.iteration_index is not None
+def _program_output_annotations(invocation: ProgramInvocation) -> dict[str, str]:
+    if invocation.dispatch.iteration_index is None:
+        return dict(invocation.output_annotations)
     return {
-        artifact_id: artifact_contract.to_tool_schema(foreach_iteration=foreach_iteration)
-        for artifact_id, artifact_contract in invocation.output_contracts.items()
+        artifact_id: (f"One value contributed by this foreach iteration. Aggregate Artifact annotation: {annotation}")
+        for artifact_id, annotation in invocation.output_annotations.items()
     }
 
 
@@ -2023,7 +1979,7 @@ async def _complete_program_step(
         ),
         system_prompt=_PROGRAM_SYSTEM_PROMPT,
     )
-    contract = {
+    contract: dict[str, object] = {
         "contract_version": 1,
         "workspace_root": str(workspace),
         "step_id": invocation.binding_name,
@@ -2035,14 +1991,8 @@ async def _complete_program_step(
         "stdin_utf8": invocation.stdin,
         "step_instruction": invocation.instruction,
         "input_artifacts": dict(invocation.inputs),
-        "input_artifact_contracts": {
-            artifact_id: artifact_contract.to_dict()
-            for artifact_id, artifact_contract in invocation.input_contracts.items()
-        },
         "output_artifact_ids": list(invocation.output_ids),
-        "output_artifact_contracts": _program_output_contract_payload(invocation),
-        "foreach_iteration": invocation.dispatch.iteration_index is not None,
-        "output_mode": _program_output_mode(invocation.output_ids, invocation.output_contracts),
+        "output_mode": _program_output_mode(invocation.output_ids),
         "reserved_resources": _resource_payload(
             CompletionContext(
                 step_id=invocation.binding_name,
@@ -2055,6 +2005,10 @@ async def _complete_program_step(
         ),
         "repair_authorized": repair_authorized,
     }
+    if invocation.input_annotations:
+        contract["input_artifact_annotations"] = dict(invocation.input_annotations)
+    if invocation.output_annotations:
+        contract["output_artifact_annotations"] = _program_output_annotations(invocation)
     try:
         encoded_contract = json.dumps(
             contract,
@@ -2248,23 +2202,14 @@ async def _complete_agent_step(
     submitted: dict[str, object] | None = None
     submission_error: ValueError | None = None
 
-    def validate_outputs(parsed: dict[str, object]) -> dict[str, object]:
-        if context.dispatch.iteration_index is None:
-            validate_artifact_values(
-                parsed,
-                context.output_contracts,
-                context=f"outputs for step {context.step_id!r}",
-            )
-        return parsed
-
-    def parse_and_validate(value: str) -> dict[str, object]:
-        return validate_outputs(
-            _parse_agent_step_result(
-                value,
-                step_id=context.step_id,
-                output_ids=context.output_ids,
-            )
+    output_annotations = {
+        artifact_id: (
+            annotation
+            if context.dispatch.iteration_index is None
+            else (f"One value contributed by this foreach iteration. Aggregate Artifact annotation: {annotation}")
         )
+        for artifact_id, annotation in context.output_annotations.items()
+    }
 
     async def submit_step_result(**outputs: object) -> str:
         nonlocal submission_error, submitted
@@ -2275,7 +2220,11 @@ async def _complete_agent_step(
             encoded = json.dumps(outputs, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as error:
             raise ValueError("step result must contain finite JSON values") from error
-        submitted = parse_and_validate(encoded)
+        submitted = _parse_agent_step_result(
+            encoded,
+            step_id=context.step_id,
+            output_ids=context.output_ids,
+        )
         return "Step result accepted."
 
     tools = tool_registry.tools
@@ -2287,11 +2236,7 @@ async def _complete_agent_step(
             "type": "object",
             "properties": {
                 artifact_id: (
-                    context.output_contracts[artifact_id].to_tool_schema(
-                        foreach_iteration=context.dispatch.iteration_index is not None
-                    )
-                    if artifact_id in context.output_contracts
-                    else {}
+                    {"description": output_annotations[artifact_id]} if artifact_id in output_annotations else {}
                 )
                 for artifact_id in context.output_ids
             },
@@ -2362,11 +2307,6 @@ async def _complete_agent_step(
                     submission_error = ValueError("step result was submitted more than once")
         return True
 
-    output_contract_json = json.dumps(
-        {artifact_id: contract.to_dict() for artifact_id, contract in context.output_contracts.items()},
-        ensure_ascii=False,
-        sort_keys=True,
-    )
     for attempt in range(3):
         submission_error = None
         repair_response: str | None = None
@@ -2384,7 +2324,11 @@ async def _complete_agent_step(
             return submitted
         else:
             try:
-                return parse_and_validate(response)
+                return _parse_agent_step_result(
+                    response,
+                    step_id=context.step_id,
+                    output_ids=context.output_ids,
+                )
             except _AgentStepResultParseError as error:
                 validation_error = error
                 repair_response = response
@@ -2398,7 +2342,6 @@ async def _complete_agent_step(
                         step_id=context.step_id,
                         output_ids=context.output_ids,
                     )
-                    repaired = validate_outputs(repaired)
                 except ValueError:
                     pass
                 else:
@@ -2416,11 +2359,16 @@ async def _complete_agent_step(
                     ).warning("FusionFlow Agent Step accepted safe trailing-comma output from json-repair")
                     return repaired
             raise ValueError(f"step {context.step_id!r} result remained invalid after 3 attempts") from validation_error
+        annotation_text = (
+            f"Output Artifact annotations: {json.dumps(output_annotations, ensure_ascii=False, sort_keys=True)}. "
+            if output_annotations
+            else ""
+        )
         message = (
             f"Your previous step result was invalid: {validation_error}\n"
             "Do not redo the step. Return exactly one valid JSON object as ordinary assistant content, "
             f"keyed by exactly these output keys: {json.dumps(context.output_ids, ensure_ascii=False)}. "
-            f"Output Artifact contracts: {output_contract_json}. "
+            f"{annotation_text}"
             "Do not add Markdown or prose."
         )
     raise AssertionError("unreachable")

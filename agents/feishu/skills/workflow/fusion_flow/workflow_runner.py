@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
@@ -17,7 +16,7 @@ from .contracts import Diagnostic
 from .core_ir import Assertion, CompoundTerm, Concept, Constant, Operator
 from .execution.model import AgentConfig
 from .graph_compiler import WorkflowGraphCompilation, WorkflowGraphCompiler
-from .parser import ParseContext, parse_workflow
+from .parser import ParseContext, extract_artifact_annotations, parse_workflow
 from .step_timing import StepTiming, StepTimingMetadata
 from .workflow_execution import (
     CheckpointObserver,
@@ -29,221 +28,11 @@ from .workflow_execution import (
     execute_plan,
     generate_plan,
 )
-from .workflow_graph import ConsumesEdge, ForeachEdge, ProducesEdge, StepNode, WorkflowGraph
+from .workflow_graph import ForeachEdge, ProducesEdge, StepNode, WorkflowGraph
 
 type PathResolver = Callable[[str], Awaitable[str]]
 type InstructionResolver = Callable[[str], Awaitable[str]]
 type ExecutorKind = Literal["Agent", "Human", "Program"]
-type JsonArtifactType = Literal["null", "boolean", "integer", "number", "string", "object", "array"]
-
-
-@dataclass(frozen=True, slots=True)
-class ArtifactContract:
-    """Optional top-level JSON type and human-readable Artifact semantics."""
-
-    description: str
-    json_type: JsonArtifactType | None = None
-
-    def __post_init__(self) -> None:
-        supported_types = {"null", "boolean", "integer", "number", "string", "object", "array"}
-        if self.json_type is not None and self.json_type not in supported_types:
-            raise ValueError(f"unsupported Artifact JSON type: {self.json_type!r}")
-        if not isinstance(self.description, str) or not self.description.strip():
-            raise ValueError("Artifact contract description must be non-empty")
-
-    def to_dict(self) -> dict[str, object]:
-        """Return the contract in stable JSON-ready form."""
-
-        payload: dict[str, object] = {"description": self.description.strip()}
-        if self.json_type is not None:
-            payload["type"] = self.json_type
-        return payload
-
-    def to_tool_schema(self, *, foreach_iteration: bool = False) -> dict[str, object]:
-        """Return the JSON Schema fragment used by ``submit_step_result``."""
-
-        if not foreach_iteration:
-            return self.to_dict()
-        return {
-            "description": (
-                "One element contributed by this foreach iteration. "
-                f"Aggregate Artifact contract: {self.description.strip()}"
-            )
-        }
-
-
-_ARTIFACT_CONTRACT_DIRECTIVE = re.compile(
-    r"^\s*@artifact\s+(?P<artifact>[A-Za-z_][A-Za-z0-9_.-]*)"
-    r"(?:\s+\[(?P<json_type>null|boolean|integer|number|string|object|array)\])?"
-    r"\s*:\s*(?P<description>\S.*)\s*$",
-    re.IGNORECASE,
-)
-_PROGRAM_ERROR_KEY = "$fusion_flow/program_error"
-
-
-def _combine_artifact_contracts(
-    existing: ArtifactContract,
-    addition: ArtifactContract,
-    *,
-    artifact_id: str,
-    context: str,
-) -> ArtifactContract:
-    """Combine compatible declarations while preserving all semantic guidance."""
-
-    if existing.json_type is not None and addition.json_type is not None and existing.json_type != addition.json_type:
-        raise ValueError(f"conflicting Artifact contracts for {artifact_id!r} in {context}")
-    existing_description = existing.description.strip()
-    addition_description = addition.description.strip()
-    description = (
-        existing_description
-        if existing_description == addition_description
-        else f"{existing_description}\n{addition_description}"
-    )
-    return ArtifactContract(
-        description=description,
-        json_type=existing.json_type or addition.json_type,
-    )
-
-
-def _artifact_contract_directives(text: str, *, context: str) -> dict[str, ArtifactContract]:
-    """Parse exact one-line ``@artifact`` directives from comments or instructions."""
-
-    contracts: dict[str, ArtifactContract] = {}
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        cleaned = re.sub(r"^\s*\*\s?", "", line)
-        match = _ARTIFACT_CONTRACT_DIRECTIVE.fullmatch(cleaned)
-        if match is None:
-            if cleaned.lstrip().casefold().startswith("@artifact"):
-                raise ValueError(f"malformed Artifact contract in {context} at line {line_number}: {cleaned.strip()}")
-            continue
-        json_type_text = match.group("json_type")
-        contract = ArtifactContract(
-            description=match.group("description"),
-            json_type=(None if json_type_text is None else cast(JsonArtifactType, json_type_text.casefold())),
-        )
-        artifact_id = match.group("artifact")
-        existing = contracts.get(artifact_id)
-        if existing is not None:
-            contract = _combine_artifact_contracts(
-                existing,
-                contract,
-                artifact_id=artifact_id,
-                context=f"{context} at line {line_number}",
-            )
-        contracts[artifact_id] = contract
-    return contracts
-
-
-def _workflow_comments(source: str) -> tuple[str, ...]:
-    """Extract G4 comments without mistaking comment markers inside strings."""
-
-    comments: list[str] = []
-    index = 0
-    while index < len(source):
-        if source[index] == '"':
-            index += 1
-            while index < len(source):
-                if source[index] == "\\":
-                    index += 2
-                elif source[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-            continue
-        if source.startswith("--", index):
-            end = source.find("\n", index + 2)
-            if end == -1:
-                end = len(source)
-            comments.append(source[index + 2 : end])
-            index = end
-            continue
-        if source.startswith("/*", index):
-            end = source.find("*/", index + 2)
-            if end == -1:
-                end = len(source)
-            comments.append(source[index + 2 : end])
-            index = min(end + 2, len(source))
-            continue
-        index += 1
-    return tuple(comments)
-
-
-def _source_artifact_contracts(source: str) -> dict[str, ArtifactContract]:
-    """Read Artifact directives only from comments, which the G4 lexer skips."""
-
-    contracts: dict[str, ArtifactContract] = {}
-    for comment_index, comment in enumerate(_workflow_comments(source), start=1):
-        additions = _artifact_contract_directives(comment, context=f"workflow comment {comment_index}")
-        _merge_artifact_contracts(contracts, additions, context="workflow comments")
-    return contracts
-
-
-def _merge_artifact_contracts(
-    target: dict[str, ArtifactContract],
-    additions: Mapping[str, ArtifactContract],
-    *,
-    context: str,
-) -> None:
-    """Merge compatible guidance and fail when declared JSON types disagree."""
-
-    for artifact_id, contract in additions.items():
-        existing = target.get(artifact_id)
-        if existing is not None:
-            contract = _combine_artifact_contracts(
-                existing,
-                contract,
-                artifact_id=artifact_id,
-                context=context,
-            )
-        target[artifact_id] = contract
-
-
-def _artifact_type_matches(value: object, json_type: JsonArtifactType) -> bool:
-    """Apply JSON type semantics without Python's bool/int coercion."""
-
-    match json_type:
-        case "null":
-            return value is None
-        case "boolean":
-            return type(value) is bool
-        case "integer":
-            return type(value) is int
-        case "number":
-            return type(value) is int or (type(value) is float and math.isfinite(value))
-        case "string":
-            return isinstance(value, str)
-        case "object":
-            return isinstance(value, Mapping) and all(isinstance(key, str) for key in value)
-        case "array":
-            return isinstance(value, list)
-    raise AssertionError(f"unhandled Artifact JSON type: {json_type}")
-
-
-def validate_artifact_values(
-    values: Mapping[str, object],
-    contracts: Mapping[str, ArtifactContract],
-    *,
-    context: str,
-    program_error_artifact_ids: Collection[str] = (),
-) -> None:
-    """Validate every present value with a declared top-level JSON type."""
-
-    for artifact_id, value in values.items():
-        contract = contracts.get(artifact_id)
-        if contract is None or contract.json_type is None:
-            continue
-        if (
-            artifact_id in program_error_artifact_ids
-            and isinstance(value, dict)
-            and set(value) == {_PROGRAM_ERROR_KEY}
-            and isinstance(value.get(_PROGRAM_ERROR_KEY), Mapping)
-        ):
-            continue
-        if not _artifact_type_matches(value, contract.json_type):
-            raise ValueError(
-                f"{context} Artifact {artifact_id!r} must be JSON {contract.json_type}, got {type(value).__name__}"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,8 +88,8 @@ class CompiledWorkflow:
     executor_kinds: Mapping[str, ExecutorKind]
     program_paths: Mapping[str, str] = field(default_factory=dict)
     agent_configs: Mapping[str, CompiledAgentConfig] = field(default_factory=dict)
-    artifact_contracts: Mapping[str, ArtifactContract] = field(default_factory=dict)
     diagnostics: tuple[Diagnostic, ...] = ()
+    artifact_annotations: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,13 +103,13 @@ class CompletionContext:
     output_ids: tuple[str, ...]
     dispatch: DispatchContext
     agent_config: CompiledAgentConfig | None = None
-    input_contracts: Mapping[str, ArtifactContract] = field(default_factory=dict)
-    output_contracts: Mapping[str, ArtifactContract] = field(default_factory=dict)
+    input_annotations: Mapping[str, str] = field(default_factory=dict)
+    output_annotations: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ProgramInvocation:
-    """Exact script and artifact contract passed to an injected Program runner."""
+    """Exact script and Artifact context passed to an injected Program runner."""
 
     name: str
     argv: tuple[str, ...]
@@ -331,8 +120,8 @@ class ProgramInvocation:
     instruction: str = ""
     inputs: Mapping[str, object] = field(default_factory=dict)
     output_ids: tuple[str, ...] = ()
-    input_contracts: Mapping[str, ArtifactContract] = field(default_factory=dict)
-    output_contracts: Mapping[str, ArtifactContract] = field(default_factory=dict)
+    input_annotations: Mapping[str, str] = field(default_factory=dict)
+    output_annotations: Mapping[str, str] = field(default_factory=dict)
 
 
 type Completion = Callable[
@@ -773,18 +562,15 @@ def compile_workflow(
                 CompiledAgentConfig(name=executor_id),
             )
 
-    artifact_contracts = _source_artifact_contracts(source)
     declared_artifact_ids = {artifact.artifact_id for artifact in compilation.graph.artifacts}
-    unknown_contracts = sorted(artifact_contracts.keys() - declared_artifact_ids)
-    if unknown_contracts:
-        raise ValueError(f"workflow comments declare contracts for unknown Artifacts: {unknown_contracts}")
+    artifact_annotations = extract_artifact_annotations(source, declared_artifact_ids)
 
     return CompiledWorkflow(
         graph=compilation.graph,
         executor_kinds=executor_kinds,
         program_paths=program_paths,
         agent_configs=agent_configs,
-        artifact_contracts=artifact_contracts,
+        artifact_annotations=artifact_annotations,
         diagnostics=check_warnings,
     )
 
@@ -819,43 +605,28 @@ def _normalize_outputs(
     return outputs
 
 
-def _contract_subset(
+def _annotation_subset(
     artifact_ids: Collection[str],
-    contracts: Mapping[str, ArtifactContract],
-) -> dict[str, ArtifactContract]:
-    """Select declared contracts in stable Artifact-ID order."""
+    annotations: Mapping[str, str],
+) -> dict[str, str]:
+    """Select available annotations in stable Artifact-ID order."""
 
-    return {artifact_id: contracts[artifact_id] for artifact_id in sorted(artifact_ids) if artifact_id in contracts}
-
-
-def _program_output_ids(compiled: CompiledWorkflow) -> set[str]:
-    steps_by_id = {step.step_id: step for step in compiled.graph.steps}
-    return {
-        edge.artifact_id
-        for edge in compiled.graph.edges
-        if (
-            isinstance(edge, ProducesEdge)
-            and compiled.executor_kinds[steps_by_id[edge.step_id].executor_id] == "Program"
-        )
-    }
+    return {artifact_id: annotations[artifact_id] for artifact_id in sorted(artifact_ids) if artifact_id in annotations}
 
 
-def _contracts_text(label: str, contracts: Mapping[str, ArtifactContract]) -> str:
-    if not contracts:
-        return f"{label}: none declared."
-    payload = {artifact_id: contract.to_dict() for artifact_id, contract in contracts.items()}
-    return f"{label}: {json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+def _annotations_text(label: str, annotations: Mapping[str, str]) -> str:
+    return f"{label}: {json.dumps(dict(annotations), ensure_ascii=False, sort_keys=True)}"
 
 
 def _output_contract(
     output_ids: tuple[str, ...],
-    contracts: Mapping[str, ArtifactContract] | None = None,
+    annotations: Mapping[str, str] | None = None,
     *,
     foreach_iteration: bool = False,
 ) -> str:
     if not output_ids:
         return "Return no artifact value for this step."
-    declared_contracts = {} if contracts is None else contracts
+    available_annotations = {} if annotations is None else annotations
     parts: list[str] = []
     if len(output_ids) == 1:
         parts.append(f"Return the value for output artifact {output_ids[0]!r}.")
@@ -864,11 +635,13 @@ def _output_contract(
             "Return a mapping keyed exactly by these output artifact IDs: "
             f"{json.dumps(output_ids, ensure_ascii=False)}."
         )
-    parts.append(_contracts_text("Output Artifact contracts", declared_contracts))
-    if foreach_iteration:
+    if available_annotations:
+        label = "Aggregate output Artifact annotations" if foreach_iteration else "Output Artifact annotations"
+        parts.append(_annotations_text(label, available_annotations))
+    if foreach_iteration and available_annotations:
         parts.append(
             "This is one foreach iteration. Return one element for each output Artifact; "
-            "the runtime collects those elements into the aggregate Artifact described above."
+            "the runtime collects those elements into the aggregate Artifact."
         )
     return "\n".join(parts)
 
@@ -900,21 +673,11 @@ async def _build_program_paths(
 async def _materialize_instructions(
     compiled: CompiledWorkflow,
     resolve_instruction: InstructionResolver | None,
-) -> tuple[dict[str, str], dict[str, ArtifactContract]]:
+) -> dict[str, str]:
     """Resolve every instruction path before the execution plan can dispatch."""
 
     resolved_references: dict[str, str] = {}
     instructions: dict[str, str] = {}
-    contracts = dict(compiled.artifact_contracts)
-    inputs_by_step: dict[str, set[str]] = {step.step_id: set() for step in compiled.graph.steps}
-    outputs_by_step: dict[str, set[str]] = {step.step_id: set() for step in compiled.graph.steps}
-    for edge in compiled.graph.edges:
-        if isinstance(edge, ConsumesEdge):
-            inputs_by_step[edge.step_id].add(edge.artifact_id)
-        elif isinstance(edge, ForeachEdge):
-            inputs_by_step[edge.step_id].update((edge.artifact_id, edge.item_binding_id))
-        elif isinstance(edge, ProducesEdge):
-            outputs_by_step[edge.step_id].add(edge.artifact_id)
     for step in sorted(compiled.graph.steps, key=lambda item: item.step_id):
         reference = step.instruction_id
         if reference is None:
@@ -930,32 +693,24 @@ async def _materialize_instructions(
         if not isinstance(instruction, str) or not instruction.strip():
             raise ValueError(f"step {step.step_id!r} instruction resolved to no text")
         instructions[step.step_id] = instruction
-        instruction_contracts = _artifact_contract_directives(
-            instruction,
-            context=f"step_instruction for {step.step_id!r}",
-        )
-        related_artifact_ids = inputs_by_step[step.step_id] | outputs_by_step[step.step_id]
-        unrelated_contracts = sorted(instruction_contracts.keys() - related_artifact_ids)
-        if unrelated_contracts:
-            raise ValueError(
-                f"step_instruction for {step.step_id!r} declares contracts for unrelated "
-                f"Artifacts: {unrelated_contracts}"
-            )
-        _merge_artifact_contracts(
-            contracts,
-            instruction_contracts,
-            context=f"step_instruction for {step.step_id!r}",
-        )
-    return instructions, contracts
+    return instructions
 
 
 def _normalize_program_stdout(
     step_id: str,
     output_ids: tuple[str, ...],
     stdout: str,
-    output_contracts: Mapping[str, ArtifactContract] | None = None,
 ) -> dict[str, object]:
-    """Normalize Program stdout, parsing JSON when its contract requires it."""
+    """Map scalar Program stdout to one output and require mappings for many."""
+
+    if len(output_ids) <= 1:
+        result: object = stdout if output_ids or stdout else None
+        return _normalize_outputs(
+            step_id,
+            output_ids,
+            result,
+            named_mapping_required=False,
+        )
 
     def reject_non_finite_constant(value: str) -> object:
         raise ValueError(f"non-finite JSON constant {value!r}")
@@ -968,38 +723,16 @@ def _normalize_program_stdout(
             result[key] = value
         return result
 
-    def strict_json_value() -> object:
+    try:
         result = json.loads(
             stdout,
             parse_constant=reject_non_finite_constant,
             object_pairs_hook=reject_duplicate_keys,
         )
         # ``json.loads("1e400")`` produces infinity without invoking
-        # ``parse_constant``. Re-encoding validates every nested number.
+        # ``parse_constant``. Re-encoding with ``allow_nan=False`` validates
+        # every nested number and catches that overflow case as well.
         json.dumps(result, allow_nan=False)
-        return result
-
-    if len(output_ids) <= 1:
-        result: object = stdout if output_ids or stdout else None
-        if output_ids:
-            contracts = {} if output_contracts is None else output_contracts
-            contract = contracts.get(output_ids[0])
-            if contract is not None and contract.json_type not in (None, "string"):
-                try:
-                    result = strict_json_value()
-                except (json.JSONDecodeError, OverflowError, ValueError) as error:
-                    raise ValueError(
-                        f"Program step {step_id!r} must write one strict JSON {contract.json_type} value"
-                    ) from error
-        return _normalize_outputs(
-            step_id,
-            output_ids,
-            result,
-            named_mapping_required=False,
-        )
-
-    try:
-        result = strict_json_value()
     except (json.JSONDecodeError, OverflowError, ValueError) as error:
         raise ValueError(f"Program step {step_id!r} must write a strict JSON object keyed by artifact ID") from error
     return _normalize_outputs(
@@ -1023,7 +756,6 @@ def _build_dispatch(
 ) -> StepDispatcher:
     graph = compiled.graph
     foreach_step_ids = {edge.step_id for edge in graph.edges if isinstance(edge, ForeachEdge)}
-    program_output_ids = _program_output_ids(compiled)
     outputs_by_step: dict[str, list[str]] = {step.step_id: [] for step in graph.steps}
     for edge in graph.edges:
         if isinstance(edge, ProducesEdge):
@@ -1036,17 +768,11 @@ def _build_dispatch(
     ) -> Mapping[str, object]:
         output_ids = tuple(sorted(outputs_by_step[step.step_id]))
         foreach_iteration = step.step_id in foreach_step_ids
-        input_contracts = _contract_subset(inputs, compiled.artifact_contracts)
-        output_contracts = _contract_subset(output_ids, compiled.artifact_contracts)
-        validate_artifact_values(
-            inputs,
-            input_contracts,
-            context=f"inputs for step {step.step_id!r}",
-            program_error_artifact_ids=program_output_ids,
-        )
+        input_annotations = _annotation_subset(inputs, compiled.artifact_annotations)
+        output_annotations = _annotation_subset(output_ids, compiled.artifact_annotations)
         output_contract = _output_contract(
             output_ids,
-            output_contracts,
+            output_annotations,
             foreach_iteration=foreach_iteration,
         )
         instruction = instructions[step.step_id]
@@ -1059,46 +785,31 @@ def _build_dispatch(
             output_ids=output_ids,
             dispatch=dispatch_context,
             agent_config=(compiled.agent_configs[step.executor_id] if executor_kind == "Agent" else None),
-            input_contracts=input_contracts,
-            output_contracts=output_contracts,
+            input_annotations=input_annotations,
+            output_annotations=output_annotations,
         )
-
-        def normalize_and_validate(
-            result: object,
-            *,
-            named_mapping_required: bool,
-            allow_program_errors: bool = False,
-        ) -> dict[str, object]:
-            outputs = _normalize_outputs(
-                step.step_id,
-                output_ids,
-                result,
-                named_mapping_required=named_mapping_required,
-            )
-            # A foreach invocation produces one element. The aggregate value is
-            # validated when a downstream Step or the workflow output sees it.
-            if not foreach_iteration:
-                validate_artifact_values(
-                    outputs,
-                    output_contracts,
-                    context=f"outputs for step {step.step_id!r}",
-                    program_error_artifact_ids=(output_ids if allow_program_errors else ()),
-                )
-            return outputs
 
         if executor_kind == "Human":
             if prepare_human_instruction is None or request_human is None:
                 raise ValueError(
                     f"step {step.step_id!r} requires prepare_human_instruction and request_human callbacks"
                 )
+            input_annotation_text = (
+                f"{_annotations_text('Input Artifact annotations', input_annotations)}\n" if input_annotations else ""
+            )
+            output_contract_text = (
+                f"Output contract:\n{output_contract}\n"
+                if output_annotations
+                else f"Output contract: {output_contract}\n"
+            )
             preparation_prompt = (
                 "Prepare this workflow step for a human.\n"
                 f"Step: {step.step_id}\n"
                 f"Instruction:\n{instruction}\n\n"
                 f"Inputs: "
                 f"{json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}\n"
-                f"{_contracts_text('Input Artifact contracts', input_contracts)}\n"
-                f"Output contract:\n{output_contract}\n"
+                f"{input_annotation_text}"
+                f"{output_contract_text}"
                 "Produce concise, readable guidance. Use available tools only when "
                 "needed to inspect supporting resources named by the inputs. Do not ask the human "
                 "directly, change resources, or invent inaccessible contents."
@@ -1113,7 +824,9 @@ def _build_dispatch(
                 prepared_instruction,
                 completion_context,
             )
-            return normalize_and_validate(
+            return _normalize_outputs(
+                step.step_id,
+                output_ids,
                 human_result,
                 named_mapping_required=False,
             )
@@ -1144,36 +857,31 @@ def _build_dispatch(
                     instruction=instruction,
                     inputs=dict(inputs),
                     output_ids=output_ids,
-                    input_contracts=input_contracts,
-                    output_contracts=output_contracts,
+                    input_annotations=input_annotations,
+                    output_annotations=output_annotations,
                 )
             )
             if isinstance(program_result, str):
-                outputs = _normalize_program_stdout(
+                return _normalize_program_stdout(
                     step.step_id,
                     output_ids,
                     program_result,
-                    output_contracts,
                 )
-                if not foreach_iteration:
-                    validate_artifact_values(
-                        outputs,
-                        output_contracts,
-                        context=f"outputs for step {step.step_id!r}",
-                        program_error_artifact_ids=output_ids,
-                    )
-                return outputs
-            return normalize_and_validate(
+            return _normalize_outputs(
+                step.step_id,
+                output_ids,
                 program_result,
                 named_mapping_required=True,
-                allow_program_errors=True,
             )
 
+        input_annotation_text = (
+            f"{_annotations_text('Input Artifact annotations', input_annotations)}\n" if input_annotations else ""
+        )
         prompt = (
             f"Instruction:\n{instruction}\n\n"
             f"Inputs: "
             f"{json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}\n"
-            f"{_contracts_text('Input Artifact contracts', input_contracts)}\n"
+            f"{input_annotation_text}"
             f"{output_contract}"
         )
         if complete is None:
@@ -1182,7 +890,9 @@ def _build_dispatch(
             prompt,
             completion_context,
         )
-        return normalize_and_validate(
+        return _normalize_outputs(
+            step.step_id,
+            output_ids,
             result,
             named_mapping_required=True,
         )
@@ -1248,27 +958,7 @@ async def execute_workflow(
         )
     if any(compiled.executor_kinds[step.executor_id] == "Agent" for step in graph.steps) and complete is None:
         raise ValueError("Agent workflow requires a complete callback")
-    instructions, artifact_contracts = await _materialize_instructions(compiled, resolve_instruction)
-    compiled = CompiledWorkflow(
-        graph=compiled.graph,
-        executor_kinds=compiled.executor_kinds,
-        program_paths=compiled.program_paths,
-        agent_configs=compiled.agent_configs,
-        artifact_contracts=artifact_contracts,
-        diagnostics=compiled.diagnostics,
-    )
-    validate_artifact_values(
-        workflow_inputs,
-        artifact_contracts,
-        context="workflow inputs",
-    )
-    if isinstance(checkpoint, ExecutionCheckpoint):
-        validate_artifact_values(
-            checkpoint.values,
-            artifact_contracts,
-            context="checkpoint values",
-            program_error_artifact_ids=_program_output_ids(compiled),
-        )
+    instructions = await _materialize_instructions(compiled, resolve_instruction)
     program_paths = await _build_program_paths(compiled, resolve_path)
     if work_dir is None and any(not isabs(path) for path in program_paths.values()):
         raise ValueError("relative program_path requires an explicit work_dir")
@@ -1299,7 +989,7 @@ async def execute_workflow(
         }
     )
 
-    outputs = await execute_plan(
+    return await execute_plan(
         plan,
         graph,
         inputs=workflow_inputs,
@@ -1311,10 +1001,3 @@ async def execute_workflow(
         timing_recorder=timing_recorder,
         timing_metadata=timing_metadata,
     )
-    validate_artifact_values(
-        outputs,
-        artifact_contracts,
-        context="workflow outputs",
-        program_error_artifact_ids=_program_output_ids(compiled),
-    )
-    return outputs

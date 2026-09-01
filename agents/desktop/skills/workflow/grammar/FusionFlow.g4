@@ -225,14 +225,6 @@ dataResourceOperator
  *   reasoning_effort(Agent) -> ReasoningEffort          [arity 1]
  *   max_turns(Agent) -> Integer                         [arity 1]
  *   agent_system_prompt(Agent) -> Instruction           [arity 1]
- *
- * The first argument of every Agent operator is the owning Agent constant.
- * The remaining arguments are scalar values in the documented order; for
- * example, agent_config's second, third, and fourth arguments are Model,
- * Engine, and ApiBase respectively. A Bool-returning call may be written as
- * either `call == true` or a standalone assertion `call`; the latter is
- * equivalent shorthand. `allowed_tool` grants one scalar Tool per assertion,
- * so a list is not a substitute for multiple calls.
  */
 agentOwnerOperator
     : 'agent_config'

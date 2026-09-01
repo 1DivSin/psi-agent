@@ -70,53 +70,32 @@ The skill's job is to:
 4. If it reaches a Human Step, pass the nested `$fusion_flow/control.request` fields to the existing `clarify` tool, end the turn, and resume from the next user message.
 5. Return only the final workflow output Artifact mapping.
 
-## Artifact Contracts
+## Artifact Annotations
 
-Artifacts may declare a top-level JSON type and a format/meaning description.
-The runner carries these contracts into every related Agent, Human, and Program
-Step. Agent output contracts also become the JSON Schema properties of
-`submit_step_result`; the runtime validates declared top-level types on workflow
-inputs, ordinary Step outputs, downstream Step inputs, and final outputs.
-
-Write each contract as a standalone directive line. A workflow comment makes
-the contract global:
+An Artifact declaration may have a free-form trailing comment. The runner reads
+that comment as the Artifact's annotation and passes it to related Agent, Human,
+and Program Steps. For Agent outputs, the same text is also used as the
+`submit_step_result` property description.
 
 ```fusionflow
--- @artifact source_document [object]: Required keys are content, language, and metadata.
-/*
- * @artifact summary_sections [array]: Ordered section objects; each object contains heading, body, and source_refs.
- */
+const source_document: Artifact; -- Source content; suggested shape: an object with content, language, and metadata.
+const summary_sections: Artifact; /* Ordered section objects with heading, body, and source references. */
 ```
 
-The supported types are `null`, `boolean`, `integer`, `number`, `string`,
-`object`, and `array`. The description is included in prompts and tool schemas;
-use it to state required fields, exact labels, ordering, empty-value semantics,
-units, and provenance rules.
+The recommended unambiguous placement is a `--` or `/* ... */` comment
+immediately after the declaration's semicolon on the same line. Comments that
+cannot be associated with a declaration remain ordinary comments and never
+cause an error. Everything inside an associated comment is ordinary text. No
+`@Artifact` marker is required: `@Artifact:`, `[object]`, field lists, JSON
+examples, and any other notation are optional writing conventions, not syntax.
+The runner does not parse a type or schema from them, and an unusual or
+incomplete annotation never makes the workflow invalid.
 
-A contract can instead live in a Step instruction. This works both in an
-inline JSON-escaped newline and in a companion instruction Markdown file:
-
-```fusionflow
-step_instruction(normalize_step) == "Normalize only the supplied records.\n@artifact normalized_records [array]: Preserve every id, timestamp, source, and payload; [] means the input contained no records.";
-```
-
-An instruction may declare contracts only for Artifacts consumed or produced
-by that Step. Repeating the same contract is allowed; conflicting declarations,
-unknown Artifact IDs, and unrelated instruction declarations fail before Step
-dispatch. Ordinary instruction prose is still passed through unchanged, but
-only exact `@artifact` directive lines become structured runtime contracts.
-
-The built-in validator enforces the declared top-level JSON type. Nested field
-requirements remain prompt/schema descriptions; when they must be guaranteed
-mechanically, add a deterministic Program validation Step. For a `foreach`
-output, the declared contract describes the collected aggregate Artifact; each
-iteration submits one element, and the aggregate is validated downstream or at
-workflow output. A reserved `$fusion_flow/program_error` value from the actual
-Program producer remains deliverable even when its success-value type differs;
-Agent and Human outputs cannot use that envelope to bypass validation.
-For a single-output Program Step, a non-`string` contract changes stdout from
-verbatim text to one strict JSON value of the declared type; untyped and
-`string` outputs retain the existing verbatim-stdout behavior.
+Use annotations to explain meaning, suggested shape, important fields,
+ordering, units, provenance, and empty-value semantics. They provide context;
+they do not validate workflow inputs, Step results, checkpoints, foreach
+aggregates, or Program stdout. When a format must be enforced mechanically,
+use an explicit deterministic Program validation Step.
 
 ## Intent Routing
 
@@ -316,12 +295,6 @@ Never mention the source file, its path, G4, operator names, static-check stages
 ### Talking to the user while you work
 
 Before calling `run_flow`, send one short heads-up such as "🚀 方案定了，正在帮你跑，预计几分钟…". The tools expose no node-level progress, so do not claim that an individual Step or branch has started or completed. When a call returns final outputs, lead with the result; when it returns a Human request, follow the Human protocol. Do not add an approval question between authoring and execution.
-
-Keep the authoring process silent. After any necessary clarification, use the
-workspace tools directly; do not narrate reasoning, alternative graph designs,
-syntax reconstruction, self-checks, edits, or retries. The only user-visible
-text before execution is the single heads-up line above. This changes
-presentation only: perform every authoring and static-check step in full.
 
 ### Hard stops in Authoring Mode (real TUI failures, do not repeat)
 
