@@ -1,16 +1,14 @@
 ---
 name: workflow
-description: Author, save, inspect, reuse, or run FusionFlow.g4 workflows after explicit Workflow or multi-agent opt-in. Use for requested G4 declarations, saved workflow operations, coordinated agents or roles, Program or Human workflow Steps, fan-out/fan-in, and explicitly orchestrated pipelines. Use the legacy flow skill only for explicit .flow.ts or Fuclaw compatibility work.
+description: Author, save, inspect, reuse, or run workflow declarations after explicit Workflow or multi-agent opt-in. Use for coordinated agents or roles, program or human steps, parallel branches, and staged pipelines. Use the legacy flow skill only for explicit compatibility work.
 ---
 
 # Workflow
 
-Workflow is the formal-language workflow system defined by
-`grammar/FusionFlow.g4`. This skill authors and runs its declarative programs in
-psi-agent. The workspace tool compiles source into Core IR, lowers it to a
-`WorkflowGraph`, executes a checked plan, runs Agent-backed Steps in ephemeral
-Sessions, runs Program-backed Steps through specialized Program Agents with
-structured process capture, and checkpoints Human-backed Steps across turns.
+Workflow is the workspace's declarative system for coordinating agents,
+programs, and human checkpoints. This skill turns a user's intent into a
+checked graph, executes independent work concurrently when appropriate, and
+returns the final declared artifacts.
 
 > **Workspace boundary.** Store one-off authored G4 files under the workspace-managed `flows/` directory. Reusable declarations have one canonical bundle: `flows/workflows/<slug>/`, containing `<slug>.workflow` or `<slug>.g4` (`.workflow` takes precedence if both exist). The skill ships no runnable example workflows. Every run persists all materialized Artifacts as Markdown under its workflow bundle's `runs/<run-id>/artifacts/` directory. Human Steps additionally persist private checkpoints under the ignored workspace `.psi/fusion-flow/runs/` directory; non-Human runs remain non-resumable.
 
@@ -192,9 +190,12 @@ only a returned active Human request may continue through `run_flow_resume`.
 - **List/read:** use existing directory and file tools.
 - **Execute:** only the parent Session invokes `run_flow(flow_path=...)`.
 
-### G4-only boundary
+### Supported workflow source
 
-Only author and run Workflow G4 source. If the user points to any non-G4 workflow file, do not execute it, treat it as supported, or translate it implicitly. State that this skill accepts G4 source only. If the user explicitly asks to migrate that workflow, enter Authoring Mode and author one new G4 workflow from its intent.
+Only author and run the supported workflow declaration format. If the user
+points to another format, do not execute or translate it implicitly. If they
+explicitly ask for a migration, enter Authoring Mode and author one new
+workflow from its intent.
 
 Use a workspace-relative `.workflow` or `.g4` path under `flows/`. Never guess, scan for, or execute a path outside the workspace.
 
@@ -294,11 +295,14 @@ Paths are relative to the workspace:
 
 ## Authoring Mode
 
-This is the flagship: turn a natural-language intent into a runnable G4 workflow. The user normally describes what they want in plain words ("帮我写个工作流做 X"). A request to run an already-saved workflow by name is reuse, not an authoring request.
+This is the authoring path for turning a plain-language request into one
+reusable workflow. Running a saved workflow is a reuse request, not a new
+authoring request.
 
-> **NO-MOCK RULE (global, applies to all of Authoring Mode).** When you build a flow for the user, author **exactly one** real G4 workflow and NEVER fabricate a mock/offline/simplified twin to "test" or "demonstrate" it. A twin with hardcoded sample output, fake numbers, or a fake executor standing in for the real work is a **forgery** — it always "passes" regardless of what the real flow does, so it proves nothing and misleads the user. Validate the one real workflow, then actually run it. If the user *explicitly* later asks for an offline twin, that's a separate request you confirm first — never self-initiate one.
->
-> Inlined source snippets in this Skill are authoring guidance, not runnable bundled workflows. The ban is on fabricating a second version of the user's flow.
+Author one real workflow for the requested work. Do not create an offline twin,
+sample result, or substitute executor to make a demonstration appear to pass.
+Examples in this document explain structure only; they are not extra workflow
+files.
 
 ### When to enter Authoring Mode
 
@@ -358,50 +362,41 @@ syntax reconstruction, self-checks, edits, or retries. The only user-visible
 text before execution is the single heads-up line above. This changes
 presentation only: perform every authoring and static-check step in full.
 
-### Hard stops in Authoring Mode (real TUI failures, do not repeat)
+### Authoring safeguards
 
-These are not style preferences. Each one was observed corrupting a real author run. These bans apply **whether you're mid-author or already running**:
+Apply these safeguards while authoring and running:
 
-1. **Don't fake a result instead of running.** The user wants the real outcome. After the static self-check you call `run_flow` once (see step 5) — you do not stop and hand back a file, and you never substitute a made-up answer for an actual run.
-2. **Write OR run any extra workflow source beyond the one `.workflow` or `.g4` file the task needs** — not an offline twin, not a "simpler version", not a "v2", not a "test harness". Companion instruction Markdown belongs to the same bundle and is not another workflow source. An offline twin with baked-in output is a forgery, not a test. If the user later wants one, that is a separate explicit request.
-3. **Report numbers you did not get from a real run** — never present mock data, sample data, or figures from an unrelated file as if they are *this* flow's result. The only result you report is what the `run_flow` call actually returned. If it fails, report the failure instead of papering over it with invented numbers.
-4. **Write outside the workspace-managed `flows/` location** — do not scan the filesystem for another flow project or create a sibling bundle copy. If the intended path is ambiguous, ask the user instead of guessing.
-5. **Start another workflow from inside an Agent Step** — nested `run_flow` calls are forbidden. A Step may save a self-contained child declaration, but only the parent Session may launch it.
+1. Run the real workflow after the static self-check; do not replace it with a
+   made-up answer or an offline copy.
+2. Write one workflow source for the request. Companion instruction files are
+   part of that source; do not create a second version or test harness.
+3. Report only values returned by the real run. If it fails, report the failure.
+4. Keep generated files under the workspace-managed `flows/` directory.
+5. An agent step cannot start another workflow. Only the parent session may do
+   so.
 
-The real run is how you deliver — there is no "spend-free preview" step to offer the user. Perform the static self-check, then call `run_flow` once.
+### Heads-up before execution
 
-### Heads-up line (说一句就开跑，不是 gate)
+Give one short, plain-language sentence describing the expected result and an
+approximate wait. This is a notice, not a permission gate. Then run the
+workflow without asking the user to repeat approval.
 
-Keep this **minimal**. A real investor ("悠悠") and an internal teammate ("张浩") both bailed on the authoring flow because the summary was wall-to-wall framework jargon (`parallel / pmap / reduce / evaluate / choice / 原语 / 异构复合工作流`). Their words: "这么专业应该不是给我这种用户用的吧" / "这表述太专业太多专有名词了，我都不知道咋聊了". This line is a **告知**, not a go/no-go gate — you say it and then immediately run. It exists so the user isn't surprised by a few minutes' wait / the cost, NOT to ask permission.
-
-**Default heads-up (use this for everyone unless they're clearly a developer):** one plain-language sentence on what they'll get + a rough time estimate. No primitive names, no API names, no pattern names, no file path, no per-step breakdown, no token math, no "要不要跑".
-
-```
-🚀 我来帮你做：<一句话讲清楚要产出什么，e.g. "并行调研 5 个 AI 方向，汇总打分后给你一份带『重点关注 / 投资机会』的总报告">，预计几分钟，这就开始。
-```
-
-That's it — one line, then you run. Do **not** add `做什么 / 要多久 / 你会拿到` as separate fields, do not list steps, do not show 🔧/🎯/📝 lines, do not show the file path, do not ask for approval. If the user is clearly a **developer** (asked to edit Workflow G4 source, mentioned operators, or explicitly asks "用了哪些语法 / 给我看结构 / 文件在哪"), you may then show technical detail **on demand**:
+Use one plain-language sentence for everyone. Do not expose implementation
+names, paths, per-step details, or token calculations unless the user asks.
 
 ```
-🔧 3 个审查 Step 共用输入，1 个汇总 Step 消费三个结果 ｜ `max_concurrency = 3`
+我来帮你完成这项工作并整理好结果，预计几分钟，这就开始。
 ```
 
-Only show that line when a developer explicitly asks for it. Never push it at a business user, and never volunteer the file path unprompted.
+That's it: one line, then run. Do not add separate planning fields, list every
+step, show a path, or ask for approval again. Show technical detail only when
+the user explicitly asks for the structure:
 
-**Jargon → plain-language map (so the default sentence stays clean).** Never say the left; say the right:
+```
+3 个审查步骤共用输入，1 个汇总步骤整理三个结果。
+```
 
-| 框架黑话（别说） | 业务语言（要这么说） |
-| --- | --- |
-| G4 / operator | 工作流结构 |
-| Step | 一次处理 |
-| Artifact | 中间结果 |
-| `max_concurrency` | 同时处理 |
-| `consumes(step) == [result_a, result_b]` | 汇总多个结果 |
-| 异构复合工作流 | 多方向 + 分层汇总 |
-| token / LLM 调用 | （折成）几分钟 / 花多少钱 |
-
-
-Token estimate rule of thumb: each ordinary LLM work step ≈ 1500 input + 800 output tokens; each structured judgement step ≈ 2000 input + 50 output. Sum, then convert to RMB at the provider's listed rate (火山 ARK Agent Plan 包月里这是 0 元，flag it as "≈ 0 (Agent Plan)").
+Show a structural summary only when the user explicitly asks for it.
 
 ### Reference patterns
 
@@ -843,11 +838,9 @@ This manual source review is not a second tool or CLI invocation. Inside `run_fl
 3. When a call returns output Artifacts, summarize them in plain language.
 4. On error, report the compiler diagnostic or failed Step without creating a second workflow or bypassing the runner.
 
-### What Authoring Mode is NOT
-
-- It is **not** a guarantee the workflow gets good *content*. We control structure and execution; the task instructions still depend on the user's domain.
-- It is **not** auto-iterating on content. The user reads the result and asks for changes, but there is no "要不要跑" gate before the first run.
-- It is **not** a reason to show implementation details to a business user. Technical users can ask for the Workflow G4 source and structure on demand.
+The workflow controls structure and execution, not the truth of domain content.
+The user can request a later revision after reading the result. Keep
+implementation details out of the response unless the user asks for them.
 
 ## Doctor Checks
 
