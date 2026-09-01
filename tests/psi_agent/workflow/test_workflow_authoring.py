@@ -55,7 +55,7 @@ def _boundary_sections(markdown: str) -> tuple[str, ...]:
 
 
 def _load_haitun_system() -> types.ModuleType:
-    spec = importlib.util.spec_from_file_location("_dynamic_workflow_system", _SYSTEM_PATH)
+    spec = importlib.util.spec_from_file_location("_workflow_system", _SYSTEM_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     original_path = sys.path.copy()
