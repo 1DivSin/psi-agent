@@ -72,11 +72,13 @@ The skill's job is to:
 
 ## Artifact Contracts
 
-Artifacts may declare a top-level JSON type and a format/meaning description.
-The runner carries these contracts into every related Agent, Human, and Program
-Step. Agent output contracts also become the JSON Schema properties of
-`submit_step_result`; the runtime validates declared top-level types on workflow
-inputs, ordinary Step outputs, downstream Step inputs, and final outputs.
+Artifacts may declare an executable JSON Schema subset, including descriptions
+for the Artifact and its parameters. The G4 lexer retains comment tokens for the
+runner, which parses these declarations before dispatch. The runner carries one
+compiled contract into every related Agent, Human, and Program Step. Agent
+output contracts become the JSON Schema properties of `submit_step_result`, and
+the runtime validates the same schema on workflow inputs, ordinary Step outputs,
+downstream Step inputs, Program stdout, and final outputs.
 
 Write each contract as a standalone directive line. A workflow comment makes
 the contract global:
@@ -88,10 +90,24 @@ the contract global:
  */
 ```
 
-The supported types are `null`, `boolean`, `integer`, `number`, `string`,
-`object`, and `array`. The description is included in prompts and tool schemas;
-use it to state required fields, exact labels, ordering, empty-value semantics,
-units, and provenance rules.
+The legacy form above remains useful for a top-level type and advisory
+description. For program-enforced parameter and output constraints, declare a
+single-line JSON Schema object with `=`:
+
+```fusionflow
+-- @artifact request = {"type":"object","description":"One lookup request.","properties":{"query":{"type":"string","description":"Non-empty lookup text.","minLength":1},"limit":{"type":"integer","description":"Maximum result count.","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false}
+-- @artifact results = {"type":"array","description":"Ordered matching records.","maxItems":100,"items":{"type":"object","description":"One match.","properties":{"id":{"type":"string","description":"Stable identifier.","minLength":1},"score":{"type":"number","description":"Normalized score.","minimum":0,"maximum":1}},"required":["id","score"],"additionalProperties":false}}
+```
+
+Every schema directive requires a top-level `type` and non-empty `description`.
+Supported types are `null`, `boolean`, `integer`, `number`, `string`, `object`,
+and `array`. The executable keyword subset is `properties`, `required`,
+`additionalProperties`, `items`, `minItems`, `maxItems`, `minProperties`,
+`maxProperties`, `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`,
+`enum`, and `const`, plus `type` and `description`. Unsupported or malformed
+schema keywords fail compilation rather than becoming advisory text. Parameter
+`description` values are preserved in prompts, Program contracts, and Agent
+tool schemas; the other keywords are enforced by the runtime.
 
 A contract can instead live in a Step instruction. This works both in an
 inline JSON-escaped newline and in a companion instruction Markdown file:
@@ -106,14 +122,14 @@ unknown Artifact IDs, and unrelated instruction declarations fail before Step
 dispatch. Ordinary instruction prose is still passed through unchanged, but
 only exact `@artifact` directive lines become structured runtime contracts.
 
-The built-in validator enforces the declared top-level JSON type. Nested field
-requirements remain prompt/schema descriptions; when they must be guaranteed
-mechanically, add a deterministic Program validation Step. For a `foreach`
-output, the declared contract describes the collected aggregate Artifact; each
-iteration submits one element, and the aggregate is validated downstream or at
-workflow output. A reserved `$fusion_flow/program_error` value from the actual
-Program producer remains deliverable even when its success-value type differs;
-Agent and Human outputs cannot use that envelope to bypass validation.
+The built-in validator recursively enforces declared object parameters, array
+items, required and extra-property policies, sizes, numeric bounds, patterns,
+enums, and constants. For a `foreach` output, the declared contract describes
+the collected aggregate Artifact; when it has an `items` schema, each iteration
+also submits against that item schema, and the aggregate is validated downstream
+or at workflow output. A reserved `$fusion_flow/program_error` value from the
+actual Program producer remains deliverable even when its success-value type
+differs; Agent and Human outputs cannot use that envelope to bypass validation.
 For a single-output Program Step, a non-`string` contract changes stdout from
 verbatim text to one strict JSON value of the declared type; untyped and
 `string` outputs retain the existing verbatim-stdout behavior.
