@@ -70,6 +70,54 @@ The skill's job is to:
 4. If it reaches a Human Step, pass the nested `$fusion_flow/control.request` fields to the existing `clarify` tool, end the turn, and resume from the next user message.
 5. Return only the final workflow output Artifact mapping.
 
+## Artifact Contracts
+
+Artifacts may declare a top-level JSON type and a format/meaning description.
+The runner carries these contracts into every related Agent, Human, and Program
+Step. Agent output contracts also become the JSON Schema properties of
+`submit_step_result`; the runtime validates declared top-level types on workflow
+inputs, ordinary Step outputs, downstream Step inputs, and final outputs.
+
+Write each contract as a standalone directive line. A workflow comment makes
+the contract global:
+
+```fusionflow
+-- @artifact source_document [object]: Required keys are content, language, and metadata.
+/*
+ * @artifact summary_sections [array]: Ordered section objects; each object contains heading, body, and source_refs.
+ */
+```
+
+The supported types are `null`, `boolean`, `integer`, `number`, `string`,
+`object`, and `array`. The description is included in prompts and tool schemas;
+use it to state required fields, exact labels, ordering, empty-value semantics,
+units, and provenance rules.
+
+A contract can instead live in a Step instruction. This works both in an
+inline JSON-escaped newline and in a companion instruction Markdown file:
+
+```fusionflow
+step_instruction(normalize_step) == "Normalize only the supplied records.\n@artifact normalized_records [array]: Preserve every id, timestamp, source, and payload; [] means the input contained no records.";
+```
+
+An instruction may declare contracts only for Artifacts consumed or produced
+by that Step. Repeating the same contract is allowed; conflicting declarations,
+unknown Artifact IDs, and unrelated instruction declarations fail before Step
+dispatch. Ordinary instruction prose is still passed through unchanged, but
+only exact `@artifact` directive lines become structured runtime contracts.
+
+The built-in validator enforces the declared top-level JSON type. Nested field
+requirements remain prompt/schema descriptions; when they must be guaranteed
+mechanically, add a deterministic Program validation Step. For a `foreach`
+output, the declared contract describes the collected aggregate Artifact; each
+iteration submits one element, and the aggregate is validated downstream or at
+workflow output. A reserved `$fusion_flow/program_error` value from the actual
+Program producer remains deliverable even when its success-value type differs;
+Agent and Human outputs cannot use that envelope to bypass validation.
+For a single-output Program Step, a non-`string` contract changes stdout from
+verbatim text to one strict JSON value of the declared type; untyped and
+`string` outputs retain the existing verbatim-stdout behavior.
+
 ## Intent Routing
 
 Natural-language workflow requests map to these actions:
@@ -236,10 +284,29 @@ This is the flagship: turn a natural-language intent into a runnable G4 workflow
 - User edits existing Workflow G4 source and asks you to "rewrite" or "扩展".
 - **User describes a workflow-shaped task without naming "flow"** — anything needing two or more coordinated agents / parallel branches / a multi-step pipeline / per-item work (see "When to Activate"). In that case, don't wait for the word "flow": offer to build one, then run the author loop below.
 
+### Planning contract
+
+Before writing Workflow G4 source, make an internal planning contract for the
+requested workflow. It must identify:
+
+- the user's intent and concrete success condition;
+- every external input and final output Artifact;
+- each Step's single responsibility and its consumed and produced Artifacts;
+- information dependencies and the owner of every material constraint;
+- concurrency, timeout, retry, resource, and user-stated cost limits.
+
+Assign mechanically decidable constraints to graph structure or a deterministic
+Program Step. Assign constraints that require judgment to an Agent Step whose
+instruction names that responsibility. Let dependencies determine execution:
+fan out independent work, keep dependent work sequential, and join branches
+only when a consumer needs all of their results. Keep this contract in the
+authoring context; do not expose framework planning detail to a non-technical
+user.
+
 ### The 5-step author loop
 
 1. **Understand intent** — restate the user's goal in 1 sentence. If genuinely ambiguous, ask **one** clarifying question (don't grill them). Note whether the user looks like a *developer* (asked to edit Workflow G4 source or mentioned operators) — that's the only case where you show technical detail later. Everyone else gets the minimal plain-language summary.
-2. **Model the workflow** — match the intent to one of the executable reference patterns below. Identify inputs, outputs, Agent-, Human-, or Program-backed Steps, Artifacts, dependencies, concurrency, resources, and timeouts. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts.
+2. **Model the workflow** — complete the planning contract and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts.
 3. **Author one Workflow G4 source** — before writing, read `grammar/FusionFlow.g4` completely and treat it as the sole source of truth for FusionFlow syntax and preset operators. Use only declarations, assertions, terms, and operators documented there. Use the workspace-provided target path; never invent a second copy.
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
@@ -249,6 +316,12 @@ Never mention the source file, its path, G4, operator names, static-check stages
 ### Talking to the user while you work
 
 Before calling `run_flow`, send one short heads-up such as "🚀 方案定了，正在帮你跑，预计几分钟…". The tools expose no node-level progress, so do not claim that an individual Step or branch has started or completed. When a call returns final outputs, lead with the result; when it returns a Human request, follow the Human protocol. Do not add an approval question between authoring and execution.
+
+Keep the authoring process silent. After any necessary clarification, use the
+workspace tools directly; do not narrate reasoning, alternative graph designs,
+syntax reconstruction, self-checks, edits, or retries. The only user-visible
+text before execution is the single heads-up line above. This changes
+presentation only: perform every authoring and static-check step in full.
 
 ### Hard stops in Authoring Mode (real TUI failures, do not repeat)
 
@@ -655,6 +728,7 @@ Before the initial `run_flow` call, inspect the source in order:
 - assertions use `==`, while formulas use comparison operators;
 - each operator uses the documented arity and supported shape;
 - each Step has a supported Agent, Human, or Program executor, name, instruction, and explicit data/control dependencies;
+- the planning contract covers intent, success, interfaces, responsibilities, constraint ownership, dependencies, and operational limits;
 - no residual or unsupported operator is emitted.
 
 This manual source review is not a second tool or CLI invocation. Inside `run_flow`, `check_workflow` requires exactly one workflow, delegates graph semantics to `WorkflowGraphCompiler`, rejects unsupported residual assertions and graph values with explicit concepts that omit `Artifact`, requires every Step instruction and Program path, and rejects untyped or ambiguous executor declarations. Parsing, checking, and compilation all occur before dispatch.

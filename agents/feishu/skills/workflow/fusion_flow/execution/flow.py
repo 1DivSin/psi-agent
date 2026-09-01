@@ -651,7 +651,10 @@ class Flow:
         normalized_context = _normalize_string_mapping(context)
         config = _with_agent_defaults(
             agent.config,
-            max_tokens=8192,
+            # Providers and models have different output capacities. Leave the
+            # request unset unless the workflow declares max_output_tokens;
+            # a universal 8192-token cap can truncate otherwise valid tool calls.
+            max_tokens=None,
             temperature=1.0,
         )
         schema = config.context_schema

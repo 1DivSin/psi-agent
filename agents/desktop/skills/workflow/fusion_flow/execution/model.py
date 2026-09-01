@@ -52,7 +52,7 @@ class AgentConfig:
 def _with_agent_defaults(
     config: AgentConfig,
     *,
-    max_tokens: int,
+    max_tokens: int | None,
     temperature: float,
 ) -> AgentConfig:
     """Resolve operation-specific defaults without losing explicit values."""
