@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import re
 import sys
@@ -14,9 +13,8 @@ from fusion_flow.workflow_runner import compile_workflow
 _ROOT = Path(__file__).parents[3]
 _WORKFLOW_SKILL = _ROOT / "examples" / "haitun-workspace" / "skills" / "workflow"
 _SKILL_PATH = _WORKFLOW_SKILL / "SKILL.md"
-_AUTHORING_REFERENCE_PATH = _WORKFLOW_SKILL / "references" / "dynamic-workflow-authoring.md"
-_PIEBALD_NOTICE_PATH = _WORKFLOW_SKILL / "references" / "PIEBALD_LICENSE.md"
-_AUTHORING_REFERENCE = "references/dynamic-workflow-authoring.md"
+_AUTHORING_REFERENCE_PATH = _WORKFLOW_SKILL / "references" / "workflow-authoring-guide.md"
+_AUTHORING_REFERENCE = "references/workflow-authoring-guide.md"
 _SYSTEM_PATH = _ROOT / "examples" / "haitun-workspace" / "systems" / "system.py"
 
 
@@ -70,7 +68,7 @@ def _load_haitun_system() -> types.ModuleType:
     return module
 
 
-def test_skill_requires_dynamic_authoring_reference() -> None:
+def test_skill_requires_workflow_authoring_guide() -> None:
     skill = _SKILL_PATH.read_text(encoding="utf-8")
     lines = skill.splitlines()
     reference_lines = [index for index, line in enumerate(lines) if _AUTHORING_REFERENCE in line]
@@ -142,26 +140,15 @@ def test_skill_keeps_verification_patterns_risk_scaled() -> None:
     assert "any reviewable agent-built result" not in normalized
 
 
-def test_adaptation_preserves_source_repository_notice() -> None:
-    reference = _AUTHORING_REFERENCE_PATH.read_text(encoding="utf-8")
-    notice = _PIEBALD_NOTICE_PATH.read_bytes()
-
-    assert "738bccbb279db7024b9a41f921b473d31ddc421a" in reference
-    assert "source repository carries the MIT notice" in reference
-    assert "underlying prompt text as extracted from Claude Code" in reference
-    assert hashlib.sha256(notice).hexdigest() == "453afa8ddc35be35fa2dfd13762476bf058255d4af8b61b5acc3d9c20813e322"
-
-
-def test_reference_defines_domain_neutral_dynamic_authoring_invariants() -> None:
+def test_authoring_guide_defines_domain_neutral_design_invariants() -> None:
     reference = _AUTHORING_REFERENCE_PATH.read_text(encoding="utf-8")
     paragraphs = _paragraphs(reference)
 
     _assert_terms_share_paragraph(
         paragraphs,
-        "hybrid scouting",
-        ("hybrid", "scout", "broad", "targeted"),
-        ("hybrid", "scout", "breadth", "depth"),
-        ("hybrid", "scout", "broad", "deep"),
+        "scope discovery",
+        ("work list", "discover", "scope"),
+        ("scope", "first discovery", "establish"),
     )
     _assert_terms_share_paragraph(
         paragraphs,
@@ -184,9 +171,8 @@ def test_reference_defines_domain_neutral_dynamic_authoring_invariants() -> None
     _assert_terms_share_paragraph(
         paragraphs,
         "true cross-branch joins",
-        ("only", "cross-branch", "join"),
-        ("join", "branches", "actually needs"),
-        ("join", "branches", "truly needs"),
+        ("join", "branches", "next", "needs"),
+        ("genuine join",),
     )
     _assert_terms_share_paragraph(
         paragraphs,
@@ -209,9 +195,9 @@ def test_reference_defines_domain_neutral_dynamic_authoring_invariants() -> None
     )
     _assert_terms_share_paragraph(
         paragraphs,
-        "fixed-round cumulative deduplication",
-        ("seen_candidates", "refuted", "rejected"),
-        ("cumulative", "seen", "rejected"),
+        "finite repair rounds",
+        ("repair", "finite", "graph"),
+        ("finite", "declared", "graph"),
     )
 
     normalized = _normalized(reference)
@@ -225,37 +211,18 @@ def test_reference_defines_domain_neutral_dynamic_authoring_invariants() -> None
     for principle, alternatives in principles.items():
         assert any(marker in normalized for marker in alternatives), f"missing authoring principle: {principle}"
 
-    assert "uncertain returned verdict as `refuted`" in normalized
-    assert "explicit majority" in normalized
-    assert "does not become a missing value or a vote" in normalized
+    assert "uncertainty" in normalized
+    assert "finite" in normalized
+    assert "domain-specific shortcut" in normalized
 
 
-def test_reference_marks_external_runtime_features_outside_g4() -> None:
-    reference = _AUTHORING_REFERENCE_PATH.read_text(encoding="utf-8")
-    sections = _boundary_sections(reference)
-
-    assert sections, "the reference must define an explicit capability boundary"
-    boundary = " ".join(sections)
-    assert "g4" in boundary
-    for feature_terms in (
-        ("claude", "javascript", "api"),
-        ("ultracode",),
-        ("background",),
-        ("cached", "resume"),
-    ):
-        assert all(term in boundary for term in feature_terms)
-    assert any(
-        marker in boundary
-        for marker in (
-            "not g4 capabilities",
-            "not supported by g4",
-            "outside g4",
-            "do not claim",
-            "must not claim",
-            "cannot claim",
-            "unsupported in g4",
-        )
-    )
+def test_authoring_guide_covers_multiple_composable_shapes() -> None:
+    normalized = _normalized(_AUTHORING_REFERENCE_PATH.read_text(encoding="utf-8"))
+    for shape in ("understand", "design", "review", "research", "migrate", "per-item"):
+        assert shape in normalized
+    assert "candidate panel" in normalized
+    assert "branch-local" in normalized
+    assert "genuine join" in normalized
 
 
 def test_software_migration_graph_keeps_branches_local_until_synthesis() -> None:

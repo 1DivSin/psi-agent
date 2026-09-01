@@ -328,25 +328,20 @@ only when a consumer needs all of their results. Keep this contract in the
 authoring context; do not expose framework planning detail to a non-technical
 user.
 
-### Dynamic orchestration authoring reference
+### Workflow authoring guide
 
 Before modeling any new workflow or revising an existing one, read
-`references/dynamic-workflow-authoring.md` in full. Resolve that path relative
+`references/workflow-authoring-guide.md` in full. Resolve that path relative
 to the exact `SKILL.md` file supplied by the system prompt, not relative to a
-generated flow bundle or a user-workspace mirror. The reference is mandatory
-authoring policy: it covers discovery before fan-out, clean Agent Step
-contexts, explicit and structured Artifact transport, branch-local pipelines,
-true join boundaries, scale, and independent verification patterns.
-
-The reference maps dynamic-workflow construction principles onto the
-capabilities this runtime actually implements. It does not extend the G4
-language. `grammar/FusionFlow.g4` remains the sole syntax authority, and the
-runtime guardrails below remain the execution authority.
+generated flow bundle or a user-workspace mirror. The guide is mandatory
+authoring policy: it covers discovery before fan-out, clean step contexts,
+explicit Artifact transport, branch-local pipelines, genuine joins, scale, and
+independent verification patterns.
 
 ### The 5-step author loop
 
 1. **Understand intent** — restate the user's goal in 1 sentence. If genuinely ambiguous, ask **one** clarifying question (don't grill them). Note whether the user looks like a *developer* (asked to edit Workflow G4 source or mentioned operators) — that's the only case where you show technical detail later. Everyone else gets the minimal plain-language summary.
-2. **Model the workflow** — read and apply the dynamic orchestration authoring reference, complete the planning contract, and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. Select optional quality patterns according to task risk, requested coverage, and the user's cost or latency limits. When those factors warrant an independent check and an Agent-built candidate can be checked from the same visible task contract and evidence, use the adversarial verifier pattern below.
+2. **Model the workflow** — read and apply the Workflow authoring guide, complete the planning contract, and choose among the executable patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. Select optional quality patterns according to task risk, requested coverage, and the user's cost or latency limits.
 3. **Author one Workflow G4 source** — before writing, read `grammar/FusionFlow.g4` completely and treat it as the sole source of truth for FusionFlow syntax and preset operators. Use only declarations, assertions, terms, and operators documented there. Use the workspace-provided target path; never invent a second copy.
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
@@ -833,7 +828,7 @@ Before the initial `run_flow` call, inspect the source in order:
 - each operator uses the documented arity and supported shape;
 - each Step has a supported Agent, Human, or Program executor, name, instruction, and explicit data/control dependencies;
 - the planning contract covers intent, success, interfaces, responsibilities, constraint ownership, dependencies, and operational limits;
-- the dynamic orchestration reference was applied: clean-context inputs are
+- the Workflow authoring guide was applied: clean-context inputs are
   explicit, independent branches have no artificial stage barrier, joins have
   real cross-branch consumers, structured boundaries have Artifact contracts,
   and any deliberate coverage bound is visible rather than silently dropped;
