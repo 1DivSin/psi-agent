@@ -90,13 +90,14 @@ synthesis so omissions can be distinguished from unavailable evidence.
 
 ## Keep contexts clean and data explicit
 
-Each agent step receives its instruction, declared inputs, output contract, and
-allowed tools. It does not inherit a parent conversation, hidden scratch state,
+Each agent step receives a clean step context containing its instruction,
+declared inputs, output contract, and allowed tools. It does not inherit a
+parent conversation, hidden scratch state,
 or an undeclared sibling result. State every required criterion, fact, and
 evidence source in the input artifacts. Avoid phrases such as "as above".
 
-Artifacts are the workflow's memory bus. Use structured contracts at boundaries
-that need machine-checkable data, and require each step to produce exactly its
+Artifacts are the workflow's memory bus. Use structured contracts and schemas
+at boundaries that need machine-checkable data, and require each step to produce exactly its
 declared outputs. Pass source material as artifacts instead of embedding large
 documents in instructions. Every input Artifact should be explicitly consumed,
 and every output Artifact should be explicitly produced. Keep mutable shared
@@ -104,8 +105,8 @@ state out of parallel branches.
 
 ## Preserve branch locality
 
-An independent branch may continue from discovery to its own transformation and
-check without waiting for unrelated branches. Add a join only when the next
+An independent branch may continue through a branch-local pipeline, from
+discovery to its own transformation and check, without waiting for unrelated branches. Add a join only when the next
 step needs all of the listed artifacts. A step that merely runs after another
 through ordering does not receive the earlier result unless that result is an
 explicit input.
@@ -113,7 +114,7 @@ explicit input.
 ## Scale deliberately
 
 Use concurrency for a real user, service, memory, rate, mutation, or cost
-constraint. Make limits visible in the input, contract, instruction, or a
+constraint. Avoid a silent cap: make limits visible in the input, contract, instruction, or a
 coverage record. Never silently sample, truncate, rank, or skip requested work.
 If a bound is necessary, record both processed and omitted items and the reason.
 Use a finite list for repeated work; use explicit branches for a few semantic
