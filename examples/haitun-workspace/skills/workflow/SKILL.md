@@ -407,7 +407,7 @@ Read `grammar/FusionFlow.g4` completely before using these patterns. The grammar
 | **Fan-out + fan-in** | Several Steps each use `consumes(step) == [shared_artifact]`; one final Step uses `consumes(final_step) == [result_a, result_b]`. Set `max_concurrency` on the workflow when needed. | PR review, multi-perspective audit, content moderation. |
 | **Artifact pipeline** | Each Step produces the Artifact consumed by the next Step. Use `max_attempts` only when rerunning that individual Step is safe. | Writing, ETL, and refine-and-check work. |
 | **Branch-local pipelines** | Independent branches each advance from discovery or construction to their own check as soon as that branch's Artifact is ready. Only a consumer that needs every branch result performs the final fan-in. | Multi-surface inspection, independent research channels, and partitioned migrations. |
-| **Adversarial verifier** | An independent final Agent Step consumes the task contract, the same evidence available to the builder, and its candidate. It tries to refute the candidate, records evidence for each check, and emits either the unchanged candidate or a corrected final Artifact. | When task risk, requested coverage, and user cost or latency limits warrant an independent check that can be performed from visible inputs. |
+| **Adversarial verifier** | An independent final Agent Step consumes the task contract, the same evidence available to the builder, and its candidate. It derives visible relation checks, audits the complete candidate, records structured evidence and uncertainty, and emits either the unchanged candidate or a corrected final Artifact. | When task risk, requested coverage, and user cost or latency limits warrant an independent check that can be performed from visible inputs. |
 | **Independent candidate panel** | Several candidate Steps consume the same task contract; judging or synthesis Steps consume explicit candidate Artifacts and the same decision criteria. | Open-ended design where genuinely different approaches should be compared before synthesis. |
 | **Per-item map** | Bind one List-valued source Artifact with `foreach_item`; use workflow `max_concurrency` or resources when a limit is needed. | Parallel processing with ordered results; ordinary failures are raised together after siblings finish. |
 | **Named Artifact selection** | Keep every candidate result explicit, then bind `selected_artifact == if(formula, artifact_a, artifact_b)` and use `selected_artifact` in ordinary dataflow. For priority selection, chain named intermediate Artifacts. | Eagerly run all candidate producers, then choose one value for downstream Steps. |
@@ -436,33 +436,57 @@ contract. Put it in a companion instruction Markdown file when it is too long
 for one `step_instruction` string:
 
 ```text
-You are an adversarial verifier for a candidate result. Do not call tools or
+You are an independent, adversarial verifier for a candidate result. Do not call tools or
 introduce external facts. Treat the consumed task contract and source evidence
-as the complete ground truth, and treat the consumed candidate as untrusted.
+as the complete ground truth, and treat the candidate and any upstream
+conclusion as untrusted.
 
-Build a checklist from the visible task contract. At minimum, try to refute:
-1. every explicit requirement and constraint;
-2. every factual claim that should be traceable to the supplied evidence;
-3. every derived value or calculation that can be recomputed;
-4. internal consistency across the whole candidate; and
-5. the requested output structure and completeness.
+Build a checklist from the visible task contract before judging the candidate.
+Then derive a validation specification from the visible inputs: list the
+explicit constraints and the relation predicates they actually establish.
+Evidence that each item is individually supported does
+not prove that the items are valid in combination; evidence is support for a
+claim, not permission for an unstated combination.
 
-Report PASS or FAIL for each applicable check with concrete evidence. Do not
-invent a check from hidden scoring feedback or task-specific knowledge that is
-absent from the consumed inputs. If every check passes, set the verdict to OK
-and preserve the candidate exactly. If any check fails, set the verdict to
-FIXED and produce a fully corrected final result using only the same inputs.
-Never leave placeholders. Return exactly the verifier Step's declared Artifact
-mapping: the verification report and the final result.
+Perform a global relational audit of the complete candidate, not only one item
+at a time. For every applicable predicate, inspect requirements,
+evidence/provenance, recomputable values, capacity and aggregate limits,
+duplicates/uniqueness, mutually incompatible choices (including mutually
+exclusive choices),
+temporal ordering or overlap, spatial consistency, cross-item dependencies,
+coverage/completeness, and output structure. Compare relevant pairs or groups
+and totals when a relation requires it. These are generic lenses, not hidden
+domain rules: instantiate a relation only when the visible inputs make it
+applicable.
+
+Return structured checks and violations. Each check status must be PASS, FAIL,
+or UNDETERMINED. Report PASS or FAIL for each applicable check with concrete evidence;
+use UNDETERMINED when its basis is missing. Include the affected path or items,
+observed values, and visible basis. A FAIL must cite the task
+contract, supplied evidence, a declared rule catalog, or an explicitly
+declared generic structural predicate. Do not invent a check from hidden scoring feedback
+or hidden evaluator rules, or turn uncertainty into PASS.
+
+Record all violations before any correction. If every required check passes,
+set the verdict to OK and preserve the candidate exactly. If any check fails,
+set the verdict to FIXED and produce a fully corrected final result using only
+the same inputs; do not add unsupported content or placeholders. If a required
+check remains UNDETERMINED, do not claim the candidate is fully verified;
+preserve that uncertainty in the declared report and follow its existing
+verdict contract. Return exactly the verifier Step's declared Artifact mapping:
+the verification report and the final result.
 ```
 
 The verifier is one independent check-and-correct Step, not an evaluator-driven
-retry loop. It receives no privileged source and does not call the builder
-again. Declare a report Artifact and a final Artifact; expose only the final
-Artifact through `output_workflow` unless the user explicitly asks to receive
-the report too. For example, a release-note workflow can analyze a change set,
-build draft notes, then have the verifier check every statement against that
-same change evidence and correct unsupported or inconsistent claims.
+retry loop. Its independence means that it derives and applies the checks
+itself before accepting any upstream conclusion; its global audit means that it
+examines interactions among all relevant candidate items. It receives no
+privileged source and does not call the builder again. Declare a report Artifact
+and a final Artifact; expose only the final Artifact through `output_workflow`
+unless the user explicitly asks to receive the report too. For example, a
+release-note workflow can analyze a change set, build draft notes, then have
+the verifier check every statement and cross-note interaction against that same
+change evidence and correct unsupported or inconsistent claims.
 
 #### Full-featured in-context example
 

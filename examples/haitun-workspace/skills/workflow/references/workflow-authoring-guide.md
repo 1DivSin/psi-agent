@@ -128,6 +128,12 @@ requested coverage, and user-stated cost or latency limits.
 - An adversarial checker tries to refute a candidate with the same contract and
   evidence available to its builder. It records concrete counterevidence and
   uncertainty rather than merely confirming the result.
+- When a candidate contains multiple related items, include a global relational
+  lens: check applicable uniqueness, exclusions, temporal or spatial
+  consistency, aggregate capacities or totals, cross-item dependencies,
+  coverage, and provenance. Apply a relation only when the visible contract or
+  evidence establishes it; otherwise record the check as undetermined rather
+  than importing a hidden score rule.
 - Distinct checking lenses may cover factual support, consistency, boundaries,
   reproducibility, safety, performance, or contract compliance. Use different
   lenses when the candidate has more than one independent way to fail. Each lens must
