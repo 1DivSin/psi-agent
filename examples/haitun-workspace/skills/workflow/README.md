@@ -46,6 +46,12 @@ launcher process CWD.
 This Skill ships no runnable workflow registry. Workspace owners may commit
 canonical reusable declarations under `flows/workflows/<slug>/`.
 
+## Authoring guide
+
+- `references/workflow-authoring-guide.md`: concise, domain-neutral guidance
+  for choosing workflow shapes, discovering scope, passing structured artifacts,
+  preserving independent branches, and selecting checks according to risk.
+
 ## Modules
 
 - `grammar/FusionFlow.g4`: the syntax grammar; ordinary preset/external-operator arity remains checker-owned.

@@ -1,16 +1,14 @@
 ---
 name: workflow
-description: Author, save, reuse, or run formal-language workflows defined by FusionFlow.g4. Use for saved workflow reuse by name, coordinated agents, Program Steps, Human checkpoints, parallel sub-tasks, or multi-step pipelines. Use the legacy flow skill only for explicit .flow.ts or Fuclaw compatibility work.
+description: Author, save, inspect, reuse, or run workflow declarations after explicit Workflow or multi-agent opt-in. Use for coordinated agents or roles, program or human steps, parallel branches, and staged pipelines. Use the legacy flow skill only for explicit compatibility work.
 ---
 
 # Workflow
 
-Workflow is the formal-language workflow system defined by
-`grammar/FusionFlow.g4`. This skill authors and runs its declarative programs in
-psi-agent. The workspace tool compiles source into Core IR, lowers it to a
-`WorkflowGraph`, executes a checked plan, runs Agent-backed Steps in ephemeral
-Sessions, runs Program-backed Steps through specialized Program Agents with
-structured process capture, and checkpoints Human-backed Steps across turns.
+Workflow is the workspace's declarative system for coordinating agents,
+programs, and human checkpoints. This skill turns a user's intent into a
+checked graph, executes independent work concurrently when appropriate, and
+returns the final declared artifacts.
 
 > **Workspace boundary.** Store one-off authored G4 files under the workspace-managed `flows/` directory. Reusable declarations have one canonical bundle: `flows/workflows/<slug>/`, containing `<slug>.workflow` or `<slug>.g4` (`.workflow` takes precedence if both exist). The skill ships no runnable example workflows. Every run persists all materialized Artifacts as Markdown under its workflow bundle's `runs/<run-id>/artifacts/` directory. Human Steps additionally persist private checkpoints under the ignored workspace `.psi/fusion-flow/runs/` directory; non-Human runs remain non-resumable.
 
@@ -20,26 +18,31 @@ structured process capture, and checkpoints Human-backed Steps across turns.
 
 ## When to Activate
 
-Activate this skill when the user:
+Author or run a Workflow only after the user explicitly opts into Workflow or
+multi-agent orchestration. Explicit opt-in includes the user's own request to:
 
-- Asks to run a G4 workflow they already have ("跑一下这个 / 帮我跑 / 执行"). This skill does **not** ship runnable demo examples; "run" always means a concrete workflow the user has.
-- Asks to save, list, load, or reuse a workflow declaration.
-- Mentions FusionFlow or agent-flow
-- **Describes any task that needs a multi-agent workflow or agent collaboration**, even without saying "flow" — e.g. "让几个 agent 分别审一遍再汇总", "并行跑 N 个子任务再合并", "一步接一步处理(先 A 再 B 再 C)", "多角度评审后汇总", "把这件事拆成多个 agent 协作". If the task clearly benefits from orchestrating more than one agent / parallel branches / a multi-step pipeline, enter **Authoring Mode** (below) and offer to build a flow.
+- author, run, save, list, load, or reuse a G4 workflow declaration;
+- use a workflow, coordinated agents, parallel agents, fan-out/fan-in, or a
+  multi-agent review or debate; or
+- run a concrete `.workflow` or `.g4` file, or work with FusionFlow while asking
+  for an operation that requires this Skill.
 
-When in doubt about whether a task is "workflow-shaped": if it would take **two or more coordinated LLM steps** (fan-out/fan-in, an artifact pipeline, or per-item work), it qualifies — activate and propose a flow. A single one-shot question does not.
+A save, list, load, or inspect request activates this Skill for registry
+management but does not by itself authorize execution. Call `run_flow` only
+when the user also asks to run, invoke, or reuse the declaration for a task.
 
-### HARD RULE: when you recognize a multi-agent task, your job is to BUILD A FLOW — not to do it yourself
+A task that would merely benefit from parallelism, multiple perspectives, or
+two or more model calls does **not** authorize the extra execution and token
+cost. For an ordinary task without opt-in, use the normal task path and any
+available individual-subagent tools. When Workflow would materially improve the
+result, briefly describe its proposed scale and approximate cost or latency,
+then ask whether the user wants it before authoring or running anything.
 
-Once a task is workflow-shaped (multiple agents / parallel branches / multi-step pipeline / per-item work), your **one default action** is to enter Authoring Mode and build a G4 workflow. That is the entire point of this skill — the flow runtime spawns and coordinates the sub-agents; **you do not play those sub-agents yourself**.
-
-Do **NOT** offer "我直接帮你做这一次" as an option, and especially do **NOT** make it the default. Building the flow IS how you help: doing it by hand throws away explicit dependencies, graph concurrency, named Artifacts, and the reusable G4 source.
-
-❌ **Real failure to never repeat** (observed in testing): user said "让几个 AI 从安全/性能/可读性分别审一段代码再汇总". The agent replied with "方式 A：我直接帮你审这次代码 / 方式 B：给你做成可复用工作流" — offering to personally act as the three reviewers, with the manual path listed first as the default. **Wrong.** The correct response is to go straight into Authoring Mode and build the review flow: three reviewer Steps consume the same input, then one final Step consumes all three review artifacts. No A/B menu, no "I'll just review it myself".
-
-✅ **Correct shape**: "🐾 这是个多 agent 协作任务，我来帮你搭一个工作流：3 个审查 agent（安全/性能/可读性）并行审 → 一个汇总 agent 合并成带严重等级的报告。" Then run the author loop (understand → model → author → static self-check → one heads-up line → **run it once**).
-
-The only time you don't build a flow is when the user **explicitly** says they just want a one-off answer and not a tool ("别给我搭工具，就这一次，你直接说结论"). Even then, confirm — don't assume.
+An explicit request to simulate several agents or roles is already opt-in. In
+that case, enter Authoring Mode and build a G4 workflow whose Agent Steps hold
+the distinct roles; do not role-play all of them in one parent response. Once
+the user has opted in, building and running the graph is the default delivery
+path unless they explicitly ask to inspect or save it without execution.
 
 Do **not** activate this skill for `.prose` files — those belong to OpenProse.
 
@@ -150,7 +153,7 @@ Natural-language workflow requests map to these actions:
 | "看看结果 / 刚才那个跑完了吗" | Use the result already returned. A Human wait is not completion; wait for the user's answer rather than polling. |
 | "环境齐不齐 / 能不能跑 / 帮我检查下" | Confirm that the G4 source parses and that all Steps use supported Agent, Human, or Program executors. |
 | **"帮我写个工作流做 X / 帮我编排 / 我想让几个 agent ..."** | **Author a new G4 workflow from natural language. See "Authoring Mode" below.** |
-| Anything else workflow-shaped | Interpret intent against this table |
+| Any other explicitly opted-in Workflow operation | Interpret intent against this table; an ordinary task that is merely workflow-shaped stays on the normal task path. |
 
 ## Running a Workflow
 
@@ -187,9 +190,12 @@ only a returned active Human request may continue through `run_flow_resume`.
 - **List/read:** use existing directory and file tools.
 - **Execute:** only the parent Session invokes `run_flow(flow_path=...)`.
 
-### G4-only boundary
+### Supported workflow source
 
-Only author and run Workflow G4 source. If the user points to any non-G4 workflow file, do not execute it, treat it as supported, or translate it implicitly. State that this skill accepts G4 source only. If the user explicitly asks to migrate that workflow, enter Authoring Mode and author one new G4 workflow from its intent.
+Only author and run the supported workflow declaration format. If the user
+points to another format, do not execute or translate it implicitly. If they
+explicitly ask for a migration, enter Authoring Mode and author one new
+workflow from its intent.
 
 Use a workspace-relative `.workflow` or `.g4` path under `flows/`. Never guess, scan for, or execute a path outside the workspace.
 
@@ -289,18 +295,23 @@ Paths are relative to the workspace:
 
 ## Authoring Mode
 
-This is the flagship: turn a natural-language intent into a runnable G4 workflow. The user normally describes what they want in plain words ("帮我写个工作流做 X"). A request to run an already-saved workflow by name is reuse, not an authoring request.
+This is the authoring path for turning a plain-language request into one
+reusable workflow. Running a saved workflow is a reuse request, not a new
+authoring request.
 
-> **NO-MOCK RULE (global, applies to all of Authoring Mode).** When you build a flow for the user, author **exactly one** real G4 workflow and NEVER fabricate a mock/offline/simplified twin to "test" or "demonstrate" it. A twin with hardcoded sample output, fake numbers, or a fake executor standing in for the real work is a **forgery** — it always "passes" regardless of what the real flow does, so it proves nothing and misleads the user. Validate the one real workflow, then actually run it. If the user *explicitly* later asks for an offline twin, that's a separate request you confirm first — never self-initiate one.
->
-> Inlined source snippets in this Skill are authoring guidance, not runnable bundled workflows. The ban is on fabricating a second version of the user's flow.
+Author one real workflow for the requested work. Do not create an offline twin,
+sample result, or substitute executor to make a demonstration appear to pass.
+Examples in this document explain structure only; they are not extra workflow
+files.
 
 ### When to enter Authoring Mode
 
 - User describes a workflow they want built: "帮我写个工作流 ..." / "make a flow that ..." / "帮我编排 ..." / similar.
 - User asks "帮我写一个 flow ..." / "make a flow that ..." / similar in any LLM client.
 - User edits existing Workflow G4 source and asks you to "rewrite" or "扩展".
-- **User describes a workflow-shaped task without naming "flow"** — anything needing two or more coordinated agents / parallel branches / a multi-step pipeline / per-item work (see "When to Activate"). In that case, don't wait for the word "flow": offer to build one, then run the author loop below.
+- User explicitly asks several agents or roles to collaborate, fan out, debate,
+  review independently, or run a multi-step pipeline. The word "workflow" is
+  not required when the user's requested orchestration is itself explicit.
 
 ### Planning contract
 
@@ -321,10 +332,20 @@ only when a consumer needs all of their results. Keep this contract in the
 authoring context; do not expose framework planning detail to a non-technical
 user.
 
+### Workflow authoring guide
+
+Before modeling any new workflow or revising an existing one, read
+`references/workflow-authoring-guide.md` in full. Resolve that path relative
+to the exact `SKILL.md` file supplied by the system prompt, not relative to a
+generated flow bundle or a user-workspace mirror. The guide is mandatory
+authoring policy: it covers discovery before fan-out, clean step contexts,
+explicit Artifact transport, branch-local pipelines, genuine joins, scale, and
+independent verification patterns.
+
 ### The 5-step author loop
 
 1. **Understand intent** — restate the user's goal in 1 sentence. If genuinely ambiguous, ask **one** clarifying question (don't grill them). Note whether the user looks like a *developer* (asked to edit Workflow G4 source or mentioned operators) — that's the only case where you show technical detail later. Everyone else gets the minimal plain-language summary.
-2. **Model the workflow** — complete the planning contract and match the intent to one of the executable reference patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. When an Agent-built candidate can be checked and corrected from the same visible task contract and evidence, append the adversarial verifier pattern below.
+2. **Model the workflow** — read and apply the Workflow authoring guide, complete the planning contract, and choose among the executable patterns below. Let information dependencies determine graph depth: add an intermediate aggregation layer only when downstream work needs a coherent result from a distinct group of upstream Artifacts. Select optional quality patterns according to task risk, requested coverage, and the user's cost or latency limits.
 3. **Author one Workflow G4 source** — before writing, read `grammar/FusionFlow.g4` completely and treat it as the sole source of truth for FusionFlow syntax and preset operators. Use only declarations, assertions, terms, and operators documented there. Use the workspace-provided target path; never invent a second copy.
 4. **Static self-check** — compare the source against `grammar/FusionFlow.g4` and the executable guardrails in this Skill. `run_flow` repeats this with its built-in `check_workflow` pass before dispatch; there is no separate validation tool or CLI.
 5. **Start it once** — the user asked you to do a task, not to receive an implementation artifact. After the static self-check, say ONE friendly heads-up line ("🚀 方案定了，正在帮你跑，预计几分钟…" — a notice, NOT a question), then call `run_flow` once. A declared Human Step may later ask its own task-specific question through the Human protocol; that is part of execution, not an extra pre-run gate. **Do NOT ask "要不要跑 / 跑不跑" and do NOT wait for `跑`.** The only exception is when the user explicitly says "只生成别跑 / 先给我看看别执行".
@@ -341,50 +362,41 @@ syntax reconstruction, self-checks, edits, or retries. The only user-visible
 text before execution is the single heads-up line above. This changes
 presentation only: perform every authoring and static-check step in full.
 
-### Hard stops in Authoring Mode (real TUI failures, do not repeat)
+### Authoring safeguards
 
-These are not style preferences. Each one was observed corrupting a real author run. These bans apply **whether you're mid-author or already running**:
+Apply these safeguards while authoring and running:
 
-1. **Don't fake a result instead of running.** The user wants the real outcome. After the static self-check you call `run_flow` once (see step 5) — you do not stop and hand back a file, and you never substitute a made-up answer for an actual run.
-2. **Write OR run any extra workflow source beyond the one `.workflow` or `.g4` file the task needs** — not an offline twin, not a "simpler version", not a "v2", not a "test harness". Companion instruction Markdown belongs to the same bundle and is not another workflow source. An offline twin with baked-in output is a forgery, not a test. If the user later wants one, that is a separate explicit request.
-3. **Report numbers you did not get from a real run** — never present mock data, sample data, or figures from an unrelated file as if they are *this* flow's result. The only result you report is what the `run_flow` call actually returned. If it fails, report the failure instead of papering over it with invented numbers.
-4. **Write outside the workspace-managed `flows/` location** — do not scan the filesystem for another flow project or create a sibling bundle copy. If the intended path is ambiguous, ask the user instead of guessing.
-5. **Start another workflow from inside an Agent Step** — nested `run_flow` calls are forbidden. A Step may save a self-contained child declaration, but only the parent Session may launch it.
+1. Run the real workflow after the static self-check; do not replace it with a
+   made-up answer or an offline copy.
+2. Write one workflow source for the request. Companion instruction files are
+   part of that source; do not create a second version or test harness.
+3. Report only values returned by the real run. If it fails, report the failure.
+4. Keep generated files under the workspace-managed `flows/` directory.
+5. An agent step cannot start another workflow. Only the parent session may do
+   so.
 
-The real run is how you deliver — there is no "spend-free preview" step to offer the user. Perform the static self-check, then call `run_flow` once.
+### Heads-up before execution
 
-### Heads-up line (说一句就开跑，不是 gate)
+Give one short, plain-language sentence describing the expected result and an
+approximate wait. This is a notice, not a permission gate. Then run the
+workflow without asking the user to repeat approval.
 
-Keep this **minimal**. A real investor ("悠悠") and an internal teammate ("张浩") both bailed on the authoring flow because the summary was wall-to-wall framework jargon (`parallel / pmap / reduce / evaluate / choice / 原语 / 异构复合工作流`). Their words: "这么专业应该不是给我这种用户用的吧" / "这表述太专业太多专有名词了，我都不知道咋聊了". This line is a **告知**, not a go/no-go gate — you say it and then immediately run. It exists so the user isn't surprised by a few minutes' wait / the cost, NOT to ask permission.
-
-**Default heads-up (use this for everyone unless they're clearly a developer):** one plain-language sentence on what they'll get + a rough time estimate. No primitive names, no API names, no pattern names, no file path, no per-step breakdown, no token math, no "要不要跑".
-
-```
-🚀 我来帮你做：<一句话讲清楚要产出什么，e.g. "并行调研 5 个 AI 方向，汇总打分后给你一份带『重点关注 / 投资机会』的总报告">，预计几分钟，这就开始。
-```
-
-That's it — one line, then you run. Do **not** add `做什么 / 要多久 / 你会拿到` as separate fields, do not list steps, do not show 🔧/🎯/📝 lines, do not show the file path, do not ask for approval. If the user is clearly a **developer** (asked to edit Workflow G4 source, mentioned operators, or explicitly asks "用了哪些语法 / 给我看结构 / 文件在哪"), you may then show technical detail **on demand**:
+Use one plain-language sentence for everyone. Do not expose implementation
+names, paths, per-step details, or token calculations unless the user asks.
 
 ```
-🔧 3 个审查 Step 共用输入，1 个汇总 Step 消费三个结果 ｜ `max_concurrency = 3`
+我来帮你完成这项工作并整理好结果，预计几分钟，这就开始。
 ```
 
-Only show that line when a developer explicitly asks for it. Never push it at a business user, and never volunteer the file path unprompted.
+That's it: one line, then run. Do not add separate planning fields, list every
+step, show a path, or ask for approval again. Show technical detail only when
+the user explicitly asks for the structure:
 
-**Jargon → plain-language map (so the default sentence stays clean).** Never say the left; say the right:
+```
+3 个审查步骤共用输入，1 个汇总步骤整理三个结果。
+```
 
-| 框架黑话（别说） | 业务语言（要这么说） |
-| --- | --- |
-| G4 / operator | 工作流结构 |
-| Step | 一次处理 |
-| Artifact | 中间结果 |
-| `max_concurrency` | 同时处理 |
-| `consumes(step) == [result_a, result_b]` | 汇总多个结果 |
-| 异构复合工作流 | 多方向 + 分层汇总 |
-| token / LLM 调用 | （折成）几分钟 / 花多少钱 |
-
-
-Token estimate rule of thumb: each ordinary LLM work step ≈ 1500 input + 800 output tokens; each structured judgement step ≈ 2000 input + 50 output. Sum, then convert to RMB at the provider's listed rate (火山 ARK Agent Plan 包月里这是 0 元，flag it as "≈ 0 (Agent Plan)").
+Show a structural summary only when the user explicitly asks for it.
 
 ### Reference patterns
 
@@ -394,7 +406,9 @@ Read `grammar/FusionFlow.g4` completely before using these patterns. The grammar
 | --- | --- | --- |
 | **Fan-out + fan-in** | Several Steps each use `consumes(step) == [shared_artifact]`; one final Step uses `consumes(final_step) == [result_a, result_b]`. Set `max_concurrency` on the workflow when needed. | PR review, multi-perspective audit, content moderation. |
 | **Artifact pipeline** | Each Step produces the Artifact consumed by the next Step. Use `max_attempts` only when rerunning that individual Step is safe. | Writing, ETL, and refine-and-check work. |
-| **Adversarial verifier** | An independent final Agent Step consumes the task contract, the same evidence available to the builder, and its candidate. It tries to refute the candidate, records evidence for each check, and emits either the unchanged candidate or a corrected final Artifact. | Any reviewable Agent-built result whose claims, constraints, calculations, consistency, or output contract can be checked from visible inputs. |
+| **Branch-local pipelines** | Independent branches each advance from discovery or construction to their own check as soon as that branch's Artifact is ready. Only a consumer that needs every branch result performs the final fan-in. | Multi-surface inspection, independent research channels, and partitioned migrations. |
+| **Adversarial verifier** | An independent final Agent Step consumes the task contract, the same evidence available to the builder, and its candidate. It tries to refute the candidate, records evidence for each check, and emits either the unchanged candidate or a corrected final Artifact. | When task risk, requested coverage, and user cost or latency limits warrant an independent check that can be performed from visible inputs. |
+| **Independent candidate panel** | Several candidate Steps consume the same task contract; judging or synthesis Steps consume explicit candidate Artifacts and the same decision criteria. | Open-ended design where genuinely different approaches should be compared before synthesis. |
 | **Per-item map** | Bind one List-valued source Artifact with `foreach_item`; use workflow `max_concurrency` or resources when a limit is needed. | Parallel processing with ordered results; ordinary failures are raised together after siblings finish. |
 | **Named Artifact selection** | Keep every candidate result explicit, then bind `selected_artifact == if(formula, artifact_a, artifact_b)` and use `selected_artifact` in ordinary dataflow. For priority selection, chain named intermediate Artifacts. | Eagerly run all candidate producers, then choose one value for downstream Steps. |
 | **Composite workflow** | Combine artifact chains, fan-out/fan-in, explicit bounded Agent Steps, and named Artifact selections. | When one simple pattern does not cover the task. |
@@ -403,11 +417,13 @@ Before reporting a missing capability for a conditional request, first check whe
 
 ### Adversarial verifier pattern
 
-Use this pattern as an authoring prompt, not as a fixed domain checklist. Add it
-when a builder produces a reviewable candidate and the verifier can perform a
-meaningful independent check from the same visible task contract and evidence.
-Do not add it to a side-effect-only Step or when correction would require facts
-that are absent from the consumed Artifacts.
+Use this optional pattern as an authoring prompt, not as a fixed domain
+checklist. Add it only when task risk, requested coverage, and user-stated cost
+or latency limits warrant the extra check, a builder produces a reviewable
+candidate, and the verifier can perform a meaningful independent check from the
+same visible task contract and evidence. Do not add it to a side-effect-only
+Step or when correction would require facts that are absent from the consumed
+Artifacts.
 
 Author a final Agent-backed verifier Step that consumes:
 
@@ -533,6 +549,18 @@ Runner-specific typed catalog extensions use the grammar's generic operator-call
 - Write each Step display name directly as a JSON string, for example `step_name(security_review) == "Security Review";`. Do not declare an intermediate `StepName` constant or emit a symbolic display name ending in `_name`; symbolic StepName values are rejected before compilation.
 - When the user supplies a grammar-valid literal as a typed constant name, including a restricted quoted ID or `"./..."` path, preserve that literal and use it directly as the required preset value; do not hide it behind an alias constant and an extra equality.
 - Write every `step_instruction` as an executable task specification, not a label. State the objective, how to interpret consumed Artifacts, important constraints or evidence requirements, and the expected result. A name such as `"task_name"` is not an instruction.
+- Treat every Agent Step as a clean, isolated context. It sees its instruction
+  and consumed Artifacts, not the parent conversation or undeclared sibling
+  results. Pass every required fact, criterion, candidate, and prior result
+  through explicit Artifact edges; never rely on phrases such as "as above".
+- Keep independent pipelines branch-local. A verifier or transformer that
+  needs only one branch result consumes that result directly and may become
+  ready before sibling branches finish. Add a fan-in consumer only when its
+  task genuinely requires cross-branch context from all listed Artifacts.
+- Use executable `@artifact ... = {...}` contracts at boundaries that need
+  machine-checkable structure. Do not ask a downstream Agent to recover a
+  protocol by parsing acknowledgements, prose wrappers, or an undeclared text
+  convention.
 - Keep each Step independently understandable and bounded. Let information dependencies determine the hierarchy: synthesize a distinct group of upstream Artifacts before combining it with other groups only when that intermediate result is genuinely consumed downstream. Do not add layers merely because a request is large, and do not collapse separable work into coarse Steps merely to minimize node count.
 - Model data sequencing through Artifact edges: a Step that produces an Artifact precedes a Step that consumes it. When ordering is required without passing data, use `depends_on(step, predecessor) == True`; repeat it for multiple predecessors. Declaration order never defines execution order.
 - Preserve the external data boundary from the user's intent. Fan-out Steps that analyze the same subject reuse one shared input Artifact; do not split it into synthetic per-branch workflow inputs.
@@ -795,6 +823,10 @@ Before the initial `run_flow` call, inspect the source in order:
 - each operator uses the documented arity and supported shape;
 - each Step has a supported Agent, Human, or Program executor, name, instruction, and explicit data/control dependencies;
 - the planning contract covers intent, success, interfaces, responsibilities, constraint ownership, dependencies, and operational limits;
+- the Workflow authoring guide was applied: clean-context inputs are
+  explicit, independent branches have no artificial stage barrier, joins have
+  real cross-branch consumers, structured boundaries have Artifact contracts,
+  and any deliberate coverage bound is visible rather than silently dropped;
 - no residual or unsupported operator is emitted.
 
 This manual source review is not a second tool or CLI invocation. Inside `run_flow`, `check_workflow` requires exactly one workflow, delegates graph semantics to `WorkflowGraphCompiler`, rejects unsupported residual assertions and graph values with explicit concepts that omit `Artifact`, requires every Step instruction and Program path, and rejects untyped or ambiguous executor declarations. Parsing, checking, and compilation all occur before dispatch.
@@ -806,11 +838,9 @@ This manual source review is not a second tool or CLI invocation. Inside `run_fl
 3. When a call returns output Artifacts, summarize them in plain language.
 4. On error, report the compiler diagnostic or failed Step without creating a second workflow or bypassing the runner.
 
-### What Authoring Mode is NOT
-
-- It is **not** a guarantee the workflow gets good *content*. We control structure and execution; the task instructions still depend on the user's domain.
-- It is **not** auto-iterating on content. The user reads the result and asks for changes, but there is no "要不要跑" gate before the first run.
-- It is **not** a reason to show implementation details to a business user. Technical users can ask for the Workflow G4 source and structure on demand.
+The workflow controls structure and execution, not the truth of domain content.
+The user can request a later revision after reading the result. Keep
+implementation details out of the response unless the user asks for them.
 
 ## Doctor Checks
 
