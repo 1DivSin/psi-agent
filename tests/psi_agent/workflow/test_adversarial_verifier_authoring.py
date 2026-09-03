@@ -34,6 +34,9 @@ def test_authoring_prompt_builds_verifier_from_visible_contract_and_evidence() -
         "duplicates/uniqueness",
         "mutually incompatible choices",
         "mutually exclusive choices",
+        "resource references and dependency closure",
+        "visible catalog",
+        "required resource is absent or unavailable",
         "temporal ordering",
         "spatial consistency",
         "capacity",
@@ -118,7 +121,17 @@ def test_authoring_guide_scopes_global_relations_to_visible_inputs() -> None:
     guide = " ".join(_AUTHORING_GUIDE_PATH.read_text(encoding="utf-8").split()).lower()
 
     assert "global relational lens" in guide
-    for relation in ("uniqueness", "exclusions", "temporal", "spatial", "capacities", "cross-item", "provenance"):
+    for relation in (
+        "uniqueness",
+        "exclusions",
+        "temporal",
+        "spatial",
+        "capacities",
+        "cross-item",
+        "resource references and dependency closure",
+        "visible catalog",
+        "provenance",
+    ):
         assert relation in guide
     assert "visible contract or evidence establishes it" in guide
     assert "undetermined" in guide

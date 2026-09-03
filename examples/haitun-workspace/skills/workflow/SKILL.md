@@ -453,6 +453,9 @@ at a time. For every applicable predicate, inspect requirements,
 evidence/provenance, recomputable values, capacity and aggregate limits,
 duplicates/uniqueness, mutually incompatible choices (including mutually
 exclusive choices),
+resource references and dependency closure (every declared use and supporting
+resource resolves to a resource or instance in the visible catalog; do not
+accept a composite choice when any required resource is absent or unavailable),
 temporal ordering or overlap, spatial consistency, cross-item dependencies,
 coverage/completeness, and output structure. Compare relevant pairs or groups
 and totals when a relation requires it. These are generic lenses, not hidden

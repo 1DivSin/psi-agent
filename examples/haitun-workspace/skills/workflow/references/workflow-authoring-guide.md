@@ -131,9 +131,12 @@ requested coverage, and user-stated cost or latency limits.
 - When a candidate contains multiple related items, include a global relational
   lens: check applicable uniqueness, exclusions, temporal or spatial
   consistency, aggregate capacities or totals, cross-item dependencies,
-  coverage, and provenance. Apply a relation only when the visible contract or
-  evidence establishes it; otherwise record the check as undetermined rather
-  than importing a hidden score rule.
+  resource references and dependency closure, coverage, and provenance. For
+  every declared use and supporting resource, resolve it against the visible
+  catalog; reject a composite choice when any required resource is absent or
+  unavailable. Apply a relation only when the visible contract or evidence
+  establishes it; otherwise record the check as undetermined rather than
+  importing a hidden score rule.
 - Distinct checking lenses may cover factual support, consistency, boundaries,
   reproducibility, safety, performance, or contract compliance. Use different
   lenses when the candidate has more than one independent way to fail. Each lens must
