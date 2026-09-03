@@ -7,6 +7,7 @@ from fusion_flow.workflow_runner import compile_workflow
 
 _ROOT = Path(__file__).parents[3]
 _SKILL_PATH = _ROOT / "examples" / "haitun-workspace" / "skills" / "workflow" / "SKILL.md"
+_AUTHORING_GUIDE_PATH = _SKILL_PATH.parent / "references" / "workflow-authoring-guide.md"
 
 
 def _verifier_section() -> str:
@@ -25,6 +26,26 @@ def test_authoring_prompt_builds_verifier_from_visible_contract_and_evidence() -
     assert "verdict to FIXED" in normalized
     assert "hidden scoring feedback" in section
     assert "same visible task contract and evidence" in section
+    assert "upstream conclusion as untrusted" in normalized
+    assert "individually supported" in normalized
+    assert "global relational audit" in normalized
+    assert "complete candidate, not only one item at a time" in normalized
+    for relation in (
+        "duplicates/uniqueness",
+        "mutually incompatible choices",
+        "mutually exclusive choices",
+        "temporal ordering",
+        "spatial consistency",
+        "capacity",
+        "aggregate limits",
+        "coverage/completeness",
+        "provenance",
+        "cross-item dependencies",
+    ):
+        assert relation in normalized
+    assert "PASS, FAIL, or UNDETERMINED" in normalized
+    assert "visible basis" in normalized
+    assert "preserve that uncertainty" in normalized
 
     benchmark_terms = {
         "travelplanner",
@@ -91,3 +112,14 @@ workflow release_notes {
     assert verifier_inputs == {"task_contract", "change_evidence", "candidate_notes"}
     assert verifier_outputs == {"verification_report", "final_notes"}
     assert {artifact.artifact_id for artifact in graph.artifacts if artifact.is_output} == {"final_notes"}
+
+
+def test_authoring_guide_scopes_global_relations_to_visible_inputs() -> None:
+    guide = " ".join(_AUTHORING_GUIDE_PATH.read_text(encoding="utf-8").split()).lower()
+
+    assert "global relational lens" in guide
+    for relation in ("uniqueness", "exclusions", "temporal", "spatial", "capacities", "cross-item", "provenance"):
+        assert relation in guide
+    assert "visible contract or evidence establishes it" in guide
+    assert "undetermined" in guide
+    assert "hidden score rule" in guide
