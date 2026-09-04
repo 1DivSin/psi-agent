@@ -50,6 +50,16 @@ constraints, evidence, and decision criteria. A judge or panel can compare the
 candidate artifacts, and a final step can preserve supported ideas and minority
 concerns instead of reducing the decision to an unexplained vote.
 
+For a candidate with repeated choices, create a visible decision ledger before
+assigning values: map each decision dimension to the items it governs, group
+alternatives by compatible family, and record the applicable exclusion,
+coverage, capacity, aggregate-objective, and dependency relations. Compare
+families globally when the contract or evidence requires one shared choice.
+This ledger is domain-neutral and should be passed to both construction and
+verification steps. Do not infer a mandatory global choice from hidden scoring
+feedback; when the visible inputs do not establish whether alternatives may be
+mixed, record the relation as undetermined and preserve the uncertainty.
+
 ### Review
 
 Divide the review by independent dimensions. Each branch should inspect,

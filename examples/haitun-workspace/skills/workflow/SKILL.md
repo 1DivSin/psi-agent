@@ -332,6 +332,26 @@ only when a consumer needs all of their results. Keep this contract in the
 authoring context; do not expose framework planning detail to a non-technical
 user.
 
+### Global decision and relation contract
+
+When a candidate contains repeated choices across related items, make the
+decision structure explicit before building it. From the visible task contract,
+schema, and source evidence:
+
+- identify repeated decision dimensions and the items they govern;
+- group alternatives by their declared type or compatibility family;
+- record which choices are mutually exclusive, which may be combined, and which
+  must cover every required item;
+- compare aggregate cost, capacity, time, and other stated objectives across a
+  complete choice family before assigning item-level values; and
+- carry the resulting decision ledger to both the builder and any verifier.
+
+This is a schema-level pattern, not a domain checklist. Instantiate a relation
+only when the visible inputs establish it. If the inputs do not declare whether
+choices may be mixed, preserve that uncertainty instead of importing a hidden
+evaluator rule or inventing a global restriction. A builder must never optimize
+against feedback or scoring behavior that is absent from its consumed inputs.
+
 ### Workflow authoring guide
 
 Before modeling any new workflow or revising an existing one, read
