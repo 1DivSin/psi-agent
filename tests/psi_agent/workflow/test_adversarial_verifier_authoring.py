@@ -15,6 +15,11 @@ def _verifier_section() -> str:
     return skill.split("### Adversarial verifier pattern", 1)[1].split("#### Full-featured in-context example", 1)[0]
 
 
+def _planning_section() -> str:
+    skill = _SKILL_PATH.read_text(encoding="utf-8")
+    return skill.split("### Global decision and relation contract", 1)[1].split("### Workflow authoring guide", 1)[0]
+
+
 def test_authoring_prompt_builds_verifier_from_visible_contract_and_evidence() -> None:
     section = _verifier_section()
     normalized = " ".join(section.split())
@@ -123,3 +128,21 @@ def test_authoring_guide_scopes_global_relations_to_visible_inputs() -> None:
     assert "visible contract or evidence establishes it" in guide
     assert "undetermined" in guide
     assert "hidden score rule" in guide
+
+
+def test_builder_global_decision_contract_is_domain_neutral() -> None:
+    section = " ".join(_planning_section().split()).lower()
+    for phrase in (
+        "repeated choices",
+        "decision dimensions",
+        "mutually exclusive",
+        "compatibility family",
+        "cover every required item",
+        "aggregate cost",
+        "visible inputs establish it",
+        "hidden evaluator rule",
+        "decision ledger",
+    ):
+        assert phrase in section
+    for benchmark_term in ("travelplanner", "flight", "restaurant", "attraction", "itinerary"):
+        assert benchmark_term not in section
