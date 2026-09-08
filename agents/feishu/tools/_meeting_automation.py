@@ -14,13 +14,77 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+import uuid
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import anyio
+import yaml
+
 from psi_agent._appdata import resolve_appdata_root
 
-TRANSCRIPT_CHUNK_CHARS = 8_000
+_AGENT_ROOT = Path(__file__).resolve().parent.parent
+#: 会议自动化运行口径 (config/meeting-automation.yaml, 契约同 todo-sop.yaml)。
+#: 硬边界: 白名单 (name/code/cron/retry/token_env 配对) 一律留代码, 见
+#: ``_MEETING_JOBS_WHITELIST`` 与加载器对覆盖键的白名单校验。
+MEETING_AUTOMATION_CONFIG_PATH = _AGENT_ROOT / "config" / "meeting-automation.yaml"
+_MEETING_OVERLAY_KEYS = frozenset(
+    {
+        "title",
+        "summary_recipients",
+        "overview_recipients",
+        "analysis_sop_skills",
+        "alert_recipients",
+    }
+)
+_WHITELIST_ONLY_KEYS = frozenset(
+    {"name", "meeting_code", "cron", "retry_crons", "recipients", "fire", "tool_name", "tool_args", "token_env"}
+)
+
+
+def load_meeting_automation_config(path: str | Path | None = None) -> dict[str, Any]:
+    """读取并契约校验 ``meeting-automation.yaml``; 缺失/解析失败/越权键一律显式报错。"""
+    config_path = Path(path) if path is not None else MEETING_AUTOMATION_CONFIG_PATH
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"会议自动化配置缺失: {config_path}: {exc}") from exc
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"会议自动化配置无法解析: {config_path}: {exc}") from exc
+    if not isinstance(data, dict) or not all(
+        isinstance(data.get(key), dict) for key in ("meetings", "runtime", "resources")
+    ):
+        raise RuntimeError(f"会议自动化配置不符合契约(需 meetings/runtime/resources 段): {config_path}")
+    meetings = data["meetings"]
+    for name, overlay in meetings.items():
+        if not isinstance(overlay, dict):
+            raise RuntimeError(f"meetings.{name} 必须是对象: {config_path}")
+        extra = set(overlay) - _MEETING_OVERLAY_KEYS
+        if extra:
+            hint = "授权(白名单/token_env/调度)不可经配置文件修改" if extra & _WHITELIST_ONLY_KEYS else "未知字段"
+            raise RuntimeError(f"meetings.{name} 含不允许的键 {sorted(extra)} ({hint}): {config_path}")
+    return data
+
+
+MEETING_AUTOMATION_CONFIG = load_meeting_automation_config()
+
+
+def automation_runtime() -> dict[str, Any]:
+    """meeting-automation.yaml 的 ``runtime`` 段 (引擎运行参数)。"""
+    return MEETING_AUTOMATION_CONFIG["runtime"]
+
+
+def automation_resources() -> dict[str, Any]:
+    """meeting-automation.yaml 的 ``resources`` 段 (相对 agent 包根的引用路径)。"""
+    return MEETING_AUTOMATION_CONFIG["resources"]
+
+
+#: 引擎常量: 单一来源为 yaml (runtime.analysis.chunk_chars); 此处仅为同值导出, 测试可覆写。
+TRANSCRIPT_CHUNK_CHARS = int(MEETING_AUTOMATION_CONFIG["runtime"]["analysis"]["chunk_chars"])
 MAIN_MEETING_GROUP_NAME = "HaiTun Agent主战场"
 
 
@@ -34,13 +98,20 @@ class MeetingJob:
     retry_crons: tuple[str, ...] = ()
     summary_recipients: tuple[str, ...] = ("程秀秀",)
     overview_recipients: tuple[str, ...] = ("罗霖",)
+    # Versioned SOP skill(s) whose text is injected verbatim into scheduled
+    # analysis prompts ("meeting-sop/<name>").  Missing file is a hard error.
+    analysis_sop_skills: tuple[str, ...] = ()
+    # Ops contacts notified when a run fails (prepare/analysis/notify).
+    alert_recipients: tuple[str, ...] = ()
     token_env: str = "TENCENT_MEETING_TOKEN"
     fire: str = "tool"
     tool_name: str = "meeting_pipeline_run"
     tool_args: tuple[tuple[str, str], ...] = ()
 
 
-MEETING_JOBS: tuple[MeetingJob, ...] = (
+#: 代码权威白名单: name/meeting_code/cron/retry/token_env 配对 (授权门) 只能改这里;
+#: 投递/SOP/告警口径的当前值作为缺省, 可被 meeting-automation.yaml 的 meetings 覆盖。
+_MEETING_JOBS_WHITELIST: tuple[MeetingJob, ...] = (
     MeetingJob(
         name="weekday-alignment",
         meeting_code="57152787045",
@@ -48,6 +119,8 @@ MEETING_JOBS: tuple[MeetingJob, ...] = (
         title="周中对齐会",
         recipients=(MAIN_MEETING_GROUP_NAME, "罗霖"),
         summary_recipients=(MAIN_MEETING_GROUP_NAME,),
+        analysis_sop_skills=("meeting-sop/weekday-alignment",),
+        alert_recipients=("张浩", "王金旺"),
         tool_args=(("meeting_name", "weekday-alignment"), ("meeting_code", "57152787045")),
     ),
     MeetingJob(
@@ -59,10 +132,38 @@ MEETING_JOBS: tuple[MeetingJob, ...] = (
         retry_crons=("30 17 * * 1,3,5",),
         summary_recipients=("张浩", "王金旺"),
         overview_recipients=("罗霖",),
+        analysis_sop_skills=("meeting-sop/weekday-alignment",),
+        alert_recipients=("张浩", "王金旺"),
         token_env="TENCENT_MEETING_TOKEN_42654699903",
         tool_args=(("meeting_name", "weekday-alignment-1100"), ("meeting_code", "42654699903")),
     ),
 )
+
+
+def _meeting_jobs_with_overlay() -> tuple[MeetingJob, ...]:
+    """白名单 (代码) + yaml meetings 覆盖 (仅允许的五个口径键) 合并出运行时会议列表。
+
+    yaml 里出现的会议名必须全部命中代码白名单 (授权不可经配置文件扩展); 白名单中的
+    会议也必须有 yaml 条目 (防止误删后口径悄然回退代码缺省)。
+    """
+    meetings: dict[str, Any] = MEETING_AUTOMATION_CONFIG["meetings"]
+    whitelist_names = {job.name for job in _MEETING_JOBS_WHITELIST}
+    extra = set(meetings) - whitelist_names
+    if extra:
+        raise RuntimeError(f"meeting-automation.yaml 含白名单外会议, 授权不可经配置文件扩展: {sorted(extra)}")
+    merged: list[MeetingJob] = []
+    for job in _MEETING_JOBS_WHITELIST:
+        overlay = meetings.get(job.name)
+        if overlay is None:
+            raise RuntimeError(f"代码白名单会议 {job.name} 缺少 meeting-automation.yaml 的 meetings.{job.name} 条目")
+        kwargs: dict[str, Any] = {}
+        for key, value in overlay.items():
+            kwargs[key] = tuple(value) if isinstance(value, list) else value
+        merged.append(replace(job, **kwargs))
+    return tuple(merged)
+
+
+MEETING_JOBS: tuple[MeetingJob, ...] = _meeting_jobs_with_overlay()
 
 
 def meeting_credential_env(meeting_name: str, meeting_code: str) -> str:
@@ -409,21 +510,63 @@ def json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+_PATH_LOCKS: dict[str, anyio.Lock] = {}
+_PATH_LOCKS_GUARD = anyio.Lock()
+
+
+async def path_lock(path: str | Path) -> anyio.Lock:
+    """进程内按路径去重的互斥锁 (读-改-写同一产物文件时使用)。
+
+    跨进程仍依赖「同一 Gateway 只 watch 一份」的单实例约定 (与 notify 的回执锁
+    同思路); 锁只防同进程内定时触发与手动重跑并发。
+    """
+    key = str(path)
+    async with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = anyio.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+async def atomic_write_text(path: str | Path, text: str) -> None:
+    """原子写文本文件: 同目录临时文件 + ``os.replace``, 读方永远不会看到半截内容。
+
+    写失败时清理临时文件并把异常原样抛出 (不静默)。
+    """
+    target = Path(path)
+    await anyio.Path(str(target.parent)).mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        await anyio.Path(str(tmp)).write_text(text, encoding="utf-8")
+        await anyio.to_thread.run_sync(os.replace, str(tmp), str(target))  # ty: ignore
+    finally:
+        if tmp.exists():
+            with suppress(OSError):
+                tmp.unlink()
+
+
 __all__ = [
     "MAIN_MEETING_GROUP_NAME",
+    "MEETING_AUTOMATION_CONFIG_PATH",
     "MEETING_JOBS",
     "MeetingJob",
     "async_meeting_store_root",
+    "atomic_write_text",
+    "automation_resources",
+    "automation_runtime",
     "chunk_text",
     "extract_latest_transcript_record",
     "extract_paragraph_ids",
     "extract_paragraph_items",
     "json_text",
+    "load_meeting_automation_config",
     "meeting_artifact_root",
     "meeting_credential_env",
     "meeting_job_for",
     "meeting_schedule_files",
     "meeting_store_root",
+    "path_lock",
     "read_meeting_manifest",
     "render_transcript_paragraphs",
     "should_process_recording",
