@@ -16,7 +16,7 @@ from .contracts import Diagnostic
 from .core_ir import Assertion, CompoundTerm, Concept, Constant, Operator
 from .execution.model import AgentConfig
 from .graph_compiler import WorkflowGraphCompilation, WorkflowGraphCompiler
-from .parser import ParseContext, parse_workflow
+from .parser import ParseContext, extract_artifact_annotations, parse_workflow
 from .step_timing import StepTiming, StepTimingMetadata
 from .workflow_execution import (
     CheckpointObserver,
@@ -89,6 +89,7 @@ class CompiledWorkflow:
     program_paths: Mapping[str, str] = field(default_factory=dict)
     agent_configs: Mapping[str, CompiledAgentConfig] = field(default_factory=dict)
     diagnostics: tuple[Diagnostic, ...] = ()
+    artifact_annotations: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +103,14 @@ class CompletionContext:
     output_ids: tuple[str, ...]
     dispatch: DispatchContext
     agent_config: CompiledAgentConfig | None = None
+    input_annotations: Mapping[str, str] = field(default_factory=dict)
+    output_annotations: Mapping[str, str] = field(default_factory=dict)
     terminal: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ProgramInvocation:
-    """Exact script and artifact contract passed to an injected Program runner."""
+    """Exact script and Artifact context passed to an injected Program runner."""
 
     name: str
     argv: tuple[str, ...]
@@ -118,6 +121,8 @@ class ProgramInvocation:
     instruction: str = ""
     inputs: Mapping[str, object] = field(default_factory=dict)
     output_ids: tuple[str, ...] = ()
+    input_annotations: Mapping[str, str] = field(default_factory=dict)
+    output_annotations: Mapping[str, str] = field(default_factory=dict)
     terminal: bool = False
 
 
@@ -569,11 +574,15 @@ def compile_workflow(
                 CompiledAgentConfig(name=executor_id),
             )
 
+    declared_artifact_ids = {artifact.artifact_id for artifact in compilation.graph.artifacts}
+    artifact_annotations = extract_artifact_annotations(source, declared_artifact_ids)
+
     return CompiledWorkflow(
         graph=compilation.graph,
         executor_kinds=executor_kinds,
         program_paths=program_paths,
         agent_configs=agent_configs,
+        artifact_annotations=artifact_annotations,
         diagnostics=check_warnings,
     )
 
@@ -608,6 +617,19 @@ def _normalize_outputs(
     return outputs
 
 
+def _annotation_subset(
+    artifact_ids: Collection[str],
+    annotations: Mapping[str, str],
+) -> dict[str, str]:
+    """Select available annotations in stable Artifact-ID order."""
+
+    return {artifact_id: annotations[artifact_id] for artifact_id in sorted(artifact_ids) if artifact_id in annotations}
+
+
+def _annotations_text(label: str, annotations: Mapping[str, str]) -> str:
+    return f"{label}: {json.dumps(dict(annotations), ensure_ascii=False, sort_keys=True)}"
+
+
 def _normalize_terminal_output(
     step_id: str,
     output_ids: tuple[str, ...],
@@ -634,12 +656,32 @@ def _normalize_terminal_output(
     return {output_ids[0]: value}
 
 
-def _output_contract(output_ids: tuple[str, ...]) -> str:
+def _output_contract(
+    output_ids: tuple[str, ...],
+    annotations: Mapping[str, str] | None = None,
+    *,
+    foreach_iteration: bool = False,
+) -> str:
     if not output_ids:
         return "Return no artifact value for this step."
+    available_annotations = {} if annotations is None else annotations
+    parts: list[str] = []
     if len(output_ids) == 1:
-        return f"Return the value for output artifact {output_ids[0]!r}."
-    return f"Return a mapping keyed exactly by these output artifact IDs: {json.dumps(output_ids, ensure_ascii=False)}."
+        parts.append(f"Return the value for output artifact {output_ids[0]!r}.")
+    else:
+        parts.append(
+            "Return a mapping keyed exactly by these output artifact IDs: "
+            f"{json.dumps(output_ids, ensure_ascii=False)}."
+        )
+    if available_annotations:
+        label = "Aggregate output Artifact annotations" if foreach_iteration else "Output Artifact annotations"
+        parts.append(_annotations_text(label, available_annotations))
+    if foreach_iteration and available_annotations:
+        parts.append(
+            "This is one foreach iteration. Return one element for each output Artifact; "
+            "the runtime collects those elements into the aggregate Artifact."
+        )
+    return "\n".join(parts)
 
 
 async def _build_program_paths(
@@ -760,6 +802,7 @@ def _build_dispatch(
     request_human: HumanRequester | None,
 ) -> StepDispatcher:
     graph = compiled.graph
+    foreach_step_ids = {edge.step_id for edge in graph.edges if isinstance(edge, ForeachEdge)}
     outputs_by_step: dict[str, list[str]] = {step.step_id: [] for step in graph.steps}
     for edge in graph.edges:
         if isinstance(edge, ProducesEdge):
@@ -771,8 +814,15 @@ def _build_dispatch(
         dispatch_context: DispatchContext,
     ) -> Mapping[str, object]:
         output_ids = tuple(sorted(outputs_by_step[step.step_id]))
+        foreach_iteration = step.step_id in foreach_step_ids
+        input_annotations = _annotation_subset(inputs, compiled.artifact_annotations)
+        output_annotations = _annotation_subset(output_ids, compiled.artifact_annotations)
         terminal = step.step_type == "TerminalStep"
-        output_contract = _output_contract(output_ids)
+        output_contract = _output_contract(
+            output_ids,
+            output_annotations,
+            foreach_iteration=foreach_iteration,
+        )
         instruction = instructions[step.step_id]
         executor_kind = compiled.executor_kinds[step.executor_id]
         completion_context = CompletionContext(
@@ -783,20 +833,32 @@ def _build_dispatch(
             output_ids=output_ids,
             dispatch=dispatch_context,
             agent_config=(compiled.agent_configs[step.executor_id] if executor_kind == "Agent" else None),
+            input_annotations=input_annotations,
+            output_annotations=output_annotations,
             terminal=terminal,
         )
+
         if executor_kind == "Human":
             if prepare_human_instruction is None or request_human is None:
                 raise ValueError(
                     f"step {step.step_id!r} requires prepare_human_instruction and request_human callbacks"
                 )
+            input_annotation_text = (
+                f"{_annotations_text('Input Artifact annotations', input_annotations)}\n" if input_annotations else ""
+            )
+            output_contract_text = (
+                f"Output contract:\n{output_contract}\n"
+                if output_annotations
+                else f"Output contract: {output_contract}\n"
+            )
             preparation_prompt = (
                 "Prepare this workflow step for a human.\n"
                 f"Step: {step.step_id}\n"
                 f"Instruction:\n{instruction}\n\n"
                 f"Inputs: "
                 f"{json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}\n"
-                f"Output contract: {output_contract}\n"
+                f"{input_annotation_text}"
+                f"{output_contract_text}"
                 "Produce concise, readable guidance. Use available tools only when "
                 "needed to inspect supporting resources named by the inputs. Do not ask the human "
                 "directly, change resources, or invent inaccessible contents."
@@ -841,6 +903,8 @@ def _build_dispatch(
                     instruction=instruction,
                     inputs=dict(inputs),
                     output_ids=output_ids,
+                    input_annotations=input_annotations,
+                    output_annotations=output_annotations,
                     terminal=terminal,
                 )
             )
@@ -860,10 +924,14 @@ def _build_dispatch(
                 named_mapping_required=True,
             )
 
+        input_annotation_text = (
+            f"{_annotations_text('Input Artifact annotations', input_annotations)}\n" if input_annotations else ""
+        )
         prompt = (
             f"Instruction:\n{instruction}\n\n"
             f"Inputs: "
             f"{json.dumps(dict(inputs), ensure_ascii=False, sort_keys=True, default=str)}\n"
+            f"{input_annotation_text}"
             f"{output_contract}"
         )
         if complete is None:

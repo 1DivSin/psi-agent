@@ -18,7 +18,7 @@ from contextlib import aclosing, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import anyio
 import anyio.lowlevel
@@ -135,8 +135,39 @@ _PROGRAM_SYSTEM_PROMPT = (
     "authoritative attempt, call submit_program_result exactly once and by itself." + _program_runtime_guidance(os.name)
 )
 _STEP_TOOL_SESSION_ID = f"{__name__}_step"
+
+
+def _invocation_session_id(run_id: str, invocation_id: str) -> str:
+    digest = hashlib.sha256(f"{run_id}:{invocation_id}".encode()).hexdigest()
+    return f"{__name__}_step_{digest[:32]}"
+
+
 _STEP_TOOLS_LOAD_LOCK = anyio.Lock()
-_STEP_TOOLS_SOURCE: ToolRegistry | None = None
+_STEP_TOOLS_SOURCES: dict[str, ToolRegistry] = {}
+_STEP_TOOL_SESSIONS_BY_RUN: dict[str, set[str]] = {}
+
+
+async def _cleanup_step_tool_sessions(run_id: str) -> None:
+    """Release only the dynamic tools owned by this completed run."""
+    with anyio.CancelScope(shield=True):
+        async with _STEP_TOOLS_LOAD_LOCK:
+            session_ids = _STEP_TOOL_SESSIONS_BY_RUN.pop(run_id, set())
+            for session_id in session_ids:
+                _STEP_TOOLS_SOURCES.pop(session_id, None)
+                marker = f"_{session_id}_"
+                # TODO: Replace this Workflow-local cleanup with a scoped
+                # ToolRegistry lifecycle API or lightweight tool-session views.
+                for module_name in list(sys.modules):
+                    if module_name.startswith("psi_tool_") and marker in module_name:
+                        sys.modules.pop(module_name, None)
+
+
+async def _cleanup_terminal_run_tools(run: HumanWorkflowRun) -> None:
+    """Preserve tools while waiting for Human input or resumable cancellation."""
+    if run.status in {"completed", "failed", "cancelled"}:
+        await _cleanup_step_tool_sessions(run.run_id)
+
+
 _WORKFLOW_LAUNCHERS = frozenset({"flow_run", "run_flow", "run_flow_resume"})
 _WORKSPACE_PATH_PARAMETERS = {
     "edit": "file_path",
@@ -233,7 +264,7 @@ if sys.platform == "win32":
     _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 
     class _JobObjectBasicLimitInformation(ctypes.Structure):
-        _fields_ = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [
             ("PerProcessUserTimeLimit", ctypes.c_int64),
             ("PerJobUserTimeLimit", ctypes.c_int64),
             ("LimitFlags", wintypes.DWORD),
@@ -246,7 +277,7 @@ if sys.platform == "win32":
         ]
 
     class _IoCounters(ctypes.Structure):
-        _fields_ = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [
             ("ReadOperationCount", ctypes.c_uint64),
             ("WriteOperationCount", ctypes.c_uint64),
             ("OtherOperationCount", ctypes.c_uint64),
@@ -256,7 +287,7 @@ if sys.platform == "win32":
         ]
 
     class _JobObjectExtendedLimitInformation(ctypes.Structure):
-        _fields_ = [
+        _fields_: ClassVar[list[tuple[str, Any]]] = [
             ("BasicLimitInformation", _JobObjectBasicLimitInformation),
             ("IoInfo", _IoCounters),
             ("ProcessMemoryLimit", ctypes.c_size_t),
@@ -461,10 +492,12 @@ class _AgentSessionAdapter:
         self,
         *,
         ai_socket: str,
-        get_tool_registry: Callable[[], Awaitable[ToolRegistry]],
+        get_tool_registry: Callable[[str], Awaitable[ToolRegistry]],
+        run_id: str = "",
     ) -> None:
         self._ai_socket = ai_socket
         self._get_tool_registry = get_tool_registry
+        self._run_id = run_id
         self._handles: dict[str, AgentHandle] = {}
 
     def _handle(self, context: CompletionContext) -> AgentHandle:
@@ -501,11 +534,12 @@ class _AgentSessionAdapter:
         """Execute or resume one schema-bound Agent Step session."""
 
         handle = self._handle(context)
+        invocation_id = context.dispatch.invocation_id or context.step_id
+        session_id = _invocation_session_id(self._run_id, invocation_id)
         selected_tools = _select_agent_tools(
-            await self._get_tool_registry(),
+            await self._get_tool_registry(session_id),
             handle.config.tools,
         )
-        invocation_id = context.dispatch.invocation_id or context.step_id
         # Concrete resource instance IDs are execution-time leases, not part of
         # the logical invocation. A retry may receive another instance and must
         # still be able to reuse a fully validated binding from the first one.
@@ -654,7 +688,6 @@ def _parse_strict_json_value(value: str) -> object:
 
 
 def _parse_strict_agent_mapping(value: str, *, label: str) -> dict[str, object]:
-
     try:
         parsed = _parse_strict_json_value(value)
     except (json.JSONDecodeError, OverflowError, RecursionError, ValueError) as error:
@@ -1720,6 +1753,15 @@ def _program_output_mode(output_ids: tuple[str, ...], *, terminal: bool = False)
     return "strict_json_object"
 
 
+def _program_output_annotations(invocation: ProgramInvocation) -> dict[str, str]:
+    if invocation.dispatch.iteration_index is None:
+        return dict(invocation.output_annotations)
+    return {
+        artifact_id: (f"One value contributed by this foreach iteration. Aggregate Artifact annotation: {annotation}")
+        for artifact_id, annotation in invocation.output_annotations.items()
+    }
+
+
 def _program_executable_name(value: str) -> str:
     return Path(value).name.lower()
 
@@ -2071,7 +2113,7 @@ async def _complete_program_step(
         ),
         system_prompt=_PROGRAM_SYSTEM_PROMPT,
     )
-    contract = {
+    contract: dict[str, object] = {
         "contract_version": 1,
         "workspace_root": str(workspace),
         "step_id": invocation.binding_name,
@@ -2097,6 +2139,10 @@ async def _complete_program_step(
         ),
         "repair_authorized": repair_authorized,
     }
+    if invocation.input_annotations:
+        contract["input_artifact_annotations"] = dict(invocation.input_annotations)
+    if invocation.output_annotations:
+        contract["output_artifact_annotations"] = _program_output_annotations(invocation)
     try:
         encoded_contract = json.dumps(
             contract,
@@ -2138,25 +2184,29 @@ async def _complete_program_step(
     )
 
 
-async def _load_step_tools() -> ToolRegistry:
-    global _STEP_TOOLS_SOURCE
-
+async def _load_step_tools(
+    session_id: str = _STEP_TOOL_SESSION_ID,
+    *,
+    run_id: str | None = None,
+) -> ToolRegistry:
     async with _STEP_TOOLS_LOAD_LOCK:
-        if _STEP_TOOLS_SOURCE is None:
-            _STEP_TOOLS_SOURCE = await ToolRegistry.load(
-                _TOOLS_DIR,
-                session_id=_STEP_TOOL_SESSION_ID,
-            )
+        # Register before loading: cancellation can leave partially loaded modules.
+        if run_id is not None and session_id != _STEP_TOOL_SESSION_ID:
+            _STEP_TOOL_SESSIONS_BY_RUN.setdefault(run_id, set()).add(session_id)
+        source = _STEP_TOOLS_SOURCES.get(session_id)
+        if source is None:
+            source = await ToolRegistry.load(_TOOLS_DIR, session_id=session_id)
+            _STEP_TOOLS_SOURCES[session_id] = source
         else:
-            await _STEP_TOOLS_SOURCE.refresh()
+            await source.refresh()
 
         workspace = _workspace_dir()
         excluded_tools = _WORKFLOW_LAUNCHERS | _NESTED_TURN_TOOLS
-        tools = {name: tool for name, tool in _STEP_TOOLS_SOURCE.tools.items() if name not in excluded_tools}
+        tools = {name: tool for name, tool in source.tools.items() if name not in excluded_tools}
         funcs = {
             name: _bind_step_tool_to_workspace(name, func, workspace)
             for name in tools
-            if (func := _STEP_TOOLS_SOURCE.get(name)) is not None
+            if (func := source.get(name)) is not None
         }
         return _StepToolRegistry(
             files={
@@ -2356,6 +2406,15 @@ async def _complete_agent_step(
     submitted: dict[str, object] | None = None
     submission_error: ValueError | None = None
 
+    output_annotations = {
+        artifact_id: (
+            annotation
+            if context.dispatch.iteration_index is None
+            else (f"One value contributed by this foreach iteration. Aggregate Artifact annotation: {annotation}")
+        )
+        for artifact_id, annotation in context.output_annotations.items()
+    }
+
     async def submit_step_result(**outputs: object) -> str:
         nonlocal submission_error, submitted
         if submitted is not None:
@@ -2387,7 +2446,11 @@ async def _complete_agent_step(
         parameters={
             "type": "object",
             "properties": {
-                artifact_id: {"type": "boolean"} if context.terminal else {} for artifact_id in context.output_ids
+                artifact_id: {
+                    **({"type": "boolean"} if context.terminal else {}),
+                    **({"description": output_annotations[artifact_id]} if artifact_id in output_annotations else {}),
+                }
+                for artifact_id in context.output_ids
             },
             "required": list(context.output_ids),
             "additionalProperties": False,
@@ -2550,10 +2613,16 @@ async def _complete_agent_step(
                         )
                     return repaired
             raise ValueError(f"step {context.step_id!r} result remained invalid after 3 attempts") from validation_error
+        annotation_text = (
+            f"Output Artifact annotations: {json.dumps(output_annotations, ensure_ascii=False, sort_keys=True)}. "
+            if output_annotations
+            else ""
+        )
         message = (
             f"Your previous step result was invalid: {validation_error}\n"
             "Do not redo the step. Return exactly one valid JSON object as ordinary assistant content, "
             f"keyed by exactly these output keys: {json.dumps(context.output_ids, ensure_ascii=False)}. "
+            f"{annotation_text}"
             "Do not add Markdown or prose."
         )
     raise AssertionError("unreachable")
@@ -2651,19 +2720,19 @@ async def _execute_persisted_run(
         flow_path=run.flow_path,
     )
     await artifact_store.persist(run.checkpoint.values)
-    step_tools: ToolRegistry | None = None
+    step_tools: dict[str, ToolRegistry] = {}
     human_tools: ToolRegistry | None = None
     step_tools_lock = anyio.Lock()
     human_gate = anyio.Lock()
     human_wait_started = anyio.Event()
 
-    async def get_step_tools() -> ToolRegistry:
-        nonlocal step_tools
-        if step_tools is None:
-            async with step_tools_lock:
-                if step_tools is None:
-                    step_tools = await _load_step_tools()
-        return step_tools
+    async def get_step_tools(session_id: str = _STEP_TOOL_SESSION_ID) -> ToolRegistry:
+        async with step_tools_lock:
+            cached = step_tools.get(session_id)
+            if cached is None:
+                cached = await _load_step_tools(session_id, run_id=artifact_store.run_dir.name)
+                step_tools[session_id] = cached
+            return cached
 
     async def get_human_tools() -> ToolRegistry:
         nonlocal human_tools
@@ -2674,6 +2743,7 @@ async def _execute_persisted_run(
     agent_sessions = _AgentSessionAdapter(
         ai_socket=ai_socket,
         get_tool_registry=get_step_tools,
+        run_id=artifact_store.run_dir.name,
     )
 
     async def complete_program(invocation: ProgramInvocation) -> dict[str, object]:
@@ -2775,7 +2845,10 @@ async def _execute_persisted_run(
             )
         try:
             with anyio.CancelScope(shield=True):
-                await lease.save(recoverable)
+                try:
+                    await lease.save(recoverable)
+                finally:
+                    await _cleanup_terminal_run_tools(recoverable)
                 if _is_cancellation(error):
                     await timing_reporter.persist()
                 else:
@@ -2811,11 +2884,14 @@ async def _execute_persisted_run(
         outputs=outputs,
     )
     with anyio.CancelScope(shield=True):
-        # Checkpoints expose intermediate epochs to recovery, but final
-        # materialization is published only after successful termination.
-        final_values = outputs if completed.checkpoint is None else completed.checkpoint.values
-        await artifact_store.persist(final_values, overwrite=True)
-        await lease.save(completed)
+        try:
+            # Checkpoints expose intermediate epochs to recovery, but final
+            # materialization is published only after successful termination.
+            final_values = outputs if completed.checkpoint is None else completed.checkpoint.values
+            await artifact_store.persist(final_values, overwrite=True)
+            await lease.save(completed)
+        finally:
+            await _cleanup_terminal_run_tools(completed)
         await timing_reporter.finalize(
             status="completed",
             error_type=None,
@@ -2882,16 +2958,16 @@ async def run_flow(
                 instruction_files=instruction_files,
             )
 
-    step_tools: ToolRegistry | None = None
+    step_tools: dict[str, ToolRegistry] = {}
     step_tools_lock = anyio.Lock()
 
-    async def get_step_tools() -> ToolRegistry:
-        nonlocal step_tools
-        if step_tools is None:
-            async with step_tools_lock:
-                if step_tools is None:
-                    step_tools = await _load_step_tools()
-        return step_tools
+    async def get_step_tools(session_id: str = _STEP_TOOL_SESSION_ID) -> ToolRegistry:
+        async with step_tools_lock:
+            cached = step_tools.get(session_id)
+            if cached is None:
+                cached = await _load_step_tools(session_id, run_id=artifact_store.run_dir.name)
+                step_tools[session_id] = cached
+            return cached
 
     async def complete_program(invocation: ProgramInvocation) -> dict[str, object]:
         return await _complete_program_step(
@@ -2912,6 +2988,7 @@ async def run_flow(
     agent_sessions = _AgentSessionAdapter(
         ai_socket=ai_socket,
         get_tool_registry=get_step_tools,
+        run_id=artifact_store.run_dir.name,
     )
 
     async def observe_checkpoint(checkpoint: ExecutionCheckpoint) -> None:
@@ -2941,15 +3018,19 @@ async def run_flow(
         )
     except BaseException as error:
         with anyio.CancelScope(shield=True):
+            await _cleanup_step_tool_sessions(artifact_store.run_dir.name)
             await timing_reporter.finalize(
                 status="cancelled" if _is_cancellation(error) else "failed",
                 error_type=type(error).__name__,
             )
         raise
     with anyio.CancelScope(shield=True):
-        # Publish all final materialized values, including feedback state that
-        # feeds an outside output extractor but is not itself a workflow output.
-        await artifact_store.persist(latest_checkpoint.values, overwrite=True)
+        try:
+            # Publish all final materialized values, including feedback state that
+            # feeds an outside output extractor but is not itself a workflow output.
+            await artifact_store.persist(latest_checkpoint.values, overwrite=True)
+        finally:
+            await _cleanup_step_tool_sessions(artifact_store.run_dir.name)
         await timing_reporter.finalize(
             status="completed",
             error_type=None,
@@ -2985,6 +3066,7 @@ async def run_flow_resume(
 
     async with store.acquire(run_id) as lease:
         run = await lease.load()
+        await _cleanup_terminal_run_tools(run)
         if run.status == "completed":
             if request_id not in run.human_responses:
                 raise ValueError(f"request_id {request_id!r} does not belong to completed run {run_id!r}")
@@ -3015,7 +3097,10 @@ async def run_flow_resume(
                 error="workflow definition changed after the Human request was prepared",
             )
             with anyio.CancelScope(shield=True):
-                await lease.save(failed)
+                try:
+                    await lease.save(failed)
+                finally:
+                    await _cleanup_terminal_run_tools(failed)
                 if run.checkpoint is not None:
                     try:
                         artifact_store = await _artifact_store(
