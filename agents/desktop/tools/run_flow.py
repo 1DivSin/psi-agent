@@ -78,7 +78,8 @@ from fusion_flow.workflow_runner import (  # noqa: E402
     compile_workflow,
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow  # noqa: E402
-from workflow_sample import _record_workflow_authoring  # noqa: E402
+from workflow_sample import _record_workflow_authoring
+from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir  # noqa: E402
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
@@ -249,7 +250,7 @@ def _workspace_dir() -> Path:
 
     if _WORKSPACE_DIR != _AGENT_DIR:
         return _WORKSPACE_DIR
-    return Path(_paths.workspace_dir())
+    return _host_workspace_dir(Path(_paths.workspace_dir()))
 
 
 if sys.platform == "win32":
@@ -2195,7 +2196,7 @@ async def _load_step_tools(
             _STEP_TOOL_SESSIONS_BY_RUN.setdefault(run_id, set()).add(session_id)
         source = _STEP_TOOLS_SOURCES.get(session_id)
         if source is None:
-            source = await ToolRegistry.load(_TOOLS_DIR, session_id=session_id)
+            source = await ToolRegistry.load(_host_tools_dir(_TOOLS_DIR), session_id=session_id)
             _STEP_TOOLS_SOURCES[session_id] = source
         else:
             await source.refresh()
