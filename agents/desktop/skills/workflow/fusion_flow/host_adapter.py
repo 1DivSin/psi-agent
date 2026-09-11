@@ -24,3 +24,8 @@ def set_ai_socket_provider(provider: Callable[[], str | None] | None) -> None:
 def ai_socket(default_provider: Callable[[], str | None]) -> str | None:
     provider = _ai_socket_provider.get()
     return (provider or default_provider)()
+STATE_ENV = "PSI_WORKFLOW_STATE_DIR"
+
+def state_dir(default: Path) -> Path:
+    value = os.environ.get(STATE_ENV, "").strip()
+    return Path(value).expanduser() if value else default

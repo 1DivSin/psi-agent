@@ -79,7 +79,7 @@ from fusion_flow.workflow_runner import (  # noqa: E402
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow  # noqa: E402
 from workflow_sample import _record_workflow_authoring
-from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir, ai_socket as _host_ai_socket  # noqa: E402
+from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir, ai_socket as _host_ai_socket, state_dir as _host_state_dir  # noqa: E402
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
@@ -638,7 +638,7 @@ async def _run_with_agent_sessions(
         nonlocal result
         result = await operation()
 
-    runs_dir = _workspace_dir() / _SESSION_RUNS_RELATIVE_PATH
+    runs_dir = _host_state_dir(_workspace_dir() / _SESSION_RUNS_RELATIVE_PATH
     run_path = anyio.Path(runs_dir, run_id)
     resume = await run_path.exists()
     await _run_execution(
@@ -1013,7 +1013,7 @@ def _checkpoint_human_response(
 
 
 def _job_store() -> JobStore:
-    return JobStore(_workspace_dir() / _JOB_STORE_RELATIVE_PATH)
+    return JobStore(_host_state_dir(_workspace_dir() / _JOB_STORE_RELATIVE_PATH))
 
 
 async def _artifact_store(
