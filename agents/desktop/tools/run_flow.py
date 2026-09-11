@@ -79,7 +79,7 @@ from fusion_flow.workflow_runner import (  # noqa: E402
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow  # noqa: E402
 from workflow_sample import _record_workflow_authoring
-from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir  # noqa: E402
+from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir, ai_socket as _host_ai_socket  # noqa: E402
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
@@ -2922,7 +2922,7 @@ async def run_flow(
         passed through ``clarify``.
     """
 
-    ai_socket = current_tool_ai_socket()
+    ai_socket = _host_ai_socket(current_tool_ai_socket)
     if ai_socket is None:
         raise RuntimeError("run_flow must be called by a psi-agent Session")
     if type(max_loop_epochs) is not int or max_loop_epochs < 1:
@@ -3059,7 +3059,7 @@ async def run_flow_resume(
         reserved ``$fusion_flow/control`` Human-wait envelope.
     """
 
-    ai_socket = current_tool_ai_socket()
+    ai_socket = _host_ai_socket(current_tool_ai_socket)
     if ai_socket is None:
         raise RuntimeError("run_flow_resume must be called by a psi-agent Session")
     response = _parse_human_response(human_response_json)
