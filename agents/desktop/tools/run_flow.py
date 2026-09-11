@@ -638,7 +638,7 @@ async def _run_with_agent_sessions(
         nonlocal result
         result = await operation()
 
-    runs_dir = _host_state_dir(_workspace_dir() / _SESSION_RUNS_RELATIVE_PATH
+    runs_dir = _host_state_dir(_workspace_dir() / _SESSION_RUNS_RELATIVE_PATH)
     run_path = anyio.Path(runs_dir, run_id)
     resume = await run_path.exists()
     await _run_execution(
