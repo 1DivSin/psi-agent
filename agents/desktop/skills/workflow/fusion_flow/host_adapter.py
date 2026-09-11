@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Mapping
+from contextlib import contextmanager
+from typing import Iterator
+
 import os
 
 class HostKind(StrEnum):
@@ -69,7 +72,24 @@ _agent_factory: ContextVar[Callable[[object], object] | None] = ContextVar("psi_
 def workspace_dir(default: Path) -> Path: return Path(os.environ.get(WORKSPACE_ENV) or default).expanduser()
 def tools_dir(default: Path) -> Path: return Path(os.environ.get(TOOLS_ENV) or default).expanduser()
 def state_dir(default: Path) -> Path: return Path(os.environ.get(STATE_ENV) or default).expanduser()
-def set_ai_socket_provider(provider): _ai_socket_provider.set(provider)
-def ai_socket(default_provider): return (_ai_socket_provider.get() or default_provider)()
+def set_ai_socket_provider(provider):
+    """Set provider for this async context and return a reset token."""
+    return _ai_socket_provider.set(provider)
+
+def reset_ai_socket_provider(token) -> None:
+    _ai_socket_provider.reset(token)
+
+@contextmanager
+def ai_socket_provider(provider) -> Iterator[None]:
+    token = set_ai_socket_provider(provider)
+    try:
+        yield
+    finally:
+        reset_ai_socket_provider(token)
+
+def ai_socket(default_provider):
+    provider = _ai_socket_provider.get()
+    value = provider() if provider is not None else None
+    return value if value is not None else default_provider()
 def set_agent_factory(factory): _agent_factory.set(factory)
 def agent_handle(config, default_factory): return (_agent_factory.get() or default_factory)(config)
