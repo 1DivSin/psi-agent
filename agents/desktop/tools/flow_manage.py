@@ -13,7 +13,7 @@ import anyio
 
 def _flows_dir() -> anyio.Path:
     # Flow task dirs live under the user workspace.
-    return _paths.resolve_workspace() / "flows"
+    return anyio.Path(os.environ.get("PSI_WORKFLOW_WORKSPACE") or str(_paths.resolve_workspace())) / "flows"
 
 
 def _validate_flow_name(flow_name: str) -> str | None:
