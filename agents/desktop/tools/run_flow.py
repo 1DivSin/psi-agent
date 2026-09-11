@@ -1632,14 +1632,7 @@ def _program_error_outputs(
         detail = "" if not summary else f": {summary}"
         raise RuntimeError(f"Program step {invocation_id!r} failed ({phase}/{kind}){detail}")
 
-    error_value: dict[str, object] = {
-        _PROGRAM_ERROR_KEY: {
-            "phase": phase,
-            "kind": kind,
-            "message": message,
-            "attempts": [_program_attempt_payload(attempt) for attempt in attempts],
-        }
-    }
+    error_value: dict[str, object] = {_PROGRAM_ERROR_KEY: _workflow_error_payload(phase=phase, kind=kind, message=message, attempts=[_program_attempt_payload(attempt) for attempt in attempts])}
     if not invocation.output_ids:
         diagnostic = json.dumps(error_value, ensure_ascii=False, sort_keys=True)
         raise RuntimeError(f"Program step {invocation.binding_name!r} failed with no output artifact: {diagnostic}")
