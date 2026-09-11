@@ -29,3 +29,9 @@ STATE_ENV = "PSI_WORKFLOW_STATE_DIR"
 def state_dir(default: Path) -> Path:
     value = os.environ.get(STATE_ENV, "").strip()
     return Path(value).expanduser() if value else default
+
+_agent_factory: ContextVar[Callable[[object], object] | None] = ContextVar("psi_workflow_agent_factory", default=None)
+def set_agent_factory(factory: Callable[[object], object] | None) -> None:
+    _agent_factory.set(factory)
+def agent_handle(config: object, default_factory: Callable[[object], object]) -> object:
+    return (_agent_factory.get() or default_factory)(config)
