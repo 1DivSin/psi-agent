@@ -80,6 +80,7 @@ from fusion_flow.workflow_runner import (
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow
 from workflow_sample import _record_workflow_authoring
+from fusion_flow.errors import workflow_error_payload
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
@@ -1634,7 +1635,7 @@ def _program_error_outputs(
         raise RuntimeError(f"Program step {invocation_id!r} failed ({phase}/{kind}){detail}")
 
     error_value: dict[str, object] = {
-        _PROGRAM_ERROR_KEY: _workflow_error_payload(
+        _PROGRAM_ERROR_KEY: workflow_error_payload(
             phase=phase,
             kind=kind,
             message=message,
@@ -2320,6 +2321,7 @@ async def _complete_step_agent(
     if result is None:
         raise RuntimeError("step agent ended without a terminal result")
     from fusion_flow.errors import normalize_run_result
+
     outcome = normalize_run_result(result)
     if outcome.status != "completed":
         raise RuntimeError("step agent ended incomplete", outcome.metadata)

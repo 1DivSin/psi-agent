@@ -44,11 +44,24 @@ class RunOutcome:
 
 
 def normalize_run_result(result: object) -> RunOutcome:
-    """Convert an agent result into the workflow-neutral outcome contract."""
-    complete = bool(getattr(result, "is_complete", False))
-    finish_reason = getattr(result, "model_finish_reason", None)
-    status = "completed" if complete else "incomplete"
-    return RunOutcome(status=status, metadata={"model_finish_reason": finish_reason} if finish_reason is not None else {})
+    """Convert common agent result objects or mappings into the workflow outcome contract."""
+    if isinstance(result, Mapping):
+        get = result.get
+    else:
+        get = lambda name, default=None: getattr(result, name, default)
+    complete_value = get("is_complete", get("completed", None))
+    status_value = get("status", None)
+    complete = (
+        bool(complete_value) if complete_value is not None else status_value in {"completed", "success", "succeeded"}
+    )
+    finish_reason = get("model_finish_reason", get("stop_cause", None))
+    metadata: dict[str, Any] = {}
+    if finish_reason is not None:
+        metadata["model_finish_reason"] = finish_reason
+    error = get("error", None)
+    if error is not None:
+        metadata["error"] = error
+    return RunOutcome(status="completed" if complete else "incomplete", output=get("output", None), metadata=metadata)
 
 
 def normalize_error(
@@ -91,3 +104,8 @@ def error_payload(
         extensions=extensions or {},
     )
     return info.as_dict()
+
+
+def workflow_error_payload(*, phase: str, kind: str, message: str, attempts: list[dict[str, Any]]) -> dict[str, object]:
+    """Build the stable Program Artifact error shape used by workflow consumers."""
+    return {"phase": phase, "kind": kind, "message": message, "attempts": attempts}
