@@ -2319,13 +2319,10 @@ async def _complete_step_agent(
     result = run.result
     if result is None:
         raise RuntimeError("step agent ended without a terminal result")
-    if not result.is_complete:
-        raise RuntimeError(
-            "step agent ended incomplete: "
-            f"stop_cause={result.stop_cause}, "
-            f"model_finish_reason={result.model_finish_reason!r}, "
-            f"model_turns={result.model_turns}"
-        )
+    from fusion_flow.errors import normalize_run_result
+    outcome = normalize_run_result(result)
+    if outcome.status != "completed":
+        raise RuntimeError("step agent ended incomplete", outcome.metadata)
     if not conversation.messages:
         raise RuntimeError("step agent produced no final assistant text")
     final = conversation.messages[-1]

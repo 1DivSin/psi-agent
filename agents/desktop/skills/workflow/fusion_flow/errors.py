@@ -35,6 +35,22 @@ class ErrorInfo:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class RunOutcome:
+    status: str
+    output: object | None = None
+    error: ErrorInfo | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+def normalize_run_result(result: object) -> RunOutcome:
+    """Convert an agent result into the workflow-neutral outcome contract."""
+    complete = bool(getattr(result, "is_complete", False))
+    finish_reason = getattr(result, "model_finish_reason", None)
+    status = "completed" if complete else "incomplete"
+    return RunOutcome(status=status, metadata={"model_finish_reason": finish_reason} if finish_reason is not None else {})
+
+
 def normalize_error(
     exc: BaseException,
     ctx: RunContext,
