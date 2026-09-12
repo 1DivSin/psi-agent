@@ -1,3 +1,4 @@
+# ruff: noqa: E501,E402
 """通用 workflow 错误内核；不依赖任何具体 agent。"""
 from __future__ import annotations
 from dataclasses import dataclass, field
