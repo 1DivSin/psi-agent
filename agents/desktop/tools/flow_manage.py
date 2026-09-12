@@ -1,3 +1,4 @@
+# ruff: noqa: E501,E402
 """Manage reusable workflow assets."""
 
 from __future__ import annotations
