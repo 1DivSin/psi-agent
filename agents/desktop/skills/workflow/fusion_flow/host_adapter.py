@@ -1,4 +1,4 @@
-# ruff: noqa: E501,E402
+# ruff: noqa: RUF002
 """宿主集成边界：为非 Haitun agent 提供可注入的运行时入口。"""
 from __future__ import annotations
 from contextvars import ContextVar
