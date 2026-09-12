@@ -1,3 +1,4 @@
+# ruff: noqa: E501,E402
 """宿主适配边界。PSI 路径只有显式 PSI capability 才可解析。"""
 from __future__ import annotations
 from contextvars import ContextVar
