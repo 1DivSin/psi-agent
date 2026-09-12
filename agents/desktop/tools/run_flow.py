@@ -80,7 +80,7 @@ from fusion_flow.workflow_runner import (
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow
 from workflow_sample import _record_workflow_authoring
-from fusion_flow.host_adapter import (
+from fusion_flow.host_adapter import (  # ty: ignore[unresolved-import]  # ty: ignore[unresolved-import]
     agent_handle as _host_agent_handle,
     ai_socket as _host_ai_socket,
     state_dir as _host_state_dir,
