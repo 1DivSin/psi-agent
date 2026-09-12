@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 # ruff: noqa: E402, I001, T201
 
 """System prompt builder for the Haitun agent workspace.
