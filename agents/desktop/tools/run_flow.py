@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 """Compile and execute one G4 workflow."""
 
 from __future__ import annotations
