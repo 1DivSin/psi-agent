@@ -79,8 +79,14 @@ from fusion_flow.workflow_runner import (  # noqa: E402
     compile_workflow,
 )
 from fusion_flow.workflow_runner import execute_workflow as _execute_workflow  # noqa: E402
-from workflow_sample import _record_workflow_authoring
-from fusion_flow.host_adapter import tools_dir as _host_tools_dir, workspace_dir as _host_workspace_dir, ai_socket as _host_ai_socket, state_dir as _host_state_dir, agent_handle as _host_agent_handle  # noqa: E402
+from workflow_sample import _record_workflow_authoring  # noqa: E402
+from fusion_flow.host_adapter import (
+    agent_handle as _host_agent_handle,
+    ai_socket as _host_ai_socket,
+    state_dir as _host_state_dir,
+    tools_dir as _host_tools_dir,
+    workspace_dir as _host_workspace_dir,
+)  # noqa: E402
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
