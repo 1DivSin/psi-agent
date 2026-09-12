@@ -43,9 +43,9 @@ for _import_dir in (_TOOLS_DIR, _SKILL_DIR):
 
 _paths = __import__("_runtime_paths")
 
-from fusion_flow.artifact_store import ArtifactStore 
-from fusion_flow.contracts import Diagnostic 
-from fusion_flow.execution import ( 
+from fusion_flow.artifact_store import ArtifactStore
+from fusion_flow.contracts import Diagnostic
+from fusion_flow.execution import (
     AgentConfig,
     AgentHandle,
     AgentInvocation,
@@ -53,8 +53,8 @@ from fusion_flow.execution import (
     assert_safe_name,
     flow,
 )
-from fusion_flow.execution import run as _run_execution 
-from fusion_flow.job_store import ( 
+from fusion_flow.execution import run as _run_execution
+from fusion_flow.job_store import (
     DEFAULT_MAX_LOOP_EPOCHS,
     HumanRequestSpec,
     HumanWorkflowRun,
@@ -62,8 +62,8 @@ from fusion_flow.job_store import (
     RunLease,
     new_opaque_id,
 )
-from fusion_flow.step_timing import StepTimingReporter 
-from fusion_flow.workflow_execution import ( 
+from fusion_flow.step_timing import StepTimingReporter
+from fusion_flow.workflow_execution import (
     ExecutionCheckpoint,
     ExecutionPlanError,
     ResourceCapacity,
@@ -71,15 +71,15 @@ from fusion_flow.workflow_execution import (
     create_execution_checkpoint,
     generate_plan,
 )
-from fusion_flow.workflow_runner import ( 
+from fusion_flow.workflow_runner import (
     CompiledWorkflow,
     CompletionContext,
     ProgramInvocation,
     _normalize_program_stdout,
     compile_workflow,
 )
-from fusion_flow.workflow_runner import execute_workflow as _execute_workflow 
-from workflow_sample import _record_workflow_authoring 
+from fusion_flow.workflow_runner import execute_workflow as _execute_workflow
+from workflow_sample import _record_workflow_authoring
 
 _STEP_SYSTEM_PROMPT = (
     "You execute exactly one assigned FusionFlow Agent step. "
@@ -1633,7 +1633,14 @@ def _program_error_outputs(
         detail = "" if not summary else f": {summary}"
         raise RuntimeError(f"Program step {invocation_id!r} failed ({phase}/{kind}){detail}")
 
-    error_value: dict[str, object] = {_PROGRAM_ERROR_KEY: _workflow_error_payload(phase=phase, kind=kind, message=message, attempts=[_program_attempt_payload(attempt) for attempt in attempts])}
+    error_value: dict[str, object] = {
+        _PROGRAM_ERROR_KEY: _workflow_error_payload(
+            phase=phase,
+            kind=kind,
+            message=message,
+            attempts=[_program_attempt_payload(attempt) for attempt in attempts],
+        )
+    }
     if not invocation.output_ids:
         diagnostic = json.dumps(error_value, ensure_ascii=False, sort_keys=True)
         raise RuntimeError(f"Program step {invocation.binding_name!r} failed with no output artifact: {diagnostic}")

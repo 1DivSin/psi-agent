@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 # ruff: noqa: E402, I001
 
 from __future__ import annotations

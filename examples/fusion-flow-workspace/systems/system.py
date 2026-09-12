@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """System prompt for the Fusion Flow authoring workspace."""
 
 from __future__ import annotations
