@@ -53,6 +53,7 @@ from _workflow_authoring_context import current_prompt as _current_authoring_pro
 
 from fusion_flow.host_adapter import workspace_dir as _host_workspace_dir
 
+
 async def _resolve_appdata_root() -> str:
     return str(_host_workspace_dir(Path(__file__).parents[2]) / ".psi" / "appdata")
 
