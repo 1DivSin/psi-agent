@@ -175,7 +175,7 @@ volumes:
 | V2 | 探针报出多层 | `docker logs <c> 2>&1 \| grep layer_source` | 四类各一行，`from N of M roots`，M ≥ 3 |
 | V3 | 遗留内容不再生效 | 同上，`[...]` 里**没有** `agent=` 项 | 没有 |
 | V4 | 覆盖顺序对 | 探针 + 实际问一句涉及被覆盖 skill 的话 | 拿到 users 层那份 |
-| V5 | tools 没丢 | `docker logs <c> 2>&1 \| grep -c 'Loaded tool:'` | 与腾名前同一个数（腾名前先量一次存底） |
+| V5 | tools 没丢 | `docker logs <c> 2>&1 \| grep -oE 'Loaded [0-9]+ tool\(s\) from [0-9]+ file\(s\)' \| tail -1` | 与腾名前同一对数（腾名前先量一次存底）。**注意日志里没有 `Loaded tool:` 这个串**，原判据恒为 0，两边都是 0 时看着像 PASS。另：gateway 多会话，每会话重扫一遍，所以要取 `tail -1` 或按容器本次启动去重，不能直接 `grep -c` |
 | V6 | **公网入口活着** | `curl -sS -o /dev/null -w '%{http_code}' https://<域名>/healthz` | 2xx/3xx |
 | V7 | 飞书真能收发 | 私聊发一句，看回复 | 有回复 |
 
@@ -235,7 +235,13 @@ mv content/official content/official.old && mv content/official.new content/offi
 
 生产 compose 只存在于机器上，仓库无副本（`deploy/haitun/README.md` 已记：`oauth-proxy.py`、
 `launch-gateway.sh`、`.env.example` 是"副本"，compose 连副本都没有）。
-本次要给 7 个容器各加一条 `PSI_CONTENT_ROOTS`，人工改 7 处、漏一处的表现是"那个人的分层没生效"且不报错。
+本次要给跑 agent 的容器各加一条 `PSI_CONTENT_ROOTS`，漏一处的表现是"那个人的分层没生效"且不报错。
+
+⚠️ **"7 个容器"是错的，实测是 3 个**（2026-09-12 纠正）：跑 agent 的只有 `gateway` /
+`private-luolin` / `private-chengxx`，`oauth-proxy` 共享 gateway 的 netns 且不跑 agent。
+同时**每个 agent 容器挂的是各自独立的 workspace**（`workspace/` / `workspace-luolin/` /
+`workspace-chengxx/`），不是共享同一份 —— 本手册别处若按"单份共享 `/workspace`"写的步骤，
+都要按三份分别执行。改 3 处不是 7 处，U6 范围随之缩小。
 **建议**（不在本次范围）：把 compose 收进 `deploy/haitun/` 作为准本，用变量渲染每人那一段。
 
 ---
