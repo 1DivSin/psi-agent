@@ -32,8 +32,23 @@
 | 生产上已执行的**写**动作 | 见第三节，逐条记录 |
 | 当前生产是否已启用分层 | 见第三节末尾的"当前态"行 |
 | 回滚是否仍可用 | 见第三节每条的回滚列 |
-| **完整部署闭环** | ⛔ **卡住，非本方案原因**：2026-09-14 12:0x 起跳板机 `210.45.70.163` ICMP 100% 丢包、TCP/22 超时（同时刻本机打 github:443 正常，是那一跳断了）。剩余三步 U8/U9/U10 全部需要生产可达 |
-| 已交付的标准部署流程 | `deploy/haitun/audit-workspace-drift.sh` + `deploy/haitun/README.md` 新增「`workspace/tools/` 的投放」一章。脚本已做四类变异复核，但**未在真机跑过**（U8） |
+| **完整部署闭环** | 剩 32 个「落后」文件 + 1 个缺失 + 两份私有 workspace 铺平。**等 3 个「领先」文件定归属**（`tencent_meeting.py` 今天 14:19 还被改过，可能有人在做） |
+| 已交付的标准部署流程 | `deploy/haitun/audit-workspace-drift.sh`（已随 PR #953 合并）+ README 新增「`workspace/tools/` 的投放」一章。**已在真机首跑**，见动作 15 |
+
+### ⚠ 我此前记的「生产不可达」是错的——量的是另一台机器（2026-09-14 15:2x 纠正）
+
+台账与交付文档此前写着「2026-09-14 12:0x 起跳板机 `210.45.70.163` TCP/22 超时，生产不可达，
+闭环做不了」。**这个结论错了。**
+
+我用了 `~/.ssh/config` 里的 `haitun1` 别名，它配着 `ProxyJump jump` 指向实验室内网
+`192.168.63.174`——那台有 docker 但**跑 0 个容器、没有 `/srv/haitun`**，根本不是 ToB 生产机。
+
+**ToB 生产是云服务器 `root@47.100.84.197`，直接 ssh 就行，不经任何跳板。** 生产这段时间一直好着
+（9 个容器全 Up、分层 env 在位、护栏 195 条规则仍生效）。
+
+教训：别名里带 `ProxyJump` 不会在报错里显形，`Connection timed out` 长得跟生产宕机一模一样，而
+「跳板机不通」与「生产不通」是两件事。判据是登进去先核 `ls -d /srv/haitun` 与
+`docker ps -q | wc -l`，别拿 ssh 是否成功当落点正确的证据。
 
 ---
 
@@ -78,6 +93,9 @@
 | 12 | 2026-09-14 10:5x | 持久化 `vm.swappiness=10`（动作 1 只改了运行时，重启即回滚） | 新建 `/etc/sysctl.d/zz-psi-agent-swappiness.conf` | 运行时 10，但 `/etc/sysctl.d/99-apsara-sysctl.conf` 声明 `= 0` → **重启回到 0，OOM 立刻回来** | **判据吃劲**：`sysctl --system` 输出显示先 apsara 应用 `0`、后 zz- 应用 `10`，运行时终值 10 = PASS。这个顺序就是重启时的加载顺序 | `rm /etc/sysctl.d/zz-psi-agent-swappiness.conf` + `sysctl --system` |
 | 13 | 2026-09-14 11:28 | **我的探测产生的副作用**：跑 `writable_layer('skills')` 建出 `/srv/haitun/psi-agent/workspace/skills` 空目录 | 无（`_probe_writable` 的实写探针会先建目录） | 该目录不存在（9-12 已腾名为 `skills.pre-layering`） | 空目录，0 条目。**无害**：agent 层本就是设计的可写落点，探针语义是"建不出来才算不可写"。另两台没跑过探测故仍不存在 | `rmdir /srv/haitun/psi-agent/workspace/skills`（空目录，可直接删） |
 | 14 | 2026-09-14 11:37–11:41 | **修复飞书 API 护栏失效**：投放 `_feishu_api_impl.py` × 3 workspace | `cp` + `chown`，备份 `/srv/backup/guardrail-fix-20260914-1140/` | 生产 434 行（旧版，调 `rules_for(_skills_dir())` 单目录）；`_skills_dir()` = 已腾名的 `/workspace/skills` → **护栏规则 0 条，`POST /im/v1/messages` = None**。而同目录 `_feishu_spec.py` 已是新版（683 行，含 `rules_for_layers`）→ 9-12 投了 spec 漏投 impl | md5 `64ad81caf9e8` × 3 全符。三台先 import 实测再重启（避免重演动作 11）。**判据吃劲**：探针 `0 from 0 of 1 roots [(none)]` → **`195 from 3 of 4 roots [official=195 enterprise=0 agent=0]`**；真实调用被拦下并给出业务原因（`use_dedicated_tool`），修复前会放行。工具数 229/198/198 未退，失败数未增 | 从 `/srv/backup/guardrail-fix-20260914-1140/` 还原 3 份 + 重启 |
+| 15 | 2026-09-14 15:3x | **审计脚本真机首跑**（只读 + 传一个脚本进 `/tmp`）：销 U8 的账 | `scp deploy/haitun/audit-workspace-drift.sh root@47.100.84.197:/tmp/` → `bash /tmp/audit-workspace-drift.sh ef3cad55` | 脚本从未在真机跑过，gateway workspace 漂移只有我手工量的一组数（同 205/落后 32/领先 3/缺失 1/独有 0） | 首跑得 同 205 / 落后 31 / 领先 4 / 缺失 1 / 独有 0，EXIT=1。与手工量差一个 `meeting_pipeline_run.py` —— 查下去**是脚本判据错了**，不是生产变了（详见动作 16）。脚本用 `git archive` 取快照，没碰目标机任何工作树 | 无需回滚（只读；`rm /tmp/audit-workspace-drift.sh` 即可清干净） |
+| 17 | 2026-09-14 16:4x–17:1x | **只读取证：分层断掉的硬编码 skills 路径全量清点**，并在仓库里修（PR #956），生产未动 | `docker exec psi-agent-gateway sh -lc` 跑 `ls`/`[ -f ]`，本地 `grep -rn '"skills"' agents/feishu/tools/` | 我此前记的是「三个工具写死 `<workspace>/skills`」，且都被 14:21 的软链接兜住了 | **此前那份清单是错的，漏了两处、多算一处**。实际 4 处真断（`meeting_pipeline_run.py:409`、`flow_run.py:98`、`run_flow.py:38`、`rules.py:93`）；`_gen_mcp_skill.py:29` **不是缺陷**（下划线前缀不进工具扫描，是仓库内 dev CLI，产物已入 git）。**并且生产上每日会议分析当前是断的**：容器内实测 `/workspace/skills/meeting-sop/weekday-alignment/SKILL.md` MISSING，而 `/content/official/skills/meeting-sop/weekday-alignment` 在位 → `meeting_pipeline_run.py:409` 抛「会议 SOP skill 缺失」。14:21 补的 4 条软链接里没有 `meeting-sop` —— 补的人只补了自己撞见的那几个。断法各不相同：`flow_run` 是**静默**退回默认引擎 `claude`、`run_flow` 是 import 期 `ImportError` | 本次生产零写入（只读探针），无需回滚。修复在 PR #956，回滚 = 不合并 |
+| 16 | 2026-09-14 15:5x–16:0x | **修审计脚本的落后/领先判据 + 复跑**；另做只读取证：3 个「领先」文件的归属、`workspace/skills` 只剩 5 项的成因、三个硬编码 skills 路径的工具是否还能用 | 本地改 `audit-workspace-drift.sh` → 变异复核 → `scp` 覆盖 `/tmp/` 那份 → `bash /tmp/audit-workspace-drift.sh ef3cad55 workspace`；取证用 `docker exec psi-agent-gateway` 跑只读 `python3 -c` 与 `ls`/`stat` | 判据是 mtime 纳秒位：整秒=投放、带纳秒=就地写入 | **判据不成立**：不带 `-p` 的 `cp` 把 mtime 设成「此刻」而此刻天然带纳秒，投放与就地编辑无法区分。改成内容判据 `git hash-object` + `git cat-file -e`（blob 在仓库里 = 落后，不在 = 真领先）；并改为取历史最全的 clone（目标机 `/tmp/rel-482d970c` 只有 729 commit、`/tmp/rel-5565f4bd` 有 3133，取残缺那份会把落后误判成领先）。复跑得 **同 205 / 落后 32 / 领先 3 / 缺失 1 / 独有 0，EXIT=1**，与手工量一致。变异复核三条全过，其中「整秒 mtime 但内容不在 git → 仍判领先」是旧判据会静默覆盖的那条。取证结论：`tencent_meeting.py` 那份是**分层适配补丁**（`_skill_script()` 跨层找技能脚本，git 里一处都搜不到），但同时丢了 PR #859 的 `anyio.fail_after` 超时保护（`grep -c` 得 0）；`workspace/skills` 只剩 5 项，其中 4 条是 14:21–14:33 有人软链到 `/content/official/skills/` 的兜底，容器内 4 条全解析、三个工具实测都能用（`load_rule_pack()` 16 条、`SKILLS` 是目录）| 脚本改动在 git 里可回退；取证全是只读，无副作用 |
 
 ### ⚠ 两个私有 workspace 不是 gateway 的副本，是 8-07 的旧快照（动作 11 的教训）
 
@@ -114,6 +132,36 @@
 
 **当前态**：生产未启用分层。运行镜像 `482d970c` 不含 `content_roots.py` / `layer_probe.py`（已实测）。
 `content/{official,enterprise,users}` 骨架目录存在但为空。`/workspace` 仍是单根，行为与分层前逐字节相同。
+
+---
+
+### PR #956 的 CI 红在合并结果上，不在分支上（2026-09-14 18:3x，零生产副作用）
+
+**现象**：`gh pr checks 956` 同时列出两个 `lint`，一个 pass 一个 fail。本机 `uv run` 三步全绿。
+
+**根因两层**。第一层是读法：CI 对同一 commit 跑两遍，`push` 事件检出分支本身，`pull_request`
+事件检出**与 base 的合并结果**。两个 run 的 `headSha` 都是 `2d8db79c`，结论相反 —— 红的是
+`pull_request`。所以本机怎么跑都绿，因为本机没合 main。
+
+第二层是真正的缺陷：main 上 PR #955 在 `_positive_negative_list/rules.py` 里新增了
+`rule_pack_source()`（规则包指纹工具），引用常量 `_CONFIG_DIR`；而 #956 为跨层解析把该名改成了
+`_LEGACY_CONFIG_DIR` + `_config_dirs()`。两处改动落在同一文件的不同区域，**`git merge` 干净通过、
+零冲突**，合并后留下一处悬空引用，只有 `ruff` 的 F821 抓到。这与「并行卡的破坏是跨文件改名」
+是同一形态，第二次。
+
+**修法不是把名字换回去**。指纹的用处是给 agent 提供"我确实读了这份文件"的证据。若
+`rule_pack_source` 与 `load_rule_pack` 各自解析路径，分层后两者可能落到**不同层的同名**
+`<version>.yaml` 上 —— 指纹就会为一份没被读过的文件作保，而这种伪证恰好长得像有据。所以抽了公共
+`_rule_pack_path(version)` 两处共用，让偏斜在结构上不可能出现；另补 `layer` 字段报命中层名
+（`file` 保持相对短路径不变，但分层后每层都有同名文件，光凭它定不到读的是哪一份）。
+
+**判据**：3 条变异（`layer` 写死 / 指纹绕开层梯子 / 层序取反）全部如期转红，复原后全绿且
+`git diff --stat` 非空（防 [[git-checkout-in-mutation-loop-wipes-edits]] 那类假绿）。
+
+**顺带查明的既有红**：`test_read_rejects_person_name_filter_without_identity` 在 `origin/main`
+干净 worktree 上同样失败，与本次改动无关。CI 里没有任何 job 跑 pytest，所以它一直没被拦下。
+
+**生产影响**：无。本条全程在本机与 GitHub 上完成，生产零写入。剩余生产复量见 U15。
 
 ---
 
@@ -244,6 +292,11 @@ B 臂是最坏的形状：操作者以为在恢复，实际上把内容清空了
 | U2 | 分层代码在真实生产镜像里的行为 | 全部判据都是本地 rig 跑出来的 | 重打镜像后在生产用 `layer_probe` 那行 INFO 核 |
 | ~~U3~~ | ~~护栏规则在腾名形态下的行为~~ | 已验证：不存在的 agent 层被静默跳过，users 层接手，与提示词索引同一答案 | 已完成 2026-09-12 |
 | ~~U4~~ | ~~只回滚 L1 不回滚 L2 的行为~~ | 已验证，见第五节：会清空内容，手册已按此改写 | 已完成 2026-09-12 |
-| U8 | `audit-workspace-drift.sh` 在真机上的输出 | 它是标准流程的判据本身。已在人造树上做过四类变异复核（见 README「判据」），但**没在生产上跑过一次** | 生产恢复连通后跑 `bash /tmp/audit-workspace-drift.sh origin/main`，判据是复现 9-14 手工量的 gateway 同 205/落后 32/领先 3/缺失 1/独有 0 |
+| U8 | ~~`audit-workspace-drift.sh` 在真机上的输出~~ | ✅ **已销账（动作 15 + 16）**：首跑反而查出脚本自己的落后/领先判据不成立（mtime 纳秒位区分不了 `cp` 投放与就地编辑），改用 `git hash-object` + `git cat-file -e` 的内容判据后复跑得 **同 205 / 落后 32 / 领先 3 / 缺失 1 / 独有 0，EXIT=1**，与手工量一致 | — |
 | U9 | 两份私有 workspace 整份铺平 | 它们仍是 8-07 旧快照（缺 73/71 个文件），增量投放已实测会炸（动作 11） | 需要停机窗；铺平后工具数与失败数逐项比对 |
-| U10 | 32 个"落后"文件的批量覆盖 | 这是"完整部署闭环"剩下的最后一步 | 生产恢复后先跑审计确认仍是 32 个且"领先"仍只有 3 个，再逐文件投放 + 重启前 import 探针 |
+| U13 | PR #956 的 4 处跨层修复在生产上的实际效果 | 其中 `meeting_pipeline_run.py` 那条是**当前正断着**的每日会议分析。15 条判据全在本机跑的，生产一次没量 | #956 合并 + 投放后，容器内调 `_sop_skill_md("meeting-sop/weekday-alignment")` 确认落到 `/content/official`；`flow_run` 那条要看子进程环境里 `.env` 的变量是否真进去了 —— 它断的时候不报错，只是静默用错引擎，所以判据必须看变量值而不是看有没有异常 |
+| U15 | `positive_negative_rules` 指纹返回的 `layer` 在生产上报的是哪一层 | #956 合并期与 #955 撞车（详见下方「PR #956 的 CI 红在合并结果上」），修法是让 `load_rule_pack` 与 `rule_pack_source` 共用一条层梯子。**这个字段的用处正是防伪证**：agent 拿指纹当"我确实重读了规则"的证据，报错层等于给没读过的文件作保。本机判据齐（3 条变异全红），生产没量 | 投放后容器内调一次 `positive_negative_rules("及时反馈")`，看返回里 `layer` 与 `sha256` 是否同源 —— 拿 `layer` 报的那一层的文件自己算一遍 sha256 比对，**不要只看 `layer` 的字面值**，写死也能报对 |
+| U14 | `workspace/skills` 那 4 条软链在 #956 之后能否删 | 它们是 14:21 的手工兜底，#956 之后应当冗余。留着不只是脏：软链**没有就近覆盖语义**，企业层/用户层改不动被链过去的官方规则 | 先删影响面最小的 `fusion-flow-legacy` 一条，跑一次对应工具确认走的是层梯子；4 条逐条来，别一次删完 |
+| U10 | 32 个"落后"文件的批量覆盖 + 1 个缺失文件补投 | 这是"完整部署闭环"剩下的最后一步。**卡在 3 个"领先"文件的归属**，不是卡在网络 | 归属定了之后重跑审计确认数字未变，再逐文件投放 + 重启前 import 探针 |
+| ~~U11~~ | ~~`tencent_meeting.py` 的分层适配补丁只活在生产上~~ | **已在仓库里落地（PR #956）**，跨层解析与 `anyio.fail_after` 超时保护两者都在，且各有一条判据（超时那条做过变异复核：把 `fail_after` 换名后如期转红）。生产那份文件本身仍收编在 `docs/superpowers/salvage/prod-ahead-20260914/` 备查 | 剩下的是「投放后在生产上复量」，见 U13 |
+| ~~U12~~ | ~~`workspace/skills` 下的 4 条软链只活在生产上~~ | **这条的描述有两处错，已在动作 17 纠正**：(1) 需要兜底的工具不是 3 个而是 4 个，且清单不对 —— 真断的是 `meeting_pipeline_run.py` / `flow_run.py` / `run_flow.py` / `rules.py`，而 `_gen_mcp_skill.py` 根本不是缺陷（下划线前缀不进工具扫描，是仓库内 dev CLI）；(2) 「三个工具都能用」掩盖了 `meeting-sop` **没被软链、每日会议分析当前就是断的**。修复走 PR #956 | 后续判据移到 U13/U14 |

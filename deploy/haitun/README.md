@@ -174,7 +174,7 @@ PR #867(fork `Twin-Ghosts`)的代码再往前改出来的, 生产是那个 PR �
 
 | 目录 | 容器 | 状态(2026-09-14 实测) |
 | --- | --- | --- |
-| `workspace/` | `psi-agent-gateway` | 与 `origin/main` 基本齐平: 同 205 / 落后 32 / 领先 3 / 缺失 1 / 独有 0 |
+| `workspace/` | `psi-agent-gateway` | 与 `origin/main` 基本齐平: 同 205 / 落后 32 / 领先 3 / 缺失 1 / 独有 0（脚本真机实测，基准 `ef3cad55`） |
 | `workspace-luolin/` | `psi-agent-luolin` | **8-07 的旧快照**, 缺 73 个文件 |
 | `workspace-chengxx/` | `psi-agent-chengxx` | **8-07 的旧快照**, 缺 71 个文件 |
 
@@ -208,13 +208,52 @@ PR #867(fork `Twin-Ghosts`)的代码再往前改出来的, 生产是那个 PR �
 领先 / 子目录里的缺失 / 生产独有各一个, 四类被各自单独认出且退出码变 1; 再把一个文件整体转成
 CRLF, 仍报「同」, 归一化没有产生假阳性。
 
+**真机首跑(2026-09-14 15:2x, `root@47.100.84.197`)**: 输出 同 205 / 落后 32 / 领先 3 / 缺失 1 /
+独有 0, 退出码 1。
+
+首跑本身查出了脚本的一处判据缺陷, 已修 —— 首跑给的是 31/4, 与手工量的 32/3 差
+`meeting_pipeline_run.py`:
+
+- **原判据(mtime 纳秒位)不成立。** 不带 `-p` 的 `cp` 把 mtime 设成「此刻」, 而此刻天然带纳秒 ——
+  手工投放与就地编辑在 mtime 上无法区分。那个文件带纳秒被判「领先」, 但内容与 commit
+  `880d9831` 逐字节相同, 其实是**落后** 5 天。
+- **改成内容判据**: `git hash-object <生产文件>` 得 blob SHA, `git cat-file -e` 查它在不在仓库里。
+  在 = 这份内容是某个 commit 里的版本, 覆盖不丢东西; 不在 = 真「领先」。
+- **顺带修了第二个坑**: 原来按 glob 顺序取第一个 clone, 而目标机上 `/tmp/rel-482d970c` 只有 729
+  个 commit、`/tmp/rel-5565f4bd` 有 3133 个。取到残缺那份会把「落后」误判成「领先」。改为取历史
+  最全的。
+- **新判据的变异复核**: 仓库存在过的旧版本 + 纳秒 mtime → 「落后」✅; 从未进 git 的内容 →
+  「领先」✅; **整秒 mtime 但内容不在 git → 仍「领先」**✅ —— 最后这条旧判据会误判成「落后」并
+  静默覆盖, 是这次修复真正堵上的漏。
+
 ### 已知没验到的
 
-- 脚本**没在目标机上跑过**。2026-09-14 起 jump 机 `210.45.70.163` ICMP 100% 丢包、TCP/22
-  超时, 生产不可达。上面 gateway 那组 205/32/3/1/0 是同日手工量的, 脚本在人造树上复现了同一
-  套判法, 但「脚本在真机上输出这组数」这一步未验证。
 - 两份私有 workspace 的整份铺平**没做**。
-- `_card_dsl.py` / `_rookie_sop_card.py` 两个「领先」文件的归属未定, 要 PR #867 作者判断。
+- 三个「领先」文件的归属未定: `_card_dsl.py` / `_rookie_sop_card.py`(9-12 17:44, 源头是未合并的
+  PR #867) / `tencent_meeting.py`(9-14 14:19)。
+- **`tencent_meeting.py` 那份要尽快收编**: 它加的 `_skill_script()`(改从 `PSI_CONTENT_ROOTS`
+  逐层找技能脚本)在 git 里一处都搜不到, 只活在生产上 —— 下次镜像发布或批量投放就会把它冲掉,
+  而它正是分层挪走 `<workspace>/skills` 之后的必要适配。但同一份改动里 PR #859 加的
+  `anyio.fail_after` 超时保护不见了(生产那份 `grep -c` 得 0), 收编时应当两者都要。
+- **`workspace/skills` 下的 4 条软链也只活在生产上**: 有人在 9-14 14:21–14:33 把
+  `tencent-meeting-mcp` / `positive-negative-list` / `workflow` / `fusion-flow-legacy` 软链到
+  `/content/official/skills/`, 给三个硬编码 `<workspace>/skills` 路径的工具兜底。已实测容器内 4
+  条链全解析、三个工具都能用(`rules.load_rule_pack()` 得 16 条、`_gen_mcp_skill.SKILLS` 是目录)。
+  同样不在 git 里。
+
+### ⚠️ 目标机是直连, 不要走跳板机
+
+生产是 `root@47.100.84.197`(境内 A 机), **直接 ssh 就行**, 不经任何跳板。
+
+2026-09-14 我用了 `~/.ssh/config` 里的 `haitun1` 别名, 它配着 `ProxyJump jump` 指向实验室内网
+`192.168.63.174` —— 那台有 docker 但**跑 0 个容器、没有 `/srv/haitun`**。跳板机当时 TCP/22 不通,
+我据此得出「生产不可达、闭环做不了」并把这个结论写进了台账、交付文档和 PR #953 正文。
+
+**结论是错的: 生产一直好着, 我量的是另一台机器。** 别名里带 `ProxyJump` 不会在报错里显形 ——
+`Connection timed out` 长得跟生产宕机一模一样, 而「跳板机不通」与「生产不通」是两件事。
+
+判据: 登进去先核 `ls -d /srv/haitun` 和 `docker ps -q | wc -l`(生产是 9 个容器), 别拿 ssh 是否
+成功当落点正确的证据。
 
 ---
 
