@@ -195,12 +195,15 @@ button {
   padding: 2px 6px 14px;
 }
 
-.ht-app-mark {
+/* 侧栏品牌标 —— 必须走 ``brandMark`` 的海豚图, 不是自绘色块。
+   原先这里是 ``.ht-app-mark``: 一个蓝绿渐变方块, 与页面其余位置的品牌标(海豚 logo,
+   见 ``.brand-logo-art``)不一致 —— 在飞书客户端左上角看起来就是"图标不对"。
+   尺寸沿用原来的 36px, 免得侧栏布局跟着挪。 */
+.brand-logo-sidebar {
   width: 36px;
   height: 36px;
-  flex: none;
+  padding: 3px;
   border-radius: 11px;
-  background: linear-gradient(135deg, #3370ff, #12a594);
 }
 
 .ht-dt-brand strong {
@@ -499,6 +502,18 @@ button {
   background: var(--fs-brand-soft);
 }
 
+/* ---- 任务行: 单击选中 / 双击打开 ---- */
+/* 双击可用这件事必须**看得出来**, 否则等于没做: 多给一个「打开」的光标语义(pointer 已有),
+   悬停时把标题颜色压深一点, 并让「继续对话」那个按钮不要跟整行的双击抢注意力 —— 按钮仍
+   可点(它是键盘/触屏用户唯一的入口), 只是从视觉上退到次要位置。 */
+.ht-table tbody tr.ht-row:hover .ht-cell-main strong {
+  color: var(--fs-brand);
+}
+
+.ht-table tbody tr.ht-row .ht-cell-main strong {
+  transition: color 120ms ease;
+}
+
 .ht-cell-main strong {
   display: block;
   font-size: 13px;
@@ -531,10 +546,45 @@ button {
   vertical-align: middle;
 }
 
+/* 组织共享会话 —— 与「来自飞书对话」同为角标, 但刻意用**灰**而不是蓝: 它标的是限制
+   (发不出消息), 不是身份。涂成醒目色反而会让人以为那是个可以点的入口。 */
+.ht-badge-ro {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: #f0f2f5;
+  color: #6b7280;
+  font-size: 0.72rem;
+  vertical-align: middle;
+}
+
+/* 只读会话的输入区替代品: 占住输入框那块位置, 免得界面看起来「少了什么」 */
+.focus-chat-readonly {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid #e6e9ef;
+  border-radius: 12px;
+  background: #f7f8fa;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.focus-chat-readonly svg {
+  flex: none;
+  color: #9aa3af;
+}
+
 .ht-card-hint {
   margin: 0.4rem 0 0;
   color: #8a6d3b;
   font-size: 0.78rem;
+
   line-height: 1.5;
 }
 
@@ -682,6 +732,18 @@ button {
 .ht-pill.warn {
   background: #fff3e0;
   color: #b26a00;
+}
+
+/* 运行中 —— 蓝, 与「已完成」的绿、「待处理」的橙都分开: 它说的是「正在干活」, 不是结果。 */
+.ht-pill.running {
+  background: #e8f1ff;
+  color: #2b5fa8;
+}
+
+/* 待开始 —— 比中性色更淡: 它标的是「还没动」, 不该和「进行中」抢注意力。 */
+.ht-pill.idle {
+  background: #f2f3f5;
+  color: #8a9099;
 }
 
 /* ---------- chat view ---------- */
@@ -3202,22 +3264,55 @@ button {
   justify-content: flex-end;
 }
 
+/* 遮罩: 压暗 + 轻微虚化, 与 C 端 `.drawer-backdrop` 同一手法(那层 rgba 只负责「这不是当前
+   一屏」, 真正把预览与页面分开的是抽屉自己的不透明底色)。 */
 .preview-scrim {
   position: absolute;
   inset: 0;
   border: 0;
   background: rgba(17, 25, 38, 0.35);
+  backdrop-filter: blur(3px);
   cursor: default;
+  animation: preview-fade-in 220ms ease both;
 }
 
-.file-preview.preview-drawer {
+/*
+ * 侧边预览抽屉 —— **不透明**、贴右边、整高。
+ *
+ * 这里曾经写作 `.file-preview.preview-drawer`: 选择器要求 ``file-preview`` 这个类, 而两个
+ * 组件(ArtifactDrawer / DeliveryPreviewModal)render 的都是 ``preview-drawer``(+``wide``),
+ * 于是整条规则**一条都没命中** —— 抽屉没有底色、没有宽度, 变成一块半透明浮在页面上、页面
+ * 文字从里面透出来的东西(实测截图确认)。规则挂在**实际在用的类**上, 别再顺手加前缀:
+ * 类名对不上时 CSS 不报错, 只是安静地不生效。
+ */
+.preview-drawer {
   position: relative;
-  width: min(720px, 92vw);
   height: 100%;
+  width: min(720px, 92vw);
   display: flex;
   flex-direction: column;
   background: #fff;
-  box-shadow: -12px 0 34px rgba(13, 27, 46, 0.22);
+  border-left: 1px solid rgba(16, 31, 43, 0.12);
+  box-shadow: -18px 0 44px rgba(13, 27, 46, 0.22);
+  animation: drawer-in 330ms cubic-bezier(0.22, 0.85, 0.24, 1) both;
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(102%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes preview-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .preview-drawer-header {
@@ -3876,6 +3971,168 @@ button {
   display: flex;
   flex-direction: column;
   background: #fbfcff;
+  /* 拖拽落点的覆盖层靠它定位(见 .focus-chat-dropzone)。 */
+  position: relative;
+}
+
+/* ---- 拖拽文件进输入框: 覆盖层 ---- */
+.focus-chat-dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  border: 2px dashed var(--fs-brand);
+  border-radius: 12px;
+  background: rgba(232, 241, 255, 0.86);
+  color: var(--fs-brand-deep);
+  font-size: 13px;
+  font-weight: 700;
+  /* 覆盖层只为提示, 不能吃掉 drop 事件 —— 事件挂在 .focus-chat-pane 上。 */
+  pointer-events: none;
+}
+
+/* ---- 排队发送: 输入框上方的芯片 ---- */
+.focus-chat-queued {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--fs-line);
+  border-left: 3px solid var(--fs-brand);
+  border-radius: 8px;
+  background: var(--fs-card-soft);
+  color: var(--fs-muted);
+  font-size: 12px;
+}
+
+.focus-chat-queued-label {
+  flex: none;
+  font-weight: 700;
+  color: var(--fs-ink);
+}
+
+/* 排队的正文可能很长 —— 截断而不是把输入区顶高。 */
+.focus-chat-queued em {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-style: normal;
+}
+
+.focus-chat-queued button {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fs-muted);
+  cursor: pointer;
+}
+
+.focus-chat-queued button:hover {
+  background: var(--fs-brand-soft);
+  color: var(--fs-brand-deep);
+}
+
+/* ---- 任务置顶按钮(与 .ht-row-delete 同尺寸, 并排不跳) ---- */
+.ht-row-pin {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fs-muted);
+  cursor: pointer;
+}
+
+.ht-row-pin:hover {
+  background: var(--fs-brand-soft);
+  color: var(--fs-brand-deep);
+}
+
+/* 已置顶: 品牌色 + 图标填色, 一眼能从一排灰图标里认出来。 */
+.ht-row-pin.is-pinned {
+  color: var(--fs-brand);
+  background: var(--fs-brand-soft);
+}
+
+.ht-row-pin.is-pinned svg {
+  fill: currentColor;
+}
+
+/* ---- 「顶部状态区是什么」的首次提示 ---- */
+.task-status-tip {
+  position: fixed;
+  z-index: 84;
+  width: 332px;
+  padding: 14px 16px 16px;
+  border: 1px solid rgba(0, 80, 173, 0.16);
+  border-radius: 14px;
+  background: var(--fs-card);
+  box-shadow: 0 18px 46px rgba(8, 24, 50, 0.2);
+}
+
+.task-status-tip-frame {
+  position: fixed;
+  z-index: 83;
+  pointer-events: none;
+  border: 1.5px solid rgba(51, 112, 255, 0.42);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.32);
+  box-shadow: 0 0 0 5px rgba(51, 112, 255, 0.1), 0 6px 18px rgba(0, 90, 190, 0.14);
+}
+
+.task-status-tip-arrow {
+  position: absolute;
+  top: -9px;
+  border-left: 9px solid transparent;
+  border-right: 9px solid transparent;
+  border-bottom: 9px solid var(--fs-card);
+}
+
+.task-status-tip h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--fs-ink);
+}
+
+.task-status-tip p {
+  margin: 0 0 12px;
+  color: var(--fs-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.task-status-tip button {
+  min-width: 88px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+  border: 1px solid var(--fs-brand-deep);
+  border-radius: 9px;
+  color: #fff;
+  background: var(--fs-brand);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.task-status-tip button:hover {
+  filter: brightness(1.05);
 }
 
 .focus-chat-scroll {
@@ -4154,14 +4411,10 @@ button {
 }
 
 /* ---------- 当前交付物抽屉布局 ---------- */
+/* 只覆盖宽度: 底色/边框/阴影/动画都在上面的 ``.preview-drawer`` 基线上, 不重复一份
+   (重复过的后果就是这次: 两处各写一半, 改一处另一处还留着旧样子)。 */
 .preview-drawer.wide {
-  position: relative;
   width: min(1000px, 96vw);
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: #fff;
-  box-shadow: -12px 0 34px rgba(13, 27, 46, 0.22);
 }
 
 .artifact-drawer-split {
@@ -4236,4 +4489,228 @@ button {
 .blob-preview-host .docx-preview-host,
 .blob-preview-host .pptx-preview-host {
   min-height: 360px;
+}
+
+/*
+ * 宝箱 / 导出对话历史 —— 两个都是居中模态。
+ *
+ * 与抽屉(``.ht-drawer``)分开: 抽屉跟的是「当前这条会话」, 这两个是**跨会话**的列表操作,
+ * 用模态把底下那层盖住, 免得用户在挑文件的同时误点到别的会话。
+ */
+.chest-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 22, 40, 0.38);
+}
+
+.chest-panel {
+  width: min(620px, 96vw);
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: 0 26px 60px rgba(10, 20, 40, 0.28);
+  overflow: hidden;
+}
+
+.chest-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--fs-line);
+}
+
+.chest-head strong {
+  display: block;
+  font-size: 16px;
+}
+
+.chest-head em {
+  display: block;
+  margin-top: 4px;
+  color: var(--fs-muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.chest-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--fs-line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--fs-muted);
+  cursor: pointer;
+}
+
+.chest-close:hover {
+  color: #17436e;
+  border-color: rgba(51, 112, 255, 0.35);
+}
+
+.chest-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 18px 16px;
+}
+
+.chest-empty {
+  margin: 18px 0;
+  color: var(--fs-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.chest-group + .chest-group {
+  margin-top: 14px;
+}
+
+.chest-group h4 {
+  margin: 8px 0 6px;
+  font-size: 12px;
+  color: #35506c;
+}
+
+.chest-group ul,
+.export-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.chest-group li,
+.export-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--fs-line);
+  border-radius: 10px;
+  background: #fbfcfe;
+}
+
+.chest-group li.is-new {
+  border-color: rgba(240, 173, 78, 0.55);
+  background: #fffaf1;
+}
+
+/* 只有文件名、拿不到路径的那种: 留在列表里可读, 但点不动。 */
+.chest-group li.is-untracked {
+  opacity: 0.6;
+}
+
+.chest-group label,
+.export-list label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.chest-group li.is-untracked label {
+  cursor: default;
+}
+
+.chest-file-name,
+.export-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.chest-new-badge,
+.export-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fff1d9;
+  color: #8a5a12;
+  font-size: 11px;
+}
+
+.export-badge {
+  background: #e8f1fb;
+  color: #17436e;
+}
+
+.export-list label em {
+  margin-left: auto;
+  flex: none;
+  color: var(--fs-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.chest-one {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--fs-line);
+  border-radius: 8px;
+  background: #fff;
+  color: #35506c;
+  cursor: pointer;
+}
+
+.chest-one:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.chest-error {
+  margin: 0 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fdecec;
+  color: #a12626;
+  font-size: 12px;
+}
+
+.chest-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--fs-line);
+}
+
+.chest-progress {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fs-muted);
+  font-size: 12px;
+}
+
+.chest-spin {
+  animation: chest-spin 0.9s linear infinite;
+}
+
+@keyframes chest-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

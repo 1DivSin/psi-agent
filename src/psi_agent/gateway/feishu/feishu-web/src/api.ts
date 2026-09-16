@@ -22,6 +22,13 @@ export interface SessionInfo {
   ai_id?: string;
   /** 是否 IM 里那条会话(``feishu-<open_id>``) —— 列表上打「来自飞书对话」角标。 */
   from_im?: boolean;
+  /**
+   * 组织共享的调度会话: 历史对所有登录用户可见, 但**只读**(发消息一律 403)。
+   *
+   * 后端下发的显示判据(见 ``_web_session_data``)。没有它的话, 这类会话在列表里与用户自己的
+   * 会话长得一模一样 —— 用户点进去打字, 发出去了才收到一句看不懂的拒绝(实测踩过)。
+   */
+  read_only?: boolean;
 }
 
 export interface HistoryMessage {
@@ -32,6 +39,11 @@ export interface HistoryMessage {
   tools?: Array<{ name: string; arguments?: string }>;
   sends?: string[];
   files?: Array<{ name: string; path?: string }>;
+  /**
+   * 整回合墙钟毫秒 —— JSONL 的 display-only 字段(``session/history_display.py`` 的
+   * ``THINKING_MS_KEY``), 由 session 层每回合写入, history 端点原样带出。
+   */
+  thinking_ms?: number;
 }
 
 export interface SessionTodo {
@@ -65,12 +77,6 @@ export interface TodoSegmentSummary {
 
 export interface TodoSegmentDetail extends TodoSegmentSummary {
   todos: SessionTodo[];
-}
-
-export interface WorkspaceFile {
-  name: string;
-  data: string;
-  path: string;
 }
 
 interface ApiError {
@@ -191,7 +197,9 @@ export async function createSession(backendId: string): Promise<SessionInfo> {
 }
 
 export async function deleteSession(id: string): Promise<void> {
-  await requestJson<unknown>(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+  // 带鉴权的对等物: 裸 ``DELETE /sessions/{id}`` 在云上被反代白名单挡着(它无鉴权),
+  // 表现是删除按钮点了没反应。后端那条另有一道硬闸 —— 与机器人共用那条不许删。
+  await requestJson<unknown>(`/feishu/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function getSessionHistory(id: string): Promise<HistoryMessage[]> {
@@ -212,8 +220,10 @@ export async function generateTitle(
   userText: string,
   assistantText: string,
 ): Promise<{ id: string; title: string }> {
+  // 同 setTitle: 裸 ``/titles/generate`` 无鉴权且在白名单外, 云上恒 404 → 列表里那条
+  // 会话永远是「未命名任务」。这条在服务端跑一次模型, 所以后端**先判归属**再生成。
   return requestJson<{ id: string; title: string }>(
-    "/titles/generate",
+    "/feishu/titles/generate",
     jsonPost({ id, user_text: userText, assistant_text: assistantText }),
   );
 }
@@ -223,18 +233,24 @@ export async function listSummaries(): Promise<Record<string, string>> {
 }
 
 export async function setTitle(id: string, title: string): Promise<void> {
-  await requestJson<unknown>("/titles", jsonPost({ id, title }));
+  await requestJson<unknown>("/feishu/titles", jsonPost({ id, title }));
 }
 
 // ---- todo (任务进度的数据源) -------------------------------------------
+//
+// **走带鉴权的 ``/feishu/`` 对等物, 不是裸 ``/sessions/...``**: 裸那三条在云端被反代
+// 白名单挡着(它们一行鉴权都没有, 不该放行), 于是网页应用的「任务进度 / 执行步骤 /
+// 当前阶段 / 历史子任务」在正式环境里恒为空 —— 表现就是左侧任务上下文永远停在
+// 「待继续」、进度恒为 0。带鉴权那条落在 ``/feishu/sessions/`` 前缀下, 该前缀本来
+// 就在白名单里。
 
 export async function getSessionTodos(sessionId: string): Promise<SessionTodosResponse> {
-  return requestJson<SessionTodosResponse>(`/sessions/${encodeURIComponent(sessionId)}/todos`);
+  return requestJson<SessionTodosResponse>(`/feishu/sessions/${encodeURIComponent(sessionId)}/todos`);
 }
 
 export async function listTodoSegments(sessionId: string): Promise<TodoSegmentSummary[]> {
   const data = await requestJson<TodoSegmentSummary[] | { value?: TodoSegmentSummary[] }>(
-    `/sessions/${encodeURIComponent(sessionId)}/todo-segments`,
+    `/feishu/sessions/${encodeURIComponent(sessionId)}/todo-segments`,
   );
   return asList(data);
 }
@@ -244,15 +260,70 @@ export async function getTodoSegment(
   segmentId: string,
 ): Promise<TodoSegmentDetail> {
   return requestJson<TodoSegmentDetail>(
-    `/sessions/${encodeURIComponent(sessionId)}/todo-segments/${encodeURIComponent(segmentId)}`,
+    `/feishu/sessions/${encodeURIComponent(sessionId)}/todo-segments/${encodeURIComponent(segmentId)}`,
   );
+}
+
+// ---- 交付物下载 / 对话历史导出（宝箱与导出用）---------------------------
+//
+// 两条都用 ``fetch`` 取回 **Blob** 再由前端触发保存, 而不是丢一个 ``<a href>`` 让浏览器
+// 直接导航: 勾选多个时要能逐个取、逐个存(没有打包需求就不引入 zip 依赖), 失败也能给出
+// 可读的错误, 而不是让用户对着一个静默下载的空白页。
+
+/** 取回一个交付物的字节。**只允许该会话历史里声明过的文件** —— 边界在后端。 */
+export async function fetchDeliverable(sessionId: string, path: string): Promise<Blob> {
+  const params = new URLSearchParams({ path });
+  const resp = await fetch(
+    `/feishu/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`,
+  );
+  if (!resp.ok) {
+    const data = (await resp.json().catch(() => ({}))) as ApiError;
+    throw new Error(data.error || `HTTP ${resp.status}`);
+  }
+  return resp.blob();
+}
+
+/** 取回一条会话的**原始** jsonl(磁盘上那份, 不是 /history 的投影行)。 */
+export async function fetchSessionHistoryFile(sessionId: string): Promise<Blob> {
+  const resp = await fetch(`/feishu/sessions/${encodeURIComponent(sessionId)}/export`);
+  if (!resp.ok) {
+    const data = (await resp.json().catch(() => ({}))) as ApiError;
+    throw new Error(data.error || `HTTP ${resp.status}`);
+  }
+  return resp.blob();
 }
 
 // ---- workspace ---------------------------------------------------------
 
-export async function readWorkspaceFile(path: string): Promise<WorkspaceFile> {
-  const params = new URLSearchParams({ path });
-  return requestJson<WorkspaceFile>(`/workspace/file?${params.toString()}`);
+/**
+ * 读交付物内容并转成 base64 —— **交付物预览**用。
+ *
+ * 为什么不再走 ``/workspace/file``: 那条归 desktop 面, 云上与调试隧道里都不在反代白名单内
+ * (恒 404), 而交付物抽屉的预览正是打它 —— 表现是「点开文件全 404」。这里走带鉴权的那条
+ * 对等路由(``/feishu/sessions/{id}/files``), 返回形状与 ``/workspace/file`` 的 ``data``
+ * 字段一致(base64), 于是 ``ArtifactFileBody`` 那套渲染(image / blob / markdown / text)
+ * 一行都不用改。
+ */
+export async function readDeliverable(sessionId: string, path: string): Promise<string> {
+  const blob = await fetchDeliverable(sessionId, path);
+  return blobToBase64(blob);
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取文件内容失败"));
+    reader.onload = () => {
+      const url = typeof reader.result === "string" ? reader.result : "";
+      const comma = url.indexOf(",");
+      if (comma < 0) {
+        reject(new Error("读取文件内容失败"));
+        return;
+      }
+      resolve(url.slice(comma + 1));
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 export async function revealWorkspacePath(path: string): Promise<{ path: string }> {

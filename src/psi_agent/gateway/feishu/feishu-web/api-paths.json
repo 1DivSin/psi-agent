@@ -43,13 +43,43 @@
       "source": "src/api.ts"
     },
     {
+      "method": "DELETE",
+      "path": "/feishu/sessions/{param}",
+      "source": "src/api.ts"
+    },
+    {
       "method": "POST",
       "path": "/feishu/sessions/{param}/chat",
       "source": "src/services/chatStream.ts"
     },
     {
       "method": "GET",
+      "path": "/feishu/sessions/{param}/export",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
+      "path": "/feishu/sessions/{param}/files",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
       "path": "/feishu/sessions/{param}/history",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
+      "path": "/feishu/sessions/{param}/todo-segments",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
+      "path": "/feishu/sessions/{param}/todo-segments/{param}",
+      "source": "src/api.ts"
+    },
+    {
+      "method": "GET",
+      "path": "/feishu/sessions/{param}/todos",
       "source": "src/api.ts"
     },
     {
@@ -63,38 +93,13 @@
       "source": "src/api.ts"
     },
     {
-      "method": "DELETE",
-      "path": "/sessions/{param}",
-      "source": "src/api.ts"
-    },
-    {
-      "method": "GET",
-      "path": "/sessions/{param}/todo-segments",
-      "source": "src/api.ts"
-    },
-    {
-      "method": "GET",
-      "path": "/sessions/{param}/todo-segments/{param}",
-      "source": "src/api.ts"
-    },
-    {
-      "method": "GET",
-      "path": "/sessions/{param}/todos",
+      "method": "POST",
+      "path": "/feishu/titles",
       "source": "src/api.ts"
     },
     {
       "method": "POST",
-      "path": "/titles",
-      "source": "src/api.ts"
-    },
-    {
-      "method": "POST",
-      "path": "/titles/generate",
-      "source": "src/api.ts"
-    },
-    {
-      "method": "GET",
-      "path": "/workspace/file",
+      "path": "/feishu/titles/generate",
       "source": "src/api.ts"
     },
     {

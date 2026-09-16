@@ -36,7 +36,7 @@ from anyio.abc import TaskGroup
 
 from psi_agent.gateway.feishu import _routes
 from psi_agent.gateway.feishu._auth import FeishuAuth, Identity
-from psi_agent.gateway.feishu._routes import SID_COOKIE, register_feishu_routes
+from psi_agent.gateway.feishu._routes import ORG_SESSION_READ_ONLY, SID_COOKIE, register_feishu_routes
 from psi_agent.gateway.server import create_core_app
 from psi_agent.runtime._ai_manager import AIManager
 from psi_agent.runtime._session_manager import SessionManager
@@ -204,6 +204,14 @@ async def test_org_session_history_is_readable_but_chat_is_read_only(
 
     判定按 workspace 配置 (``PSI_SEED_SCHEDULES_WORKSPACE``) 而非固定 session id:
     换个未配置的 workspace 同名会话立刻回到「普通调度会话 → 隐藏」语义。
+
+    2026-09-16 产品决定: 这类会话**不进任务列表**(它在网页应用里只能只读查看、没有标题,
+    和用户自己的任务混在一排只有干扰 —— 实测反馈「感觉没有什么用」)。所以这里改成断言
+    「列表里没有它」+「历史仍可读」+「chat 仍 403」: 隐藏不等于放开, 两条判定同源。
+
+    文案断言到**具体那句话**, 因为它是给用户看的: 它会原样显示在对话底部的错误条里。
+    写成 ``org session is read-only`` 那种英文时, 用户不知道自己该做什么(实测有人把它当成了
+    「新建的对话坏了」)。
     """
     tg = anyio.create_task_group()
     await tg.__aenter__()
@@ -223,13 +231,28 @@ async def test_org_session_history_is_readable_but_chat_is_read_only(
             ) as resp:
                 assert resp.status == 200
                 assert await resp.json() == []
+            # **不进列表**: 两个身份都一样(它不是按身份算的, 而是根本不该出现在网页应用里)。
+            async with http.get(f"{fx.base_url}/feishu/sessions", cookies=fx.ck_a) as resp:
+                a_ids = {r["id"] for r in await resp.json()}
+            assert "scheduler-org-meeting" not in a_ids, (
+                "组织共享会话又出现在任务列表里了 —— 它在网页应用里只能只读查看、没有标题, "
+                "和用户自己的任务混在一排只有干扰。"
+            )
+            async with http.get(f"{fx.base_url}/feishu/sessions", cookies=fx.ck_b) as resp:
+                b_ids = {r["id"] for r in await resp.json()}
+            assert "scheduler-org-meeting" not in b_ids
+            # 隐藏 ≠ 放开: 拿到 id 也写不进去。
             async with http.post(
                 f"{fx.base_url}/feishu/sessions/scheduler-org-meeting/chat",
                 json=CHAT_BODY,
                 cookies=fx.ck_a,
             ) as resp:
                 assert resp.status == 403
-                assert (await resp.json())["error"] == "org session is read-only"
+                message = (await resp.json())["error"]
+            assert message == ORG_SESSION_READ_ONLY
+            assert "组织共享任务" in message and "新建任务" in message, (
+                "只读文案必须是给用户看的、且告诉他下一步该做什么 —— 它会长在对话底部的错误条上。"
+            )
     finally:
         with anyio.CancelScope(shield=True):
             await sm.delete("scheduler-org-meeting")

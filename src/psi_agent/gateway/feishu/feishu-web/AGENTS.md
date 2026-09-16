@@ -24,8 +24,32 @@
    `FeishuManager.workspace_for(open_id)` 派生, **前端不传 workspace**。
 2. **IM 那条 session 在网页里正常显示、可续聊**, 打「来自飞书对话」角标, 双向可见。上下文
    将满的提示只挂在这一条上 (只有它会一直长)。
+   - **它显示成「海豚一号」, 不是「未命名任务」。** 这条 session 就是与机器人对话本身
+     (`feishu-<open_id>`), 身份固定, 不该跟着生成式标题走; 后端对它没有标题, 原先落到
+     「未命名任务」, 列表里看不出它是谁。名字由 `taskModel.IM_SESSION_TITLE` **单点**给出,
+     列表与顶栏都走 `displayTitle()` —— 两处各判一次 `from_im` 的话必然有一处先漏, 表现是
+     同一个会话在列表和顶栏显示两个名字。
+   - **它不可删除。** 删掉等于把机器人那侧的上下文一起扔掉, 而用户在 IM 里还会继续用到它。
+     `tasks-view.tsx` 的两个删除入口(列表行内、详情面板)都对 `fromIm` 加闸。**这是显示层
+     的闸, 不是硬闸** —— 底下的 `DELETE /sessions/{id}` 是骨架路由, 按约定语义一字不改
+     (ToC 在用), 所以直打接口仍能删; 要硬闸得新开一条带鉴权的 `/feishu/...` 删除路由, 那是
+     另一件事。
 3. **第一版只做私聊**, 群聊 session (`feishu-chat-*`) 不显示。过滤精确到只滤群聊 ——
    用 `!startsWith('feishu-')` 会把私聊一起滤掉, 与决定 2 冲突。
+
+## 品牌标: 只走 `brandMark()`, 不要自绘
+
+侧栏左上角那个标**必须**用 `brandMark("sidebar")`(→ `.brand-logo-art` → 海豚 PNG)。它原先
+是 `desktop-shell.tsx` 里的 `<span className="ht-app-mark" />`, 样式是一个蓝绿渐变方块
+(`linear-gradient(135deg, #3370ff, #12a594)`)—— 与页面其余位置的品牌标不一致, 在飞书客户端
+里看起来就是「图标不对」。色块那条规则已删, 别加回来。
+
+尺寸在 `.brand-logo-sidebar`(36px, 沿用色块原来的尺寸, 免得侧栏布局跟着挪)。图片 URL 写在
+`.brand-logo-art` 里, 是 `/haitun-dolphin.png` —— **Vite 会按 `base` 改写成
+`/feishu-web/haitun-dolphin.png`**, 所以两种写法都能用, 但别手写成 `../` 之类相对路径。
+
+判据: `tests/psi_agent/gateway/test_feishu_web_im_session_ui.py`(静态核对上面三处 + 品牌标,
+删任一条即红)。
 
 ## 模型: 用机器人那一个, 网页应用不选
 
@@ -114,6 +138,32 @@ AI 落进 `$DEV_APPDATA/state/latest.json` 后就**持久**了 —— 之后每�
 
 **跨身份隔离在真实飞书环境下的表现本地测不到** —— 那要真 open_id、真 `tt.requestAccess` 换回
 来的 code、真容器拓扑。本地能验的只有用例层面那三条。
+
+### 云上不再打裸路由了(2026-09-16 收口)
+
+前端现在**只打 `/feishu/` 前缀下的路由**(`api-paths.json` 里除两条 `desktop` 面的
+`/workspace/*` 之外全是 `/feishu/`)。骨架的裸路由一条都不再走 —— 它们在云上既过不了白名单
+(静默 404), 又一行鉴权都没有:
+
+| 前端原来在打 | 云上表现 | 现在的对等物 |
+| --- | --- | --- |
+| `GET /sessions/{id}/todos` · `/todo-segments` | 进度/步骤恒空 | `GET /feishu/sessions/{id}/…`(只读一族) |
+| `POST /sessions/{id}/chat` | 不可达 | `POST /feishu/sessions/{id}/chat`(SSE) |
+| `POST /titles` · `POST /titles/generate` | 列表里永远是「未命名任务」 | `POST /feishu/titles` · `/feishu/titles/generate` |
+| `DELETE /sessions/{id}` | 删除按钮点了没反应 | `DELETE /feishu/sessions/{id}` |
+
+三条写路由共用 `_authorize_owned()` / `_authorize_session(write=True)` 那一份判定(身份 401 →
+存在性 404 → 归属 403 + 组织共享会话只读)。**删除另有一道硬闸**: 与机器人共用那条不许删, 由
+后端按 `fm.session_id_for(identity.open_id)` 判 —— 前端藏按钮只是显示层的闸, 直打接口照样能删,
+而判据**不能**改成读前端传来的 `from_im`(那等于让调用方自己声明自己有没有权限)。
+
+`POST /feishu/titles/generate` 在服务端跑一次模型, 所以它是这一族里除 chat 之外唯一**会产生
+费用**的路由, 归属校验必须发生在生成之前。它同时是白名单里新加的一条**精确路径**(`titles` 那
+条是精确匹配, 不给它加前缀 —— 加了会把将来任何标题路由一并放出去)。
+
+`/workspace/file` 仍是唯一的例外: 它是 desktop 面的路由(交付物抽屉里的**预览**在用), 云上
+`launch-gateway.sh` 只挂 `--gateway feishu`, 那条既不注册也不在白名单里。下载与预览要用带鉴权
+那条(`/feishu/sessions/{id}/files?path=`)得把 session id 传到抽屉里 —— 那是另一轮的事。
 
 ## 常用命令
 
@@ -223,6 +273,32 @@ gateway 容器。本地是浏览器 → vite dev server(proxy) → gateway, **�
 | 挂了哪几面 | 文档里的起法是 `--gateway feishu` **单挂** | `launch-gateway.sh` **两面全挂** | 能验, 但**默认起法与云上不同**, 见下面那条 |
 | 跨身份隔离 | 造不出第二个身份(旁路只认一个环境变量) | 真实多用户 | **不能**, 靠 `test_feishu_identity.py` + 云上真机 |
 
+### 会话级只读一族走 `/feishu/sessions/{id}/…`, 不打骨架的裸路由
+
+任务进度、历史子任务、交付物下载、对话历史导出这四件事, 前端打的是**带鉴权的对等物**
+(`_routes.py` 里的 `_web_todos` / `_web_todo_segments` / `_web_todo_segment` /
+`_web_download_file` / `_web_export_history`), 不打骨架的 `/sessions/{id}/todos` 那一族。
+标题与删除那三条写路由同理, 见下面「云上不再打裸路由了」。
+
+两条理由, 任一条都足够:
+
+- **云上**那几条不在 `oauth-proxy.py` 的 `ALLOWED_PATHS` 里, 恒 404(而前端只显示一个
+  笼统的失败)。表现是左侧任务上下文永远停在「待继续」、进度恒 0。
+- **本地**它们一行鉴权都没有 —— 下载那条与 `/workspace/file` 一样能按任意路径读服务器上的
+  文件。对等物走 cookie 身份 + 归属校验, 且落在**已在白名单里的** `/feishu/sessions/`
+  前缀下, 所以加这几条**不需要动 oauth-proxy**。
+
+下载(`/feishu/sessions/{id}/files?path=`)的边界是**那条会话自己在 history 里声明过的文件**
+(`sends` / `recvs` / `files[].path`), 不是"落在 workspace 下" —— 交付物完全可能落在 workspace
+之外(agent 写到别的目录、用户上传的附件被 channel 下到 `~/Downloads/.psi/`)。归属校验 +
+这份白名单已经封住了越权面。行为判据在 `tests/integration/test_feishu_web_peer_routes.py`
+(未登录 401 / 别人的 403 / 不存在 404 / 非本会话交付物 403 / 缺 `path` 400 / 导出与磁盘逐字节相同)。
+
+导出(`/feishu/sessions/{id}/export`)回的是磁盘上的**原始 jsonl**, 不是 `/history` 那种投影:
+投影丢了工具调用参数与 `thinking_ms`, 用户拿回去与原始记录对不上。前端那一侧对应
+「宝箱」(挑交付物下载)与「导出对话历史」(挑会话下 jsonl)两个入口 —— 它们**不是同一件事**,
+所以是两个按钮。
+
 ### `/workspace/*` 归 desktop 那面 —— 单挂时本地就 404
 
 `GET /workspace/file` 与 `POST /workspace/reveal`(交付物抽屉在打)的 handler 住在
@@ -245,7 +321,7 @@ psi-agent gateway --gateway desktop feishu --listen http://127.0.0.1:8765
 
 ## 路径清单: 挡「本地全通、云上全 404」
 
-前端会打的后端路径有一份**从源码提取**的清单: `api-paths.json`(20 条), 生成与消费都走
+前端会打的后端路径有一份**从源码提取**的清单: `api-paths.json`(22 条), 生成与消费都走
 `scripts/feishu_web_paths.py`。
 
 **不人手维护**是关键: 前端加一个端点没人会想起来更新清单, 而漂移的表现恰好就是云上 404。
@@ -264,7 +340,9 @@ python scripts/feishu_web_paths.py --print-shell > check-feishu-web-paths.sh
   不会去核对白名单的那条)。
 - 有人在**第三个文件**里直接 `fetch(` → 红。提取器只读 `src/api.ts` 与
   `src/services/chatStream.ts`, 多一个发请求的文件它不报错、只是少提一条: 清单齐全、测试
-  全绿、云上照旧 404。
+  全绿、云上照旧 404。判据匹配的是**调用形状**(`fetch(` / `new EventSource(` / `axios.`),
+  不是构造名本身 —— 本产品有个工具就叫 `fetch`, 进度文案表里写着字符串 `"fetch"`, 只认词
+  会让这条判据永远是红的噪音。
 
 **判据是路由存在性, 不是状态码为 200。** `/feishu/*` 一族未登录是 **401**, 写成 `== 200`
 会因为没带身份而假红; 拿哨兵 id 打 `/sessions/{id}/todos` 回的是 handler 自己判出的 404
@@ -315,6 +393,133 @@ FAIL 的行就是要和 `oauth-proxy.py` 的 `ALLOWED_PATHS` 逐条比对的路�
   时「app_id 为空 + 不在飞书客户端内」(正是本地开发的默认组合)抛的是普通 `Error`, 而
   `useAuth` 的退路只认 `FeishuAuthUnavailable`, 于是旁路整段被跳过, 页面停在「登录失败:
   后端未配置飞书 App ID」。只有这一个组合会踩, 所以它藏得住。
+
+## 流式渲染: 四处刻意为之的性能约束(勿"优化"回去)
+
+助手回复是**逐 delta 落到 `msg.text`** 的(见 `hooks/useChatTurn.ts` 的 `onText`), 而
+`ChatThread` 不做窗口化、`ChatMessageItem` 也没有 memo —— 那里的 props 全是内联回调, 每次
+渲染都是新引用, 加了 memo 也恒失效。于是「每个增量重渲染整棵树」是既定事实, 渲染侧**唯一**
+的防线只剩下面四处:
+
+- **`MarkdownBubble` 必须 `memo`, 且解析结果必须 `useMemo`**(`components/markdown.tsx`)。
+  memo 的作用是让**历史消息整条跳过**(它们的 `text` 没变)。没有它时, 每一轮增量都会把会话
+  里**每一条**助手消息重新解析一遍(marked + highlight.js + KaTeX), 开销 O(历史条数 × 平均
+  篇幅)。改回普通函数组件 = 长会话下主线程被打满, 表现是**页面操作卡顿** —— 飞书开发者后台的
+  远程调试工具还要在主线程上做元素拾取, 抢不到时间片。
+- **正在生长的那条用 `useDeferredValue`**: memo 挡不住它(`text` 每个 delta 都变), 而整篇
+  解析是同步的纯主线程开销, 「每 delta 全量重解析」在长回复下是 O(n²)。`useDeferredValue`
+  让 React 在繁忙时跳过中间值 —— 渲染结果不变, 只是可能慢半拍。**别为了让气泡"更跟手"把它删掉**。
+- **`renderMd.ts` 的 `highlightAuto` 必须带语言子集 `AUTO_LANGS`**: 不传子集时它会遍历
+  `highlight.js/lib/common` 全部 30+ 种语法、各扫一遍全文, 是解析里最贵的一步, 而流式期间
+  每个 delta 都要跑一遍。收窄**只影响着色**, 不影响内容渲染; 需要新语言就往 `AUTO_LANGS` 里加。
+- **贴底滚动合并到下一帧**(`chat-thread.tsx` 的 `requestAnimationFrame` + cleanup 里的
+  `cancelAnimationFrame`): 那个 effect 的依赖里有 `messages.at(-1)?.text`, 触发频率就是
+  delta 频率, 而 `scrollIntoView` 每次都强制一次布局。一帧最多滚一次。
+
+判据: `tests/psi_agent/gateway/test_feishu_web_stream_render.py`(静态核对上面四处, 删任一条即红)。
+
+**另注**: `ChatMessage.interimText` 是**死字段** —— 全库只有读、没有写(增量全写进 `text`)。
+`chat-message-item.tsx` 里那个 `interimText` 分支因此永不执行; 留着是为了不动无关代码。谁要
+清理它, 记得连带删掉 `types.ts` 的字段与 `chat-thread.tsx` 依赖数组里的那一项。
+
+## 与 ToC(spa-v2)对齐的功能: 移什么、不移什么
+
+2026-09-15 把 ToC 的**输入与任务体感**五项移植了过来。移植的是**功能**, 不是 ToC 的组件树 ——
+本文件开头说过, PR 版把 ToC 整棵组件树拷进来正是被去掉的「死重量」。
+
+**移过来的五项**(判据: `tests/psi_agent/gateway/test_feishu_web_tob_parity.py`):
+
+| 功能 | 文件 | 移植时的适配 |
+| --- | --- | --- |
+| 拖拽 / 粘贴文件进输入框 | `services/clipboardFiles.ts` · `services/composerFileDrop.ts` | 无(原样) |
+| 排队发送(回合中 Enter 攒一条, 回合结束自动发) | `services/queuedSend.ts` | 无(原样); 触发点从 ToC 的「卡片回合」改成 `turn.sending` 的**下降沿** |
+| 任务置顶 | `services/pinnedTasks.ts` | **不走 ToC 的 `appdataScope`** —— 见下 |
+| 思考耗时「思考过程 · N秒」 | `services/messageTiming.ts` | 数据源两处: 历史 `thinking_ms` + 本回合前端计时 |
+| 顶部状态区首次提示 | `components/task-status-tip.tsx` | 锚点改成 `.cend2-quick`; 「已看过」落 **localStorage** |
+
+### 两处刻意偏离 ToC(别改回去)
+
+- **置顶不按 appdata 分桶。** ToC 的 `appdataScope` 拿 `GET /defaults` 下发的 appdata 路径算指纹,
+  而 ToB 的 `/feishu/defaults` **只回 `{ai_id}`** —— 那个端点刻意不下发部署者的路径与凭证。
+  拿不到指纹就不分桶, 而这个顾虑在 ToB 侧本来也不成立: 网页应用的 origin 是部署域名(或固定端口的
+  `127.0.0.1:8848`), 不像 ToC 装机版那样每次启动换随机端口、把同一份记忆根拆成多个偏好桶。
+  **别为了「和 ToC 一致」去给 `/feishu/defaults` 加 appdata 字段** —— 那是把部署者信息下发给每个
+  B 端用户。
+- **提示的「已看过」落 localStorage**, ToC 用的是内存标记(每次刷新都再弹一遍)。ToB 是天天用的
+  业务页面, 每次刷新都弹会变成噪音。代价是清掉浏览器存储才会再看到这条提示。
+
+### 明确**不**移(产品决定, 见「三条产品决定」一节)
+
+模型配置页 / AI 列表 / 用户中心 / 登录 OTP / workspace 选择器 / 首次使用引导。ToB 是另一种产品:
+AI 由部署者用 `--feishu-ai-id` 定死、身份由飞书免登给定、workspace 由后端派生且前端不传。
+`test_feishu_web_tob_parity.py` 的最后一条判据就是「这些文件不许出现」—— 要把它们做进来, 那是新的
+产品决定, 不是「补功能」。
+
+## 任务总览: 四件事的结论(2026-09-16)
+
+判据在 `tests/psi_agent/gateway/test_feishu_web_task_overview.py`, 逐条对着这里的结论:
+
+- **首屏落在与机器人共用的那条会话上**, 且它在列表里排最前(`from_im` 优先; 用户自己置顶的
+  仍压过它)。用户从飞书工作台点进来, 想接着说的是刚才在 IM 里那句, 而 `list[0]` 常常是网页
+  新建的别的会话。
+- **新建对话不继承机器人那条的历史** —— 那是 bug, 不是设计。后端给新会话发新 uuid、写新
+  jsonl, 不复制任何东西; 前端 `useSessionHistory` 曾把上一次的结果留在 state 里, 切会话那一瞬
+  被铺进新会话, 而真正的空结果回来时又被 `messages.length > 0` 守卫挡住。修法是让历史行
+  **与它所属的会话 id 绑在一起存**(陈旧数据在结构上不可见), 不是靠 effect 先后。
+- **左下「任务上下文」的进度能到了** —— 根因是端点(见上一节), 另有两处同源毛病一并修了:
+  换会话时 `selectedSegment` 必须收回 `live`(否则面板一直停在只读历史态), 交付物列表要把
+  「本轮流式刚收到、还没写进 history」的那几个一起算(否则刚交付完的会话显示「0 份」而右侧
+  抽屉显示 1 份)。
+- **四个统计口径**都是真算出来的: 进行中 / 待处理 / 新交付物 / **本月执行**(本自然月跑过
+  todo 的会话数, 按会话去重 —— 口径写在 `taskModel.countMonthlyRuns`)。此前那一格写死
+  `"128"`, 而「导出」是个没有 `onClick` 的死按钮。
+- **宝箱 = 全部交付物**, 入口是**页头那颗图标**(`TreasureVisual`, 与对话顶栏、与 ToC 的
+  `TreasureButton` 同一个图标), 只给图标不写文字, 名字挂在 `title`/`aria-label` 的
+  「所有交付物」上。详情面板里**不再重复**一个「打开宝箱」按钮 —— 同一件事在一屏出现两次只会
+  让人犹豫点哪个(`tasks-view.tsx` 里 `onClick={onOpenChest}` 有且只有一处, 判据钉住)。
+- **组织共享会话在界面上是「只读」的**: 后端在 `/feishu/sessions` 里下发 `read_only`, 列表打
+  灰色角标「组织共享 · 只读」、隐藏删除按钮, 对话里把输入框整块换成一句说明。此前它在列表里
+  与用户自己的会话长得一模一样, 用户点进去打完字才收到一句 `org session is read-only`
+  —— 实测有人因此以为「刚新建的对话坏了」。后端的拒绝文案也换成了给用户看的中文
+  (`ORG_SESSION_READ_ONLY`), 并且**每次会话级拒绝都记一条 WARNING**(带 session id / open_id /
+  path): 403 那条路径不产生其它日志, 用户截图里只有一句文案时, 服务端必须有东西能对上号。
+
+- **任务上下文会跟着回合走**(2026-09-16): 回合进行中每 2.5 秒重拉那条会话的
+  `todos` / `todo-segments`(`useTasks.refreshOne`, 间隔与 C 端 `HaiTunAgentWorkspace` 的
+  todo 轮询一致), 按下发送时立刻拉一次。**不轮询的表现是「执行过程中一直待继续/0%, 做完才
+  跳成已完成」** —— 左侧面板只在挂载与回合结束时更新。
+- **状态与进度不只由 todo 决定**: 跑完一轮却没写过 todo 的会话(agent 直接回答/直接调工具)
+  `summary.total` 恒为 0, 旧实现把它读成「待开始/0%」。现在照 C 端 `taskProgress.ts` 的语义
+  另加两个前端信号 —— `streaming`(这条的 SSE 还在流)与 `turnSettled`(至少落定过一轮):
+  前者在列表上显示**运行中**(蓝色胶囊, 并从「进行中」筛选项里一起算), 后者让无 todo 的会话
+  显示**已完成 / 100%**。`turnSettled` 有两个来源取或: 本浏览器的回合信号(刷新即失)与
+  **历史里已有助手回复**(`historyDeliverables[id].replied`, 持久) —— 只靠前者, 刷新页面就会
+  退回「待开始」。
+- **交付物预览走带鉴权的对等路由**(`/feishu/sessions/{id}/files?path=`), 不再走
+  `/workspace/file` —— 那条归 desktop 面且在云上/调试隧道里不在白名单内, 表现是「点开文件
+  全 404」。`readDeliverable()` 返回 base64(与 `/workspace/file` 的 `data` 同形), 于是
+  `ArtifactFileBody` 的 image / blob / markdown / text 四条分支一行都不用改。session id 是
+  必填的(`ArtifactDrawer` / `DeliveryPreviewModal` 都接收它), 因为归属判定要用它。
+
+- **组织共享会话不进任务列表**(2026-09-16 产品决定): 后端在 `/feishu/sessions` 里就把
+  `is_org_session(...)` 的那些**过滤掉**。理由: 它在网页应用里只能只读查看 —— 不能发消息、
+  不能删、没有标题(显示成「未命名任务」), 永远停在「待开始/0%」, 却和用户自己的任务混在
+  同一排里; 组织级任务的产出由机器人以卡片发到飞书 IM, 那里才是它的入口。
+  **隐藏 ≠ 放开**: `_authorize_session` 里那条只读闸一字未改(直打深链仍是「历史可读、
+  写 403」), 两处用的是同一个 `is_org_session` 判据。`read_only` 字段与前端那套
+  (角标 + 关掉输入框 + 中文文案)因此变成**兜底**而不是死代码 —— 万一它从另一个入口露出来,
+  用户不该再次「打完字才收到一句拒绝」。
+
+- **任务行走双击打开**(2026-09-16): 单击仍是「选中 → 右侧详情跟着换」, 双击直接进对话。
+  此前「打开」只有详情面板里那个「继续对话」一个入口 —— 想进去得先点行、把视线挪到右侧、
+  再点一次, 而这一行的主要用途就是进去接着聊。行上挂 `title="双击打开对话"` 做提示。
+
+- **预览是贴着右边的实底侧栏**(与 C 端 `.artifact-drawer` 同一形态): 不透明、整高、带分隔
+  阴影、330ms 滑入, 遮罩压暗 + `backdrop-filter: blur(3px)`, 三条关闭路径(头部 X / 点遮罩 /
+  Esc)都在。**`styles.css` 里那条规则务必挂在组件实际 render 的类上** —— 它曾经写作
+  `.file-preview.preview-drawer`, 而组件 render 的是 `preview-drawer`(+`wide`), 于是整条规则
+  没命中: 没底色、没宽度, 预览变成一层能透出页面的浮层(实测截图)。CSS 不报错, 只是安静地
+  不生效。
 
 ## 两条容易踩的约定
 

@@ -18,14 +18,18 @@ A7: 与 ``desktop/_routes.py`` 同一个原因搬过来 —— 装配函数留�
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+import anyio
 from aiohttp import web
 from loguru import logger
 
+from psi_agent._appdata import appdata_history_path, resolve_appdata_root
 from psi_agent.gateway.feishu._auth import (
     AuthError,
     FeishuAuth,
@@ -37,12 +41,21 @@ from psi_agent.gateway.feishu._feishu_manager import FeishuManager
 from psi_agent.gateway.feishu._identity import is_org_session, owns_session, visible_sessions
 from psi_agent.gateway.feishu._jsapi import FeishuJsapiSigner, JsapiError
 from psi_agent.gateway.feishu._oauth_manager import OAuthRelay
-from psi_agent.gateway.server import _error, _json, _read_json, _serve_chat_sse, _session_data
+from psi_agent.gateway.server import (
+    _delete_session,
+    _error,
+    _json,
+    _read_json,
+    _serve_chat_sse,
+    _session_ai_socket,
+    _session_data,
+)
 from psi_agent.runtime._history_manager import HistoryManager
 from psi_agent.runtime._scheduler_manager import SchedulerManager
 from psi_agent.runtime._session_manager import SessionInfo, SessionManager
 from psi_agent.runtime._summary_manager import SummaryManager
 from psi_agent.runtime._title_manager import TitleManager
+from psi_agent.runtime._todo_manager import TodoManager
 
 
 async def _feishu_route(request: web.Request) -> web.Response:
@@ -288,23 +301,122 @@ def _require_identity(request: web.Request) -> Identity:
     return identity
 
 
-def _web_session_data(info: SessionInfo, *, from_im: bool) -> dict[str, Any]:
-    """骨架的 ``_session_data`` 再加一个 ``from_im`` —— 前端据此打「来自飞书对话」角标。
+class _AccessDeniedError(Exception):
+    """会话级路由的准入失败 —— ``status`` 就是该回的 HTTP 码, 由调用方 ``_error`` 出去。"""
 
-    角标本身是产品决定二: IM 里那条 session 在网页里正常显示、可续聊, 但用户要能看出
-    它与 IM 共通 (在里面发言 IM 侧也看得到)。
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+#: 组织共享会话的只读拒绝文案。
+#:
+#: 给**用户看**的: 它会被前端原样显示在对话底部。所以是中文、说的是「你能做什么」, 而不是
+#: 一句 ``org session is read-only`` 那种只有实现者看得懂的英文 —— 实测有人把它当成了
+#: 「新建的对话坏了」, 而真相是那条会话本来就不接受消息。
+ORG_SESSION_READ_ONLY = "这是组织共享任务, 只能查看历史, 不能在里面发消息。想继续做, 请点「新建任务」开一个自己的会话。"
+
+
+def _authorize_session(request: web.Request, *, write: bool = False) -> tuple[Identity, str, str]:
+    """路径参数版: 会话 id 取自 ``{session_id}``。判定体在 :func:`_authorize_owned`。"""
+    return _authorize_owned(request, request.match_info["session_id"], write=write)
+
+
+def _authorize_owned(request: web.Request, session_id: str, *, write: bool = False) -> tuple[Identity, str, str]:
+    """把「谁在问、问的是哪条会话、归不归他」一次判完 → ``(identity, session_id, workspace)``。
+
+    失败抛 :class:`_AccessDeniedError`, 每个 handler 只需三行把它映射成响应。
+
+    **三段顺序不能变** (与原先 ``_web_get_history`` 逐字一致): 身份 401 → 存在性 404 →
+    归属 403。反过来先判归属的话, 「不存在」与「不是你的」会糊成同一个状态, 前端分不出
+    「会话被删了」和「越权」。
+
+    ``write=True`` 额外拒绝组织共享调度会话 (只读): 任何人可读它的历史, 但任何人不得驱动
+    其中的工具。这条规则原先只写在 ``_web_chat`` 里 —— 抽出来是为了让**后加的**会话级
+    读写路由不可能漏掉它。
+
+    ``session_id`` 由调用方给而不是固定从 ``match_info`` 取: 标题那两条的 id 在 **body**
+    里(前端那侧的形状就是 ``{id, title}``), 而判定必须与路径参数版**完全同一份** ——
+    谁再写一遍谁就可能漏掉 ``write`` 那一步。
+
+    **拒绝一律记一条 WARNING**, 带上会话 id 与原因: 403 这条路径不产生任何其它日志, 用户
+    截图里只有一句错误文案时, 服务端这边必须有东西能对上号(实测踩过 —— 「新建对话报 org
+    session is read-only」查了半天才定位到是哪条会话)。**不记 cookie / 身份细节**: 记的是
+    open_id 与 session id, 与访问日志同级。
+    """
+    try:
+        identity = _require_identity(request)
+    except PermissionError as e:
+        logger.warning(f"[feishu] 会话级路由拒绝: 未登录 path={request.path}")
+        raise _AccessDeniedError(401, str(e)) from e
+    fm: FeishuManager = request.app["fm"]
+    sm: SessionManager = request.app["sm"]
+    try:
+        workspace = sm.get_workspace(session_id)
+    except LookupError:
+        logger.warning(f"[feishu] 会话级路由拒绝: 会话不存在 session={session_id!r} open_id={identity.open_id}")
+        raise _AccessDeniedError(404, f"Session '{session_id}' not found") from None
+    if write and is_org_session(session_id, workspace):
+        logger.warning(
+            f"[feishu] 会话级路由拒绝: 组织共享会话只读 "
+            f"session={session_id!r} open_id={identity.open_id} path={request.path}"
+        )
+        raise _AccessDeniedError(403, ORG_SESSION_READ_ONLY)
+    if not owns_session(identity.open_id, session_id, workspace, fm):
+        logger.warning(
+            f"[feishu] 会话级路由拒绝: 越权 session={session_id!r} open_id={identity.open_id} path={request.path}"
+        )
+        raise _AccessDeniedError(403, "forbidden")
+    return identity, session_id, workspace
+
+
+def _download_response(path: Path | str, *, filename: str = "") -> web.FileResponse:
+    """以附件形式回一个文件。
+
+    文件名**必须走 RFC 5987** (``filename*=UTF-8''…``): 交付物常是中文名 (「周会纪要.md」),
+    直接塞进 ``filename=`` 会让浏览器拿到乱码、有的干脆丢掉这个头, 用户下到的文件名就成了
+    路由里的那串。``ASCII`` 回退名给一个安全的兜底。
+    """
+    real = Path(path)
+    name = filename or real.name
+    ascii_fallback = name.encode("ascii", "ignore").decode("ascii") or "download"
+    disposition = f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+    return web.FileResponse(real, headers={"Content-Disposition": disposition})
+
+
+def _web_session_data(info: SessionInfo, *, from_im: bool) -> dict[str, Any]:
+    """骨架的 ``_session_data`` 再加 ``from_im`` / ``read_only`` 两个前端判据。
+
+    * ``from_im``: IM 里那条 session 在网页里正常显示、可续聊, 但用户要能看出它与 IM
+      共通(在里面发言 IM 侧也看得到)。
+    * ``read_only``: 组织共享的调度会话。它对所有登录用户**只读**(历史能看、消息不能发)。
+      2026-09-16 起这类会话**不进列表**(见 ``_web_list_sessions``), 所以这个标记在日常路径上
+      不会出现; 留着是因为它是「这条会话不能写」的唯一机器可读判据 —— 直打
+      ``/feishu/sessions/{id}/…`` 的调用方(深链、将来的入口)靠它把输入框关掉, 而不是让用户
+      打完字才吃一个 403。真正的闸在 ``_authorize_session(write=True)``, 与这个标记同源
+      (都走 ``is_org_session``)。
     """
     data = _session_data(info)
     data["from_im"] = from_im
+    data["read_only"] = is_org_session(info.id, info.workspace or "")
     return data
 
 
 async def _web_list_sessions(request: web.Request) -> web.Response:
-    """``GET /feishu/sessions`` —— 只回当前身份可见的私聊会话。
+    """``GET /feishu/sessions`` —— 只回当前身份**能干活**的会话(自己的私聊会话)。
 
     与骨架 ``GET /sessions`` 的关系: 骨架那条**语义一行不改**(ToC 的 spa-v2 在用), 本条
     是飞书链上单独包的一层。过滤在**服务端**做 —— PR 755 在浏览器里 filter, 那只是显示
     过滤, 谁都能直接打裸路由拿全量。
+
+    **组织共享的调度会话不进这个列表**(2026-09-16 产品决定, 实测反馈「感觉没有什么用」):
+    它在网页应用里只能只读查看 —— 不能发消息、不能删、没有标题(显示成「未命名任务」),
+    只能永远停在「待开始/0%」, 却和用户自己的任务混在同一排里。组织级任务的产出由机器人以
+    卡片发到飞书 IM, 那里才是它的入口。
+
+    **隐藏 ≠ 放开**: 归属判定一字未改, 直打 ``/feishu/sessions/{id}/…`` 仍然是「历史可读、
+    写入 403」(``is_org_session`` 那条闸还在 ``_authorize_session`` 里)。
     """
     try:
         identity = _require_identity(request)
@@ -314,7 +426,10 @@ async def _web_list_sessions(request: web.Request) -> web.Response:
     sm: SessionManager = request.app["sm"]
     bot_sid = fm.session_id_for(identity.open_id)
     rows = visible_sessions(identity.open_id, await sm.list_all(include_scheduler=True), fm)
-    return _json([_web_session_data(r, from_im=r.id == bot_sid) for r in rows])
+    # 组织共享的调度会话不进列表 —— 理由见 docstring。判定仍走 ``is_org_session`` 那一份,
+    # 于是「列表里看不到」与「写不进去」用的是同一个判据, 不会各说各话。
+    owned = [r for r in rows if not is_org_session(r.id, r.workspace or "")]
+    return _json([_web_session_data(r, from_im=r.id == bot_sid) for r in owned])
 
 
 async def _web_create_session(request: web.Request) -> web.Response:
@@ -357,23 +472,14 @@ async def _web_create_session(request: web.Request) -> web.Response:
 async def _web_get_history(request: web.Request) -> web.Response:
     """``GET /feishu/sessions/{id}/history`` —— 只给自己的会话, 会议会话例外公开只读。
 
-    别人的/群聊的 → 403 而非内容; 不存在的 → 404。先查存在性再判归属: 反过来会让
-    「不存在」与「不属于你」都返回 403, 前端分不出「会话被删了」和「越权」。
+    别人的/群聊的 → 403 而非内容; 不存在的 → 404。三段判定抽到了 ``_authorize_session``
+    (先存在性再归属: 反过来会让「不存在」与「不属于你」都返回 403)。
     """
     try:
-        identity = _require_identity(request)
-    except PermissionError as e:
-        return _error(str(e), status=401)
-    fm: FeishuManager = request.app["fm"]
-    sm: SessionManager = request.app["sm"]
+        _identity, session_id, workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
     hm: HistoryManager = request.app["hm"]
-    session_id = request.match_info["session_id"]
-    try:
-        workspace = sm.get_workspace(session_id)
-    except LookupError:
-        return _error(f"Session '{session_id}' not found", status=404)
-    if not owns_session(identity.open_id, session_id, workspace, fm):
-        return _error("forbidden", status=403)
     messages = await hm.get(workspace, session_id, appdata=str(request.app.get("appdata") or ""))
     return _json(messages)
 
@@ -386,34 +492,251 @@ async def _web_chat(request: web.Request) -> web.StreamResponse:
     公司表格、往飞书发消息。把裸的那条放上公网等于任何知道一个 session id 的人都能让公司
     agent 干活, 且不问他是谁。所以网页应用改打这条对等物, 裸的那条**行为一字不改**。
 
-    判定与 ``_web_get_history`` 共用 ``owns_session`` 和存在性检查, 但固定会议会话在这里
-    额外拒绝写入: 它只允许已登录用户读取历史, 不允许任何用户驱动调度工具。
-
-    **403 而不是 404**: 与 history 那条对齐是主因(前端拿到 404 会当「会话被删了」去刷列表,
-    越权时那个动作没有意义)。用 404 隐藏存在性在这里也换不到什么: session id 是本人 workspace
-    下派生的 uuid, 猜不出来; 而真·不存在已经占了 404, 再让越权也回 404 就把「会话被删」与
-    「不是你的」两种状态糊成一个, 前端分不出来。
-
-    正文交给骨架的 ``_serve_chat_sse``, **不复制 handler 体**: multipart 解析、SSE keepalive、
-    ``[DONE]`` 收尾都在那一份里。
+    判定与 ``_web_get_history`` 共用 ``_authorize_session`` (``write=True``), 后者已经把
+    「组织共享会话只读」一起判了 —— 从前那段只写在这个 handler 里, 后加的会话级写路由会漏。
     """
     try:
-        identity = _require_identity(request)
-    except PermissionError as e:
-        return _error(str(e), status=401)
-    fm: FeishuManager = request.app["fm"]
-    sm: SessionManager = request.app["sm"]
-    session_id = request.match_info["session_id"]
-    try:
-        workspace = sm.get_workspace(session_id)
-    except LookupError:
-        return _error(f"Session '{session_id}' not found", status=404)
-    if is_org_session(session_id, workspace):
-        # 组织共享调度会话只读: 允许所有人看历史, 不允许任何人驱动其中的工具。
-        return _error("org session is read-only", status=403)
-    if not owns_session(identity.open_id, session_id, workspace, fm):
-        return _error("forbidden", status=403)
+        _identity, session_id, _workspace = _authorize_session(request, write=True)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
     return await _serve_chat_sse(request, session_id)
+
+
+def _norm_path(value: Path | str) -> str:
+    """比较用的路径规范形: 展开 ``~``、解析相对段、Windows 下归一大小写。
+
+    与 ``_identity._same_path`` 同一个理由 —— 同一个文件在不同人手里可能写成
+    ``/x/y.md`` / ``/x/./y.md`` / ``C:\\X\\Y.MD``, 直接比字符串会漏判。
+    """
+    p = Path(value).expanduser()
+    with contextlib.suppress(OSError, RuntimeError):
+        p = p.resolve(strict=False)
+    return os.path.normcase(str(p))
+
+
+def _resolve_deliverable(raw: str) -> Path | None:
+    """``raw`` → 磁盘上真实存在的文件; 不存在 / 不是文件 → ``None``。
+
+    刻意是**同步**函数: 调用方是 async handler, 而 anyio.Path 那一套在这里换不到什么 ——
+    这是一次本地 stat, 与 ``_norm_path`` 同类。真要挪进线程就两处一起挪, 不做半套
+    (ruff 的 ASYNC240 只盯 async 函数体里直接调 ``Path`` 方法, 所以判定逻辑收在这里)。
+    """
+    try:
+        resolved = Path(raw).expanduser().resolve(strict=True)
+    except OSError, RuntimeError:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+async def _session_deliverable_paths(request: web.Request, session_id: str, workspace: str) -> set[str]:
+    """该会话历史上**声明过的交付物**绝对路径集合(规范化后)。
+
+    来源是 history 行的三处: ``sends``(``[SEND:]`` 解析出的绝对路径, agent 交付的)、
+    ``recvs``(``[RECV:]``, 用户自己传上来的)与 ``files[].path``(对象形态, 骨架的 desktop
+    投影会给, ToB 的 ``hm.get()`` 目前不给 —— 留着是为了哪天形状变了不必再改这里)。
+
+    输入附件也算: 用户自己传上来的文件, 用户当然有权再下回去。
+
+    **``recvs`` 不是可选项**: ``hm.get()`` 返回的行里根本没有 ``files`` 这个键(见
+    ``runtime/_history_manager.py``), 只读 ``files`` 会让「用户上传的附件」全都下不动。
+    """
+    hm: HistoryManager = request.app["hm"]
+    appdata = str(request.app.get("appdata") or "")
+    rows = await hm.get(workspace, session_id, appdata=appdata)
+    out: set[str] = set()
+    for row in rows:
+        # ``row`` 是 dict[str, object], 所以每层都显式判类型 —— ``row.get(k) or []`` 那样的
+        # 写法 ty 会报 not-iterable(object 未必可迭代), 而它是对的: 历史行的形状由
+        # ``_history_manager`` 决定, 这里不该假定。
+        for key in ("sends", "recvs"):
+            entries = row.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, str) and entry.strip():
+                    out.add(_norm_path(entry))
+        files = row.get("files")
+        if not isinstance(files, list):
+            continue
+        for entry in files:
+            if isinstance(entry, dict):
+                path = entry.get("path")
+                if isinstance(path, str) and path.strip():
+                    out.add(_norm_path(path))
+    return out
+
+
+async def _web_todos(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions/{id}/todos`` —— 骨架那条的**带鉴权对等物**。
+
+    为什么要有: 网页应用的「任务进度 / 执行步骤 / 当前阶段」全由这条驱动, 而骨架的
+    ``/sessions/{id}/todos`` 一行鉴权都没有、又在反代白名单之外 —— 正式环境里它恒 404,
+    表现是左侧任务上下文永远停在「待继续」、进度恒为 0。这里走 cookie 身份 + 归属校验,
+    且落在 ``/feishu/sessions/`` 前缀下(该前缀已在白名单), **不需要动 oauth-proxy**。
+
+    正文实现不复制: 依然是 ``todom.get()`` 那一份。
+    """
+    try:
+        _identity, session_id, workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    todom: TodoManager = request.app["todom"]
+    appdata = str(request.app.get("appdata") or "")
+    return _json(await todom.get(workspace, session_id, appdata=appdata))
+
+
+async def _web_todo_segments(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions/{id}/todo-segments`` —— 「历史子任务」列表(新的在前)。"""
+    try:
+        _identity, session_id, _workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    todom: TodoManager = request.app["todom"]
+    appdata = str(request.app.get("appdata") or "")
+    return _json(await todom.list_segments(session_id, appdata=appdata))
+
+
+async def _web_todo_segment(request: web.Request) -> web.Response:
+    """``GET /feishu/sessions/{id}/todo-segments/{segment_id}`` —— 单个分段(含 todos[])。"""
+    try:
+        _identity, session_id, _workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    todom: TodoManager = request.app["todom"]
+    segment_id = request.match_info["segment_id"]
+    appdata = str(request.app.get("appdata") or "")
+    seg = await todom.get_segment(session_id, segment_id, appdata=appdata)
+    if seg is None:
+        return _error(f"Todo segment '{segment_id}' not found", status=404)
+    return _json(seg)
+
+
+async def _web_download_file(request: web.Request) -> web.StreamResponse:
+    """``GET /feishu/sessions/{id}/files?path=`` —— 下载该会话的交付物(宝箱用)。
+
+    ``path`` 由前端从历史恢复, 是绝对路径。边界是**``_session_deliverable_paths`` 那份
+    白名单**: 只允许下载"这条会话自己声明发出来过的文件"。
+
+    **刻意不额外要求"落在 workspace 下"**: 会话共享 workspace, 而交付物完全可能落在
+    workspace 之外(agent 写到别的目录、用户上传的附件被 channel 下到 ``~/Downloads/.psi/``),
+    加这条会挡住正当下载; 而白名单已经把它限定在"本会话声明过的文件"上, 归属校验又把它
+    限定在"本人的会话"上 —— 越权面消失了, 所以不必再叠一层会误伤的判定。
+
+    刻意**不复用** desktop 面的 ``/workspace/file``: 那条只在挂载 desktop 时存在
+    (云端 ``launch-gateway.sh`` 只挂 ``--gateway feishu``), 而且它无鉴权、按任意路径读。
+    """
+    try:
+        _identity, session_id, workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    raw = (request.query.get("path") or "").strip()
+    if not raw:
+        return _error("path query parameter is required", status=400)
+    allowed = await _session_deliverable_paths(request, session_id, workspace)
+    resolved = _resolve_deliverable(raw)
+    if resolved is None:
+        return _error("file not found", status=404)
+    if _norm_path(resolved) not in allowed:
+        return _error("not a deliverable of this session", status=403)
+    return _download_response(resolved)
+
+
+async def _web_export_history(request: web.Request) -> web.StreamResponse:
+    """``GET /feishu/sessions/{id}/export`` —— 下载该会话的**原始** ``jsonl``。
+
+    给磁盘上那份文件, 而不是 ``/history`` 那种投影过的显示行: 用户要的是「对话历史文件」,
+    投影会丢掉工具调用参数、``thinking_ms`` 之类字段, 拿回去与原始记录对不上。
+
+    文件名固定 ``{session_id}.jsonl`` —— 它既是会话 id 也是磁盘上的文件名, 全程不拿用户
+    输入拼路径。``appdata_history_path`` 是 ``_history_manager`` 读同一份文件用的同一个助手,
+    不自己拼 ``histories/`` 这层目录。
+    """
+    try:
+        _identity, session_id, _workspace = _authorize_session(request)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    appdata = str(request.app.get("appdata") or "") or await resolve_appdata_root()
+    history = anyio.Path(appdata_history_path(appdata, session_id))
+    if not await history.is_file():
+        return _error("no history file for this session", status=404)
+    return _download_response(str(history), filename=f"{session_id}.jsonl")
+
+
+async def _web_set_title(request: web.Request) -> web.Response:
+    """``POST /feishu/titles`` —— 改**自己**会话的标题。
+
+    裸的 ``POST /titles`` 无鉴权且在白名单外, 云上恒 404 —— 表现是列表里那条会话永远是
+    「未命名任务」, 用户也没法给它改名。这里把 id 从 body 里取出来先判归属, 再走
+    ``tm.set`` 那一份(不复制实现)。
+
+    ``write=True``: 组织共享的调度会话对所有人只读, 谁都不能给它改名。
+    """
+    body = await _read_json(request) or {}
+    session_id = str(body.get("id") or "")
+    title = str(body.get("title") or "")
+    if not session_id or not title:
+        return _error("id and title are required", status=400)
+    try:
+        _identity, session_id, _workspace = _authorize_owned(request, session_id, write=True)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    tm: TitleManager = request.app["tm"]
+    await tm.set(session_id, title)
+    return _json({"id": session_id, "title": title})
+
+
+async def _web_generate_title(request: web.Request) -> web.Response:
+    """``POST /feishu/titles/generate`` —— 用首轮问答派生的标题(带归属校验)。
+
+    与 ``_web_set_title`` 同样是「先判归属再交给骨架那一份」, 区别是这里要在服务端跑一次
+    模型, 所以**它是这一族里除了 chat 之外唯一会产生费用的路由**: 归属校验不是可选项。
+    """
+    body = await _read_json(request) or {}
+    session_id = str(body.get("id") or "")
+    if not session_id:
+        return _error("id is required", status=400)
+    try:
+        _identity, session_id, _workspace = _authorize_owned(request, session_id, write=True)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    try:
+        ai_socket = await _session_ai_socket(request, session_id)
+    except LookupError as e:
+        return _error(str(e), status=404)
+    tm: TitleManager = request.app["tm"]
+    title = await tm.generate(
+        session_id,
+        ai_socket,
+        str(body.get("user_text") or ""),
+        str(body.get("assistant_text") or ""),
+    )
+    if not title:
+        logger.warning(f"Title generation returned no result for session {session_id!r}")
+        return _error("Failed to generate title", status=500)
+    return _json({"id": session_id, "title": title})
+
+
+async def _web_delete_session(request: web.Request) -> web.Response:
+    """``DELETE /feishu/sessions/{id}`` —— 删自己的会话(**硬闸**, 不只是前端隐藏按钮)。
+
+    裸的 ``DELETE /sessions/{id}`` 在云上被白名单挡着, 网页应用的删除按钮点了没反应。
+    这里补的是**带鉴权的对等物**, 正文交给骨架的 ``_delete_session``(会话/历史/todo/标题/
+    摘要五处一起清) —— 不复制那份实现。
+
+    比只读那一族多一条闸: **与飞书机器人共用的那条不许删**。它承载的是机器人那侧的同一份
+    上下文, 删掉等于把 IM 里的对话一起扔掉, 而用户还会在 IM 里继续用它 —— 前端本来就把
+    那条的删除按钮藏了, 但那只是显示层的闸, 直打接口照样能删。这里按会话 id 判(**不是**
+    按前端传来的 from_im): 同一条会话在前端是不是"来自飞书对话"由后端算, 判据必须同源,
+    否则改一个 body 字段就能绕过。
+    """
+    try:
+        identity, session_id, _workspace = _authorize_session(request, write=True)
+    except _AccessDeniedError as e:
+        return _error(e.message, status=e.status)
+    fm: FeishuManager = request.app["fm"]
+    if session_id == fm.session_id_for(identity.open_id):
+        return _error("the session shared with the Feishu bot cannot be deleted", status=403)
+    return await _delete_session(request)
 
 
 async def _web_owned_ids(request: web.Request) -> set[str]:
@@ -635,6 +958,22 @@ def register_feishu_routes(
     # —— 后者仍在, 行为一字不改。撞同 path 的后果见 ``register_auth_routes`` 里那段: aiohttp
     # 不报错, 各建一个 resource 由先注册者胜出, 表现是有效 cookie 反而拿 401。
     app.router.add_post("/feishu/sessions/{session_id}/chat", _web_chat)
+    # 会话级**只读**一族: 任务进度/历史子任务/交付物下载/对话历史导出。
+    #
+    # 为什么要有: 网页应用的左侧任务上下文与宝箱打的就是这几条, 而骨架的
+    # ``/sessions/{id}/…`` 对等物既在反代白名单之外(云上恒 404)、又一行鉴权都没有 ——
+    # 后者是硬伤: 下载那条与 ``/workspace/file`` 一样能读服务器上的文件。全部落在
+    # ``/feishu/sessions/`` 前缀下, 该前缀已在白名单里, **不需要动 oauth-proxy**。
+    app.router.add_get("/feishu/sessions/{session_id}/todos", _web_todos)
+    app.router.add_get("/feishu/sessions/{session_id}/todo-segments", _web_todo_segments)
+    app.router.add_get("/feishu/sessions/{session_id}/todo-segments/{segment_id}", _web_todo_segment)
+    app.router.add_get("/feishu/sessions/{session_id}/files", _web_download_file)
+    app.router.add_get("/feishu/sessions/{session_id}/export", _web_export_history)
+    # 会话级**写**一族(标题 / 生成标题 / 删除): 裸路由在云上被白名单挡着, 而它们都要先判
+    # 归属。删除那条另有硬闸: 与机器人共用那条不许删(见 handler 的说明)。
+    app.router.add_delete("/feishu/sessions/{session_id}", _web_delete_session)
+    app.router.add_post("/feishu/titles", _web_set_title)
+    app.router.add_post("/feishu/titles/generate", _web_generate_title)
     app.router.add_get("/feishu/titles", _web_list_titles)
     app.router.add_get("/feishu/summaries", _web_list_summaries)
     # ``/oauth/*`` 归本包(取件方全在 ToB 一侧), 但注册与 ``--gateway`` 解耦 —— 见

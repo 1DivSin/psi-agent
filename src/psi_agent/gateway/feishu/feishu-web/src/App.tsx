@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelLeftClose } from "lucide-react";
 import { generateTitle, getSessionHistory, revealWorkspacePath } from "./api";
 import { ArtifactDrawer } from "./components/artifact-drawer";
 import { ChatTopbar } from "./components/chat-topbar";
 import { ChatView } from "./components/chat-view";
 import { DesktopShell, type ShellNav } from "./components/desktop-shell";
+import { DeliverablesChest, type ChestItem } from "./components/deliverables-chest";
 import { DeliveryPreviewModal } from "./components/delivery-preview-modal";
+import { ExportHistoryDialog, type ExportableSession } from "./components/export-history-dialog";
 import { NewDeliveriesPanel } from "./components/new-deliveries-panel";
 import { NewTaskPage } from "./components/new-task-page";
 import { TaskFocusDetails } from "./components/task-focus-details";
+import { TaskStatusTip } from "./components/task-status-tip";
 import { TasksView } from "./components/tasks-view";
 import { useAuth } from "./hooks/useAuth";
 import { useChatTurn } from "./hooks/useChatTurn";
@@ -16,7 +19,18 @@ import { useSessionHistory, useSessions } from "./hooks/useSessions";
 import { useTasks } from "./hooks/useTasks";
 import { mapHistory } from "./services/historyMap";
 import { clearPendingDeliveries } from "./services/pendingDeliveries";
+import {
+  loadPinnedTaskIds,
+  prunePinnedTaskIds,
+  savePinnedTaskIds,
+  togglePinnedTaskId,
+} from "./services/pinnedTasks";
+import { buildQueuedSend, type QueuedSend } from "./services/queuedSend";
+import { displayTitle } from "./services/taskModel";
 import "./styles.css";
+
+/** 「顶部状态区都是什么」那条提示是否已经看过 —— 纯前端偏好, 用法见 AuthedApp。 */
+const STATUS_TIP_SEEN_KEY = "feishu-web:status-tip-seen";
 
 type View = "tasks" | "chat" | "new-task";
 
@@ -83,35 +97,64 @@ function AuthedApp({ userName }: { userName: string }) {
   const [input, setInput] = useState("");
   const [newDraft, setNewDraft] = useState("");
   const [creatingTask, setCreatingTask] = useState(false);
+  /** 建会话失败的原因 —— 显示在新建页上, 不让「点了发送没反应」这种情况静默过去。 */
+  const [createError, setCreateError] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [selectedSegment, setSelectedSegment] = useState("live");
   const [artifactTaskId, setArtifactTaskId] = useState("");
   const [artifactFile, setArtifactFile] = useState("");
   const [previewFile, setPreviewFile] = useState("");
   const [showNewDeliveries, setShowNewDeliveries] = useState(false);
+  const [showChest, setShowChest] = useState(false);
+  const [showExportHistory, setShowExportHistory] = useState(false);
   const [contextCollapsed, setContextCollapsed] = useState(false);
   const [historyDeliverables, setHistoryDeliverables] = useState<
-    Record<string, { files: string[]; paths: Record<string, string> }>
+    Record<string, { files: string[]; paths: Record<string, string>; replied?: boolean }>
   >({});
   const [deliveriesRevision, setDeliveriesRevision] = useState(0);
+  /** 置顶: 纯前端偏好(localStorage), 只影响排序与标记; 见 services/pinnedTasks.ts。 */
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => loadPinnedTaskIds());
+  /** 排队发送: 每个会话最多留一条待发消息, 本回合结束后自动发出。 */
+  const [queuedSends, setQueuedSends] = useState<Record<string, QueuedSend | null>>({});
 
   const sessions = useSessions();
-  const tasks = useTasks(sessions.sessions, sessions.titles, historyDeliverables);
   const history = useSessionHistory(sessions.currentId);
   const turn = useChatTurn(sessions.currentId);
+  /*
+   * 任务总览/任务上下文要**实时**信号才能显示「运行中」, 并在执行过程中更新步骤:
+   * `sendingSessionId` 让那条会话的 todo 每 2.5 秒重拉一次, `settledBySession` 让
+   * 没有 todo 的会话在跑完一轮后显示「已完成」而不是永远「待开始」。
+   */
+  const tasks = useTasks(sessions.sessions, sessions.titles, historyDeliverables, pinnedIds, {
+    sendingSessionId: turn.sendingSessionId,
+    settledBySession: turn.settledBySession,
+  });
+
+  // 走 ref 而不是直接读 state: 下面「回合结束就发排队那条」的 effect 只该在 sending 的
+  // **下降沿**触发, 不该因为排队状态本身变化而重跑。
+  const queuedSendsRef = useRef(queuedSends);
+  queuedSendsRef.current = queuedSends;
 
   // 任务总览/交付物抽屉需要的文件来自历史记录, 不能只依赖流式 blob 事件。
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const next: Record<string, { files: string[]; paths: Record<string, string> }> = {};
+      const next: Record<string, { files: string[]; paths: Record<string, string>; replied: boolean }> = {};
       await Promise.all(
         sessions.sessions.map(async (session) => {
           try {
             const rows = await getSessionHistory(session.id);
             const { messages, filePaths } = mapHistory(rows);
             const files = Array.from(new Set(messages.flatMap((m) => m.files || [])));
-            next[session.id] = { files, paths: filePaths };
+            /*
+             * ``replied`` = 历史里已经有一条**有内容**的助手回复。
+             *
+             * 任务总览用它把「跑完过一轮」与「从没动过」分开 —— 只读 todo 的话两者都是空的,
+             * 界面上一律「待开始/0%」, 而用户明明看着它干完活(实测反馈)。它**持久**: 刷新
+             * 页面、换设备都在, 而本浏览器的回合信号(settledBySession)只在这次会话里有效。
+             */
+            const replied = messages.some((m) => m.role === "assistant" && m.text.trim().length > 0);
+            next[session.id] = { files, paths: filePaths, replied };
           } catch {
             // 没有历史/接口失败时这一项保持缺省, 不影响任务列表本身。
           }
@@ -144,12 +187,78 @@ function AuthedApp({ userName }: { userName: string }) {
     () => tasks.tasks.find((t) => t.id === sessions.currentId),
     [tasks.tasks, sessions.currentId],
   );
+
+  /**
+   * 当前会话的显示名 —— **顶栏与对话区共用这一个**。
+   *
+   * 不直接用 ``currentTask?.title`` 兜底: 首屏 tasks 还没派生出来时会落空, 那时如果各自
+   * 写一个 ``|| "未命名任务"``, IM 共用那条会先闪一下「未命名任务」再变成「海豚一号」。
+   * 这里再走一次 ``displayTitle`` 同一个判据, 于是任何时刻都只有一个名字。
+   */
+  const currentTitle = useMemo(() => {
+    const session = sessions.sessions.find((s) => s.id === sessions.currentId);
+    return currentTask?.title || displayTitle(session, sessions.titles[sessions.currentId]);
+  }, [currentTask, sessions.sessions, sessions.currentId, sessions.titles]);
+  /**
+   * 当前会话**自己**那条记录 —— 只读这类判据取它而不是 ``currentTask``:
+   * 首屏 tasks 还没派生出来时 ``currentTask`` 是 undefined, 那时输入框会短暂地可编辑,
+   * 用户手快就撞上 403。会话列表一到就有值。
+   */
+  const currentSession = useMemo(
+    () => sessions.sessions.find((s) => s.id === sessions.currentId),
+    [sessions.sessions, sessions.currentId],
+  );
   const artifactTask = useMemo(
     () => tasks.tasks.find((t) => t.id === artifactTaskId),
     [tasks.tasks, artifactTaskId],
   );
   const newDeliveryTasks = useMemo(
     () => tasks.tasks.filter((t) => t.newDeliverables.length > 0),
+    [tasks.tasks],
+  );
+
+  /**
+   * 宝箱内容 —— 全部会话的交付物(存量, 含历史), 按会话分组在组件里做。
+   *
+   * 路径优先取历史恢复的那份(``historyDeliverables``), 当前会话再用流式里刚收到的路径兜底:
+   * 刚交付、还没来得及写进历史的文件只在流式那份里有 path, 少了这个兜底它就会出现在宝箱里
+   * 却点不动。两条都没有的文件保留在列表里、标记为不可下载 —— 见 ChestItem.path 的说明。
+   */
+  const chestItems = useMemo<ChestItem[]>(() => {
+    const out: ChestItem[] = [];
+    const seen = new Set<string>();
+    for (const task of tasks.tasks) {
+      const names = [...new Set([...task.files, ...task.newDeliverables])];
+      const newOnes = new Set(task.newDeliverables);
+      for (const name of names) {
+        const path =
+          historyDeliverables[task.id]?.paths[name] ??
+          (task.id === sessions.currentId ? turn.filePathOf(name) : undefined) ??
+          "";
+        const key = `${task.id}\u0000${path || name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          sessionId: task.id,
+          sessionTitle: task.title,
+          name,
+          path,
+          isNew: newOnes.has(name),
+        });
+      }
+    }
+    return out;
+  }, [tasks.tasks, historyDeliverables, sessions.currentId, turn.filePathOf]);
+
+  /** 导出对话历史用的列表 —— 会话列表本身就是服务端按身份过滤后的可见集。 */
+  const exportableSessions = useMemo<ExportableSession[]>(
+    () =>
+      tasks.tasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        fromIm: t.fromIm,
+        updated: t.updated,
+      })),
     [tasks.tasks],
   );
 
@@ -162,6 +271,19 @@ function AuthedApp({ userName }: { userName: string }) {
     [sessions],
   );
 
+  /*
+   * 换会话就把「正在看哪段历史子任务」收回当前清单。
+   *
+   * ``selectedSegment`` 全局只有一个 id, 而它属于**上一个**会话: 从任务总览里点另一条
+   * (``onSelect`` 直接是 ``setCurrentId``, 不走 ``openChat``)、或在新建页建好会话切进来时,
+   * 它不会被重置, 于是左侧面板一直停在只读的历史态 (``TaskFocusDetails`` 的 ``viewingHistory``),
+   * 表现就是「进度永远不会更新」。``openChat`` / ``createFromDraft`` 里也各重置了一次:
+   * 那两处是为了**当帧**就切回当前清单, 不必等这次 effect 跑完闪一下历史。
+   */
+  useEffect(() => {
+    setSelectedSegment("live");
+  }, [sessions.currentId]);
+
   const handleNewTask = useCallback(async () => {
     setView("new-task");
   }, []);
@@ -169,6 +291,7 @@ function AuthedApp({ userName }: { userName: string }) {
   const backToTasks = useCallback(() => {
     setView("tasks");
     setNewDraft("");
+    setCreateError("");
   }, []);
 
   const navigate = useCallback(
@@ -191,9 +314,15 @@ function AuthedApp({ userName }: { userName: string }) {
     const files = pendingFiles;
     if (!draft && !files.length) return;
     setCreatingTask(true);
+    setCreateError("");
     try {
-      const id = await sessions.create();
-      if (!id) return;
+      const { id, error } = await sessions.create();
+      if (!id) {
+        // 建会话失败**必须显示**: 否则用户看到的是「点了发送没反应」, 然后退回去在别的会话
+        // 里接着打字 —— 那正是落到只读的组织共享会话里的路径之一。
+        setCreateError(error || "新建会话失败, 请稍后重试。");
+        return;
+      }
       setNewDraft("");
       setPendingFiles([]);
       setSelectedSegment("live");
@@ -217,6 +346,32 @@ function AuthedApp({ userName }: { userName: string }) {
     }
   }, [newDraft, pendingFiles, sessions, tasks, turn]);
 
+  /**
+   * 真正把一条消息发出去, 并做首轮后的收尾(补标题 / 刷交付物 / 刷任务)。
+   *
+   * 抽出来是因为它有**三个**调用方: 手动发送、排队消息在回合结束后自动发出、以及将来
+   * 任何新的发送入口。三处各写一遍收尾必然有一处先漏 —— 最典型的是补标题漏了, 于是列表
+   * 里一直是「未命名任务」。
+   */
+  const sendNow = useCallback(
+    async (sessionId: string, text: string, files: File[]) => {
+      const assistantText = await turn.send(sessionId, text, files);
+
+      // 首轮结束后补标题, 否则列表里一直是「未命名任务」。
+      if (!sessions.titles[sessionId]) {
+        try {
+          const { title } = await generateTitle(sessionId, text, assistantText);
+          sessions.setTitles((prev) => ({ ...prev, [sessionId]: title }));
+        } catch {
+          // 标题生成失败不影响对话本身。
+        }
+      }
+      setDeliveriesRevision((n) => n + 1);
+      void tasks.refresh();
+    },
+    [turn, sessions, tasks],
+  );
+
   const handleSend = useCallback(async () => {
     const sessionId = sessions.currentId;
     if (!sessionId) return;
@@ -224,20 +379,89 @@ function AuthedApp({ userName }: { userName: string }) {
     const files = pendingFiles;
     setInput("");
     setPendingFiles([]);
-    const assistantText = await turn.send(sessionId, text, files);
+    await sendNow(sessionId, text, files);
+  }, [sessions.currentId, input, pendingFiles, sendNow]);
 
-    // 首轮结束后补标题, 否则列表里一直是「未命名任务」。
-    if (!sessions.titles[sessionId]) {
-      try {
-        const { title } = await generateTitle(sessionId, text, assistantText);
-        sessions.setTitles((prev) => ({ ...prev, [sessionId]: title }));
-      } catch {
-        // 标题生成失败不影响对话本身。
-      }
+  /** 回合进行中按 Enter: 攒成一条排队消息(同一会话只留最后一条, 后按的覆盖先按的)。 */
+  const handleQueue = useCallback(() => {
+    const sessionId = sessions.currentId;
+    if (!sessionId) return;
+    const next = buildQueuedSend(input, pendingFiles, "附件: ");
+    if (!next) return;
+    setQueuedSends((current) => ({ ...current, [sessionId]: next }));
+    setInput("");
+    setPendingFiles([]);
+  }, [sessions.currentId, input, pendingFiles]);
+
+  const cancelQueued = useCallback(() => {
+    const sessionId = sessions.currentId;
+    if (!sessionId) return;
+    setQueuedSends((current) => ({ ...current, [sessionId]: null }));
+  }, [sessions.currentId]);
+
+  // 回合结束时把排队那条发出去 —— 认 ``turn.sending`` 的**下降沿**, 只在 true→false 那一次动作。
+  // ``turn.sending`` 是**当前选中会话**的状态, 所以排队表也按当前会话取, 两者天然对齐。
+  const wasSendingRef = useRef(false);
+  useEffect(() => {
+    const wasSending = wasSendingRef.current;
+    wasSendingRef.current = turn.sending;
+    if (!wasSending || turn.sending) return;
+    const sessionId = sessions.currentId;
+    if (!sessionId) return;
+    const pending = queuedSendsRef.current[sessionId];
+    if (!pending) return;
+    // 先摘掉再发: 发送过程中若用户又按了一次 Enter, 那是**新的一条**, 不该被这次覆盖或吞掉。
+    setQueuedSends((current) => ({ ...current, [sessionId]: null }));
+    void sendNow(sessionId, pending.text, pending.files);
+  }, [turn.sending, sessions.currentId, sendNow]);
+
+  const togglePin = useCallback((id: string) => {
+    setPinnedIds((current) => {
+      const next = togglePinnedTaskId(current, id);
+      savePinnedTaskIds(window.localStorage, next);
+      return next;
+    });
+  }, []);
+
+  // 会话没了(用户删了或换了身份)就把它的置顶丢掉, 否则置顶表只增不减。
+  useEffect(() => {
+    const activeIds = sessions.sessions.map((s) => s.id);
+    setPinnedIds((current) => {
+      const next = prunePinnedTaskIds(current, activeIds);
+      // 没变就原样返回: 避免每次会话列表刷新都写一次盘、并多触发一轮重渲染。
+      if (next.length === current.length) return current;
+      savePinnedTaskIds(window.localStorage, next);
+      return next;
+    });
+  }, [sessions.sessions]);
+
+  /**
+   * 「顶部那片状态图标是什么」的首次提示。
+   *
+   * ToC 的判据是「是不是首次使用」+ **内存**标记(刷新页面就再来一次); ToB 这边没有首次
+   * 使用的判定, 而且这是个天天用的业务页面 —— 每次刷新都弹一遍会变成噪音, 所以标记落
+   * localStorage: 看过一次就不再弹(清掉存储才会再出现)。
+   */
+  const [statusTipVisible, setStatusTipVisible] = useState(false);
+  useEffect(() => {
+    if (view !== "chat") return;
+    try {
+      if (window.localStorage.getItem(STATUS_TIP_SEEN_KEY)) return;
+    } catch {
+      /* 隐私模式读不到存储: 当作没看过, 弹一次也无害 */
     }
-    setDeliveriesRevision((n) => n + 1);
-    void tasks.refresh();
-  }, [sessions, input, pendingFiles, turn, tasks]);
+    const timer = window.setTimeout(() => setStatusTipVisible(true), 450);
+    return () => window.clearTimeout(timer);
+  }, [view]);
+
+  const closeStatusTip = useCallback(() => {
+    setStatusTipVisible(false);
+    try {
+      window.localStorage.setItem(STATUS_TIP_SEEN_KEY, "1");
+    } catch {
+      /* 存不下就下次再弹, 不影响功能 */
+    }
+  }, []);
 
   const handleOpenFile = useCallback((name: string) => setPreviewFile(name), []);
   const handleReveal = useCallback((path: string) => {
@@ -271,6 +495,10 @@ function AuthedApp({ userName }: { userName: string }) {
       if (event.key !== "Escape") return;
       if (previewFile) {
         setPreviewFile("");
+      } else if (showChest) {
+        setShowChest(false);
+      } else if (showExportHistory) {
+        setShowExportHistory(false);
       } else if (showNewDeliveries) {
         setShowNewDeliveries(false);
       } else if (artifactTaskId) {
@@ -280,7 +508,7 @@ function AuthedApp({ userName }: { userName: string }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [previewFile, showNewDeliveries, artifactTaskId]);
+  }, [previewFile, showNewDeliveries, showChest, showExportHistory, artifactTaskId]);
 
   return (
     <DesktopShell nav={view === "tasks" ? "tasks" : "chat"} userName={userName} onNavigate={navigate}>
@@ -291,6 +519,7 @@ function AuthedApp({ userName }: { userName: string }) {
             tasks={tasks.tasks}
             filtered={tasks.filtered}
             counts={tasks.counts}
+            monthlyRuns={tasks.monthlyRuns}
             selected={currentTask}
             filter={tasks.filter}
             search={tasks.search}
@@ -298,9 +527,12 @@ function AuthedApp({ userName }: { userName: string }) {
             onSearch={tasks.setSearch}
             onSelect={sessions.setCurrentId}
             onDelete={(id) => void sessions.remove(id)}
+            onTogglePin={togglePin}
             onOpenChat={openChat}
             onOpenNewDeliverables={() => setShowNewDeliveries(true)}
             newDeliveryCount={newDeliveryTasks.length}
+            onOpenChest={() => setShowChest(true)}
+            onExportHistory={() => setShowExportHistory(true)}
             onNewTask={() => void handleNewTask()}
           />
         </>
@@ -309,6 +541,9 @@ function AuthedApp({ userName }: { userName: string }) {
           draft={newDraft}
           sending={creatingTask}
           pendingFiles={pendingFiles}
+          // 建会话失败时必须说出来 —— 此前这条路径是「点了发送没反应」, 用户会退回去在别的
+          // 会话里接着打字, 而那正是落到只读的组织共享会话里的路径之一。
+          error={createError || undefined}
           onDraft={setNewDraft}
           onBack={backToTasks}
           onSubmit={() => void createFromDraft()}
@@ -347,7 +582,7 @@ function AuthedApp({ userName }: { userName: string }) {
           )}
           <div className="focus-chat-col">
             <ChatTopbar
-              title={currentTask?.title || sessions.titles[sessions.currentId] || "未命名任务"}
+              title={currentTitle}
               sending={turn.sending}
               hasNewDeliveries={(currentTask?.newDeliverables.length ?? 0) > 0}
               taskIndex={taskIndex < 0 ? 0 : taskIndex}
@@ -362,7 +597,7 @@ function AuthedApp({ userName }: { userName: string }) {
             <ChatView
               messages={turn.messages}
               userName={userName}
-              taskTitle={currentTask?.title || sessions.titles[sessions.currentId] || "当前任务"}
+              taskTitle={currentTitle}
               input={input}
               sending={turn.sending}
               error={turn.error || history.error}
@@ -371,6 +606,12 @@ function AuthedApp({ userName }: { userName: string }) {
               onInput={setInput}
               onSend={() => void handleSend()}
               onStop={turn.stop}
+              queued={queuedSends[sessions.currentId] ?? null}
+              onQueue={handleQueue}
+              onCancelQueued={cancelQueued}
+              // 组织共享会话只读: 后端对它的写一律 403, 所以输入框整块换成一句说明,
+              // 而不是让用户打完字再吃一个错误(理由见 ChatView 里 readOnly 的注释)。
+              readOnly={currentTask?.readOnly ?? currentSession?.read_only ?? false}
               onAddFiles={(files) => setPendingFiles((prev) => [...prev, ...files])}
               onRemoveFile={(index) => setPendingFiles((prev) => prev.filter((_, idx) => idx !== index))}
               onFeedback={(index, kind) =>
@@ -413,8 +654,15 @@ function AuthedApp({ userName }: { userName: string }) {
         />
       )}
 
+      {showChest && <DeliverablesChest items={chestItems} onClose={() => setShowChest(false)} />}
+
+      {showExportHistory && (
+        <ExportHistoryDialog sessions={exportableSessions} onClose={() => setShowExportHistory(false)} />
+      )}
+
       {artifactTask && (
         <ArtifactDrawer
+          sessionId={artifactTask.id}
           taskTitle={artifactTask.title}
           files={[...new Set([...artifactTask.files, ...artifactTask.newDeliverables])]}
           filePathOf={(name) =>
@@ -433,11 +681,13 @@ function AuthedApp({ userName }: { userName: string }) {
 
       {previewFile && (
         <DeliveryPreviewModal
+          sessionId={sessions.currentId}
           name={previewFile}
           path={turn.filePathOf(previewFile)}
           onClose={() => setPreviewFile("")}
         />
       )}
+      {statusTipVisible && <TaskStatusTip onClose={closeStatusTip} />}
     </DesktopShell>
   );
 }
