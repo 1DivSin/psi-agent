@@ -1,6 +1,6 @@
 ---
 name: workflow
-description: Author, save, reuse, or run formal-language workflows defined by FusionFlow.g4. Use for saved workflow reuse by name, coordinated agents, Program Steps, Human checkpoints, parallel sub-tasks, or multi-step pipelines. Use the legacy flow skill only for explicit .flow.ts or Fuclaw compatibility work.
+description: Author, save, reuse, or run formal-language workflows defined by FusionFlow.g4. Use for saved workflow reuse by name, structured requests whose `workflow` or `method` field describes a workflow, coordinated agents, Program Steps, Human checkpoints, parallel sub-tasks, or multi-step pipelines. Use the legacy flow skill only for explicit .flow.ts or Fuclaw compatibility work.
 ---
 
 # Workflow
@@ -24,6 +24,7 @@ Activate this skill when the user:
 
 - Asks to run a G4 workflow they already have ("跑一下这个 / 帮我跑 / 执行"). This skill does **not** ship runnable demo examples; "run" always means a concrete workflow the user has.
 - Asks to save, list, load, or reuse a workflow declaration.
+- Provides a structured request whose `workflow` **or `method` field** contains a workflow description. Treat `method` as an alias of `workflow`: use the field value as workflow intent, enter the same authoring/reuse path, and create and run the workflow normally unless the user explicitly says not to execute it.
 - Mentions FusionFlow or agent-flow
 - **Describes any task that needs a multi-agent workflow or agent collaboration**, even without saying "flow" — e.g. "让几个 agent 分别审一遍再汇总", "并行跑 N 个子任务再合并", "一步接一步处理(先 A 再 B 再 C)", "多角度评审后汇总", "把这件事拆成多个 agent 协作". If the task clearly benefits from orchestrating more than one agent / parallel branches / a multi-step pipeline, enter **Authoring Mode** (below) and offer to build a flow.
 
@@ -108,6 +109,7 @@ Natural-language workflow requests map to these actions:
 | "有哪些保存的工作流 / list workflows" | List the fixed `flows/workflows/` directory with existing file tools. |
 | "加载 X / 看看保存的 X" | Read the saved `.workflow` or `.g4` file with existing file tools, preferring `.workflow` if both exist. |
 | "把刚生成的这个保存为 X" | After self-check, save the self-contained bundle at `flows/workflows/<slug>/`: one `.workflow` or `.g4` source file plus every referenced instruction Markdown file, preserving relative paths. |
+| Structured `workflow: ...` or `method: ...` field | Treat both keys identically as workflow intent. Resolve an existing saved workflow when the value clearly names one; otherwise enter Authoring Mode, create the G4 workflow, then execute it with `run_flow` unless execution was explicitly disabled. |
 | "跑一下这个 / 帮我跑 X / 执行这个 workflow" | Start the concrete workspace G4 source with `run_flow`; return outputs, or handle its Human request with `clarify`. |
 | "接着上次那个跑 / 只重跑改动的部分" | Use `run_flow_resume` only for the active Human request already returned in this conversation. Arbitrary cache/resume is unsupported; otherwise offer a fresh run. |
 | "看看结果 / 刚才那个跑完了吗" | Use the result already returned. A Human wait is not completion; wait for the user's answer rather than polling. |
