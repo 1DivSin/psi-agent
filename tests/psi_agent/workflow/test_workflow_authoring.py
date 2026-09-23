@@ -120,9 +120,39 @@ def test_skills_index_routes_workflow_only_after_explicit_opt_in(tmp_path: Path)
     workflow_entry = skills_index.split('<skill name="workflow"', 1)[1].split("/>", 1)[0]
     normalized = _normalized(workflow_entry)
 
-    assert "explicit workflow or multi-agent opt-in" in normalized
+    assert "method / method skill" in normalized
+    assert "user-facing alias" in normalized
+    assert "explicit workflow opt-in" in normalized
     assert "parallel sub-tasks" not in normalized
     assert "multi-step pipelines" not in normalized
+
+
+def test_method_alias_routes_to_workflow_in_system_skill_and_index(tmp_path: Path) -> None:
+    skill = _normalized(_SKILL_PATH.read_text(encoding="utf-8"))
+    system = _normalized(_SYSTEM_PATH.read_text(encoding="utf-8"))
+
+    for prompt in (skill, system):
+        assert "method" in prompt
+        assert "alias" in prompt
+        assert "there is no separate method skill" in prompt
+        assert "用 method 解决这个问题" in prompt
+        assert "method 一下这个任务" in prompt
+        assert "这个交给 method" in prompt
+        assert "use method for this" in prompt
+        assert "what method should i use?" in prompt
+
+    skill_dir = tmp_path / "skills" / "workflow"
+    skill_dir.mkdir(parents=True)
+    skill_dir.joinpath("SKILL.md").write_bytes(_SKILL_PATH.read_bytes())
+
+    system_module = _load_haitun_system()
+    system_module._GLOBAL_AGENT_SKILLS_DIR = anyio.Path(tmp_path / "global-skills")
+    skills_index = anyio.run(system_module._build_skills_index, anyio.Path(tmp_path))
+    workflow_entry = _normalized(skills_index.split('<skill name="workflow"', 1)[1].split("/>", 1)[0])
+
+    assert "method / method skill" in workflow_entry
+    assert "user-facing alias" in workflow_entry
+    assert "must route here" in workflow_entry
 
 
 def test_skill_keeps_verification_patterns_risk_scaled() -> None:

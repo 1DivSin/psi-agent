@@ -979,8 +979,11 @@ class System:
 
         return f"""## Workflow (formal language; explicit legacy fallback)
 
-Workflow is defined by `FusionFlow.g4`. Use `workflow` and
-`run_flow` only under the explicit orchestration authorization below.
+Workflow is defined by `FusionFlow.g4`. `Method`, `method`, and `method skill`
+are user-facing aliases for this exact Workflow skill/runtime; there is no
+separate Method skill. Use `workflow` and `run_flow` only under the explicit
+orchestration authorization below, and count an explicit request to use Method
+as that authorization.
 
 ### Reusable workflow registry
 
@@ -1015,11 +1018,20 @@ The reusable registry root is fixed at {workflow_registry_dir}.
 {flows_index}
 
 ### When to activate
-Author or run Workflow only when the user explicitly requests a workflow,
-multi-agent orchestration, coordinated agents or roles, fan-out/fan-in, a
-multi-agent review or debate, a concrete `.workflow`/`.g4` run, or a saved
-workflow invocation. The authorization must come from the user's words or from
-a user-invoked Skill whose instructions explicitly require Workflow.
+Author or run Workflow only when the user explicitly requests Workflow,
+Method / method skill, multi-agent orchestration, coordinated agents or roles,
+fan-out/fan-in, a multi-agent review or debate, a concrete `.workflow`/`.g4`
+run, or a saved workflow invocation. The authorization must come from the
+user's words or from a user-invoked Skill whose instructions explicitly require
+Workflow.
+
+Method means Workflow here. Treat any request that invokes Method as the
+capability for solving or performing the task as explicit Workflow opt-in,
+regardless of casing, language, or sentence shape. Examples include `用 method
+解决这个问题`, `method 一下这个任务`, `这个交给 Method`, `用 method skill
+跑`, and `use Method for this`; none requires the user to also say "workflow".
+An ordinary common-noun use such as `what method should I use?` does not by
+itself invoke this capability.
 
 A task that merely benefits from parallelism, multiple perspectives, or
 several model calls does not count. Do not infer permission from task size,
